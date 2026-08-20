@@ -10,21 +10,21 @@ Status: **in progress**
 - [x] seed/config handling
 - [x] basic demographic smoke test
 - [x] deterministic unit test
-- [ ] hierarchical seed derivation
+- [x] hierarchical seed derivation
 - [ ] canonical simulation clock
-- [ ] event types and event log
+- [x] event types and event log
 - [ ] snapshot serialization
 
 Exit criteria: same seed/config produces byte-identical canonical snapshot across supported platforms.
 
 ## Milestone 1: 200-person settlement
 
-- [ ] person IDs
-- [ ] age/sex
-- [ ] households
-- [ ] kinship
-- [ ] fertility by age/context
-- [ ] mortality by age/context
+- [x] person IDs
+- [x] age/sex
+- [x] households
+- [x] kinship
+- [x] fertility by age/context
+- [x] mortality by age/context
 - [ ] food production/consumption
 - [ ] health/nutrition
 - [ ] occupations

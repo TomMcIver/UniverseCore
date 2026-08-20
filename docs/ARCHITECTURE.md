@@ -55,6 +55,18 @@ UniverseSeed
 
 A future stable hashing API should derive child seeds from parent seed + typed identifier. This prevents unrelated generation order from changing existing content.
 
+Current implementation status:
+
+- strongly typed canonical seed (`SimulationSeed`)
+- explicit domain-tagged derivation (`SeedDomain`)
+- deterministic `derive_seed(parent, domain, stable_id)` using fixed-width integer mixing
+- scoped randomness decisions (for example person/fertility/year and person/mortality/year)
+
+Invariant:
+
+- canonical outcomes must depend on parent seed + domain + stable identifier/time
+- canonical outcomes must not depend on unrelated mutable RNG consumption order
+
 ## Canonical state
 
 Canonical reality consists of:
@@ -90,6 +102,14 @@ PlayerModifiedTerrain
 ```
 
 Not every frame-level physical interaction belongs in the historical event log. Store only information needed to reproduce canonical consequences or explain history.
+
+Current implementation status:
+
+- append-only canonical `event_log` in `WorldState`
+- stable deterministic `EventId` assignment
+- `Birth` and `Death` event emission from simulation state transitions
+- event payload includes simulation year timestamp and affected entity IDs
+- deterministic ordering derived from deterministic system update order
 
 ## Simulation LOD
 
@@ -147,6 +167,15 @@ Individual people for a 200-person village.
 
 ### Phase B
 Households + individual lifecycle, fertility, mortality, kinship and migration.
+
+Current implementation status:
+
+- deterministic person ID allocation
+- person birth year, sex and alive/dead state
+- household membership with stable household IDs
+- annual mortality by age band
+- annual fertility by age band with household-context father sampling
+- parent links on newborn creation
 
 ### Phase C
 Cohort aggregation for distant populations.

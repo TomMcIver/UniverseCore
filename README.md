@@ -6,17 +6,75 @@ The project deliberately starts without Unreal Engine. The initial objective is 
 
 ## Current milestone
 
-**Prototype 0: deterministic demographic smoke test**
+**Prototype 1 foundation: deterministic individual demographics**
 
 - C++23
 - Cross-platform CMake build
 - Stable custom PRNG
 - Seeded simulation
-- Population births/deaths
+- Stable person IDs
+- Individual birth year / age progression
+- Biological sex for demographic simulation
+- Alive/dead lifecycle
+- Parent relationships for newborns
+- Household membership
+- Age-dependent mortality/fertility
 - Reproducibility tests
 - No engine dependency
 
 ## Build
+
+## Canonical development environment (Podman)
+
+UniverseCore's canonical build/test environment is a Podman container using the repository's root `Containerfile`.
+
+Build the development image:
+
+```bash
+podman build -t universecore-dev -f Containerfile .
+```
+
+Run full build + tests (Windows/macOS):
+
+```bash
+podman run --rm \
+	-v "${PWD}:/workspace" \
+	-w /workspace \
+	universecore-dev \
+	./scripts/container-test.sh
+```
+
+Run full build + tests (SELinux-enabled Linux host):
+
+```bash
+podman run --rm \
+	-v "${PWD}:/workspace:Z" \
+	-w /workspace \
+	universecore-dev \
+	./scripts/container-test.sh
+```
+
+Run simulation with forwarded arguments:
+
+```bash
+podman run --rm \
+	-v "${PWD}:/workspace" \
+	-w /workspace \
+	universecore-dev \
+	./scripts/container-run.sh --seed 42 --years 100 --population 200
+```
+
+To print recent canonical simulation events from the run:
+
+```bash
+podman run --rm \
+	-v "${PWD}:/workspace" \
+	-w /workspace \
+	universecore-dev \
+	./scripts/container-run.sh --seed 42 --years 20 --population 200 --dump-events 10
+```
+
+Container builds write artifacts to `build/container` in the mounted repository.
 
 ### macOS / Linux
 

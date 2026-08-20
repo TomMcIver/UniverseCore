@@ -82,14 +82,23 @@ Do not prematurely introduce distributed systems, GPU kernels, databases, ECS fr
 
 - Language: C++23.
 - Build: CMake.
+- Canonical dev/test environment: Podman container via root `Containerfile` + `scripts/container-*.sh`.
 - Runtime dependencies: none until justified.
 - Prefer value types and explicit ownership.
 - No global mutable state.
+- Canonical simulation behaviour must not depend on mutable sequential RNG consumption order.
+- Derive scoped deterministic randomness from parent seed + explicit domain + stable identifier/time.
 - Simulation state changes should flow through explicit systems/events.
 - Every world-critical algorithm needs deterministic tests.
 - Every persisted schema will eventually require versioning and migrations.
 - Keep the headless executable working at all times.
 - New major subsystems require tests and documentation.
+
+## Container workflow
+
+- Do not assume host-installed compilers, CMake, Ninja, or platform SDKs.
+- Build/test/run through Podman by bind-mounting the repository into `/workspace`.
+- Use `build/container` as the default generated build directory.
 
 ## Immediate goal
 
