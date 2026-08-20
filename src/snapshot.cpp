@@ -192,14 +192,25 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
     payload.write_u64(simulation.state_.population);
     payload.write_u64(simulation.state_.total_births);
     payload.write_u64(simulation.state_.total_deaths);
+    payload.write_i64(simulation.state_.total_food_stored);
+    payload.write_i64(simulation.state_.total_food_produced);
+    payload.write_i64(simulation.state_.total_food_consumed);
+    payload.write_i64(simulation.state_.total_unmet_food);
+    payload.write_u64(simulation.state_.households_in_shortage);
+    payload.write_u64(simulation.state_.population_under_food_stress);
     payload.write_u64(simulation.next_person_id_);
     payload.write_u64(simulation.next_household_id_);
     payload.write_u64(simulation.next_event_id_);
     payload.write_i64(simulation.demography_interval_.ticks);
     payload.write_i64(simulation.demography_next_run_.ticks);
+    payload.write_i64(simulation.food_interval_.ticks);
+    payload.write_i64(simulation.food_next_run_.ticks);
     payload.write_u64(simulation.config_.seed);
     payload.write_u64(simulation.config_.initial_population);
     payload.write_bool(simulation.config_.enable_unrelated_random_probe);
+    payload.write_i64(simulation.config_.initial_household_food_units);
+    payload.write_u32(simulation.config_.food_production_scale_percent);
+    payload.write_bool(simulation.config_.food_system_enabled);
 
     std::vector<const Person*> people_order;
     people_order.reserve(simulation.state_.people.size());
@@ -239,6 +250,12 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
     payload.write_u64(static_cast<std::uint64_t>(household_order.size()));
     for (const auto* household : household_order) {
         payload.write_u64(household->id);
+        payload.write_i64(household->resources.food_inventory.value);
+        payload.write_i64(household->resources.food_produced_total);
+        payload.write_i64(household->resources.food_consumed_total);
+        payload.write_i64(household->resources.unmet_food_total);
+        payload.write_i64(household->resources.nutritional_stress_points);
+        payload.write_u32(household->resources.consecutive_shortage_days);
 
         std::vector<PersonId> member_ids = household->member_ids;
         std::sort(member_ids.begin(), member_ids.end());
@@ -344,6 +361,8 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     std::uint64_t next_event_id = 0;
     std::int64_t demography_interval_ticks = 0;
     std::int64_t demography_next_run_ticks = 0;
+    std::int64_t food_interval_ticks = 0;
+    std::int64_t food_next_run_ticks = 0;
 
     if (!payload_reader.read_u64(restored_state.seed) ||
         !payload_reader.read_i64(restored_state.time.ticks) ||
@@ -351,14 +370,25 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         !payload_reader.read_u64(restored_state.population) ||
         !payload_reader.read_u64(restored_state.total_births) ||
         !payload_reader.read_u64(restored_state.total_deaths) ||
+        !payload_reader.read_i64(restored_state.total_food_stored) ||
+        !payload_reader.read_i64(restored_state.total_food_produced) ||
+        !payload_reader.read_i64(restored_state.total_food_consumed) ||
+        !payload_reader.read_i64(restored_state.total_unmet_food) ||
+        !payload_reader.read_u64(restored_state.households_in_shortage) ||
+        !payload_reader.read_u64(restored_state.population_under_food_stress) ||
         !payload_reader.read_u64(next_person_id) ||
         !payload_reader.read_u64(next_household_id) ||
         !payload_reader.read_u64(next_event_id) ||
         !payload_reader.read_i64(demography_interval_ticks) ||
         !payload_reader.read_i64(demography_next_run_ticks) ||
+        !payload_reader.read_i64(food_interval_ticks) ||
+        !payload_reader.read_i64(food_next_run_ticks) ||
         !payload_reader.read_u64(restored_config.seed) ||
         !payload_reader.read_u64(restored_config.initial_population) ||
-        !payload_reader.read_bool(restored_config.enable_unrelated_random_probe)) {
+        !payload_reader.read_bool(restored_config.enable_unrelated_random_probe) ||
+        !payload_reader.read_i64(restored_config.initial_household_food_units) ||
+        !payload_reader.read_u32(restored_config.food_production_scale_percent) ||
+        !payload_reader.read_bool(restored_config.food_system_enabled)) {
         return load_error(SnapshotErrorCode::TruncatedData, "Snapshot fixed section is truncated");
     }
 
@@ -431,7 +461,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         return load_error(SnapshotErrorCode::TruncatedData, "Snapshot household section is truncated");
     }
 
-    if (household_count > payload_reader.remaining() / 16U) {
+    if (household_count > payload_reader.remaining() / 60U) {
         return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot household section has invalid length");
     }
 
@@ -442,7 +472,14 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     for (std::uint64_t i = 0; i < household_count; ++i) {
         Household household{};
         std::uint64_t member_count = 0;
-        if (!payload_reader.read_u64(household.id) || !payload_reader.read_u64(member_count)) {
+        if (!payload_reader.read_u64(household.id) ||
+            !payload_reader.read_i64(household.resources.food_inventory.value) ||
+            !payload_reader.read_i64(household.resources.food_produced_total) ||
+            !payload_reader.read_i64(household.resources.food_consumed_total) ||
+            !payload_reader.read_i64(household.resources.unmet_food_total) ||
+            !payload_reader.read_i64(household.resources.nutritional_stress_points) ||
+            !payload_reader.read_u32(household.resources.consecutive_shortage_days) ||
+            !payload_reader.read_u64(member_count)) {
             return load_error(SnapshotErrorCode::TruncatedData, "Snapshot household record is truncated");
         }
 
@@ -451,6 +488,14 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         }
         if (!household_ids.insert(household.id).second) {
             return load_error(SnapshotErrorCode::DuplicateId, "Snapshot contains duplicate household ids");
+        }
+
+        if (household.resources.food_inventory.value < 0 ||
+            household.resources.food_produced_total < 0 ||
+            household.resources.food_consumed_total < 0 ||
+            household.resources.unmet_food_total < 0 ||
+            household.resources.nutritional_stress_points < 0) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot household food state must be non-negative");
         }
 
         if (member_count > payload_reader.remaining() / 8U) {
@@ -577,6 +622,26 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
 
     if (demography_next_run_ticks <= restored_state.time.ticks) {
         return load_error(SnapshotErrorCode::InvalidState, "Snapshot scheduler next run must be strictly in the future");
+    }
+
+    if (food_interval_ticks <= 0) {
+        return load_error(SnapshotErrorCode::InvalidState, "Snapshot food interval must be positive");
+    }
+
+    if (food_interval_ticks != days(1).ticks) {
+        return load_error(SnapshotErrorCode::InvalidState, "Snapshot food interval is incompatible with this runtime");
+    }
+
+    if (restored_config.food_system_enabled && food_next_run_ticks <= restored_state.time.ticks) {
+        return load_error(SnapshotErrorCode::InvalidState, "Snapshot food next run must be strictly in the future");
+    }
+
+    if (restored_config.initial_household_food_units < 0) {
+        return load_error(SnapshotErrorCode::InvalidState, "Snapshot initial household food must be non-negative");
+    }
+
+    if (restored_config.food_production_scale_percent > 10'000U) {
+        return load_error(SnapshotErrorCode::InvalidState, "Snapshot food production scale is out of range");
     }
 
     std::unordered_map<PersonId, const Person*> person_by_id;
@@ -735,6 +800,46 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         return load_error(SnapshotErrorCode::InvalidState, "Snapshot event totals do not match cumulative counters");
     }
 
+    std::int64_t total_food_stored = 0;
+    std::int64_t total_food_produced = 0;
+    std::int64_t total_food_consumed = 0;
+    std::int64_t total_unmet_food = 0;
+    std::uint64_t households_in_shortage = 0;
+    std::uint64_t population_under_food_stress = 0;
+    std::unordered_map<HouseholdId, bool> household_in_stress;
+    household_in_stress.reserve(restored_state.households.size());
+
+    for (const auto& household : restored_state.households) {
+        total_food_stored += household.resources.food_inventory.value;
+        total_food_produced += household.resources.food_produced_total;
+        total_food_consumed += household.resources.food_consumed_total;
+        total_unmet_food += household.resources.unmet_food_total;
+        if (household.resources.consecutive_shortage_days > 0U) {
+            ++households_in_shortage;
+        }
+        household_in_stress.emplace(household.id, household.resources.nutritional_stress_points > 0);
+    }
+
+    for (const auto& person : restored_state.people) {
+        if (!person.alive) {
+            continue;
+        }
+
+        const auto it = household_in_stress.find(person.household_id);
+        if (it != household_in_stress.end() && it->second) {
+            ++population_under_food_stress;
+        }
+    }
+
+    if (restored_state.total_food_stored != total_food_stored ||
+        restored_state.total_food_produced != total_food_produced ||
+        restored_state.total_food_consumed != total_food_consumed ||
+        restored_state.total_unmet_food != total_unmet_food ||
+        restored_state.households_in_shortage != households_in_shortage ||
+        restored_state.population_under_food_stress != population_under_food_stress) {
+        return load_error(SnapshotErrorCode::InvalidState, "Snapshot food aggregate totals are inconsistent");
+    }
+
     std::sort(restored_state.people.begin(), restored_state.people.end(), [](const Person& lhs, const Person& rhs) {
         return lhs.id < rhs.id;
     });
@@ -756,6 +861,8 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     destination.next_event_id_ = next_event_id;
     destination.demography_interval_ = SimulationDuration{demography_interval_ticks};
     destination.demography_next_run_ = SimulationTime{demography_next_run_ticks};
+    destination.food_interval_ = SimulationDuration{food_interval_ticks};
+    destination.food_next_run_ = SimulationTime{food_next_run_ticks};
 
     return SnapshotLoadResult{.ok = true, .code = SnapshotErrorCode::None, .message = ""};
 }

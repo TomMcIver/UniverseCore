@@ -8,6 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(UNIVERSECORE_BUILD_TESTS "Build UniverseCore tests" ON)
 
 add_library(universe_core
+    src/resources.cpp
     src/simulation.cpp
     src/snapshot.cpp
 )

@@ -23,6 +23,8 @@ The project deliberately starts without Unreal Engine. The initial objective is 
 - Scheduled yearly demography on canonical time boundaries
 - Timestamped canonical birth/death event log
 - Versioned deterministic canonical snapshots
+- Deterministic household food production/storage/consumption
+- Bounded nutritional stress affecting demographic outcomes
 - Reproducibility tests
 - No engine dependency
 
@@ -66,6 +68,24 @@ podman run --rm \
 	-w /workspace \
 	universecore-dev \
 	./scripts/container-run.sh --seed 42 --years 100 --population 200
+```
+
+Run constrained-food or famine abstractions for debugging:
+
+```bash
+podman run --rm \
+	-v "${PWD}:/workspace" \
+	-w /workspace \
+	universecore-dev \
+	./scripts/container-run.sh --seed 42 --years 100 --population 200 --food-scale 90
+```
+
+```bash
+podman run --rm \
+	-v "${PWD}:/workspace" \
+	-w /workspace \
+	universecore-dev \
+	./scripts/container-run.sh --seed 42 --years 100 --population 200 --food-scale 40
 ```
 
 To print recent canonical simulation events from the run:

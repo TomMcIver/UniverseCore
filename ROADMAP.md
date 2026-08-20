@@ -25,10 +25,10 @@ Exit criteria: same seed/config produces byte-identical canonical snapshot acros
 - [x] kinship
 - [x] fertility by age/context
 - [x] mortality by age/context
-- [ ] food production/consumption
+- [x] food production/consumption
 - [ ] health/nutrition
 - [ ] occupations
-- [ ] resource inventory
+- [x] resource inventory
 - [ ] migration
 - [ ] settlement population statistics
 

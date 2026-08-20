@@ -6,6 +6,7 @@
 #include <span>
 #include <vector>
 
+#include "universe/resources.hpp"
 #include "universe/seed.hpp"
 #include "universe/snapshot.hpp"
 #include "universe/time.hpp"
@@ -34,6 +35,7 @@ struct Person {
 struct Household {
     HouseholdId id{};
     std::vector<PersonId> member_ids{};
+    HouseholdResourceState resources{};
 };
 
 enum class EventType : std::uint8_t {
@@ -55,6 +57,9 @@ struct SimulationConfig {
     SeedValue seed{1};
     std::uint64_t initial_population{200};
     bool enable_unrelated_random_probe{false};
+    std::int64_t initial_household_food_units{80};
+    std::uint32_t food_production_scale_percent{100};
+    bool food_system_enabled{true};
 };
 
 struct WorldState {
@@ -64,6 +69,12 @@ struct WorldState {
     std::uint64_t population{};
     std::uint64_t total_births{};
     std::uint64_t total_deaths{};
+    std::int64_t total_food_stored{};
+    std::int64_t total_food_produced{};
+    std::int64_t total_food_consumed{};
+    std::int64_t total_unmet_food{};
+    std::uint64_t households_in_shortage{};
+    std::uint64_t population_under_food_stress{};
     std::vector<Person> people{};
     std::vector<Household> households{};
     std::vector<SimulationEvent> event_log{};
@@ -89,6 +100,7 @@ private:
     [[nodiscard]] bool sample_sex(SimulationSeed seed) const noexcept;
     [[nodiscard]] std::uint32_t sample_initial_age_years(PersonId person_id) const noexcept;
     [[nodiscard]] std::uint32_t mortality_rate_per_10k(std::uint32_t age_years) const noexcept;
+    [[nodiscard]] std::uint32_t mortality_penalty_from_food_stress_per_10k(const Person& person) const noexcept;
     [[nodiscard]] std::uint32_t fertility_rate_per_10k(std::uint32_t age_years) const noexcept;
     [[nodiscard]] std::int64_t current_year_signed() const noexcept;
     [[nodiscard]] std::uint32_t age_years(const Person& person) const noexcept;
@@ -96,12 +108,16 @@ private:
     [[nodiscard]] bool is_alive_adult_male_in_household(HouseholdId household_id) const noexcept;
     [[nodiscard]] std::uint32_t alive_count_in_household(HouseholdId household_id) const noexcept;
     [[nodiscard]] std::uint32_t effective_fertility_rate_per_10k(const Person& person) const noexcept;
+    [[nodiscard]] std::int64_t household_stress_points(HouseholdId household_id) const noexcept;
     [[nodiscard]] std::optional<PersonId> sample_father_global(SimulationSeed selection_seed) noexcept;
     [[nodiscard]] std::optional<PersonId> sample_father_in_household(HouseholdId household_id, SimulationSeed selection_seed) noexcept;
     [[nodiscard]] std::uint64_t current_demographic_year() const noexcept;
+    [[nodiscard]] std::uint64_t current_food_period() const noexcept;
     void run_scheduled_systems_until(SimulationTime target_time);
     void process_demography_period(std::uint64_t demographic_year);
+    void process_food_period(std::uint64_t food_period);
     void remove_from_household(HouseholdId household_id, PersonId person_id);
+    void refresh_food_aggregates() noexcept;
     void initialize_population();
     void initialize_households();
     void process_mortality(std::uint64_t demographic_year);
@@ -119,6 +135,9 @@ private:
     EventId next_event_id_{1};
     SimulationDuration demography_interval_{DemographicCalendarAdapter::year_duration()};
     SimulationTime demography_next_run_{DemographicCalendarAdapter::year_duration().ticks};
+    SimulationDuration food_interval_{days(1)};
+    SimulationTime food_next_run_{days(1).ticks};
+    FoodModelParameters food_parameters_{};
 
     friend class SnapshotCodec;
 };

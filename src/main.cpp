@@ -25,7 +25,9 @@ bool parse_number(const std::string_view text, T& value) {
 
 void print_usage(const char* executable) {
     std::cout << "Usage: " << executable
-              << " [--seed N] [--years N] [--population N] [--dump-events N] [--save PATH] [--load PATH]\n";
+              << " [--seed N] [--years N] [--population N] [--dump-events N]"
+              << " [--food-scale N] [--initial-food N] [--food-system 0|1]"
+              << " [--save PATH] [--load PATH]\n";
 }
 
 bool read_binary_file(const std::string_view path, std::vector<std::byte>& bytes) {
@@ -112,6 +114,23 @@ int main(int argc, char** argv) {
                 std::cerr << "Invalid dump-events count\n";
                 return 2;
             }
+        } else if (arg == "--food-scale") {
+            if (!parse_number(value, config.food_production_scale_percent)) {
+                std::cerr << "Invalid food-scale\n";
+                return 2;
+            }
+        } else if (arg == "--initial-food") {
+            if (!parse_number(value, config.initial_household_food_units)) {
+                std::cerr << "Invalid initial-food\n";
+                return 2;
+            }
+        } else if (arg == "--food-system") {
+            std::uint32_t enabled = 0;
+            if (!parse_number(value, enabled) || enabled > 1U) {
+                std::cerr << "Invalid food-system (expected 0 or 1)\n";
+                return 2;
+            }
+            config.food_system_enabled = (enabled == 1U);
         } else if (arg == "--save") {
             save_path = std::string{value};
         } else if (arg == "--load") {
@@ -189,6 +208,12 @@ int main(int argc, char** argv) {
                       << " alive_people=" << alive_people
                       << " households=" << state.households.size()
                       << " events_total=" << state.event_log.size()
+                      << " food_stored=" << state.total_food_stored
+                      << " food_produced=" << state.total_food_produced
+                      << " food_consumed=" << state.total_food_consumed
+                      << " unmet_food=" << state.total_unmet_food
+                      << " households_in_shortage=" << state.households_in_shortage
+                      << " population_under_food_stress=" << state.population_under_food_stress
                       << " adults=" << adults
                       << " children=" << children
                       << " births_total=" << state.total_births

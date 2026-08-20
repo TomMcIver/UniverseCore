@@ -184,6 +184,29 @@ Current implementation status:
 - annual fertility by age band with household-context father sampling
 - parent links on newborn creation
 
+## Resource architecture
+
+Current implementation status (Milestone 1A):
+
+- generic resource foundation with fixed-width integer quantities
+- `Food` as the first canonical resource type
+- household-level canonical resource state:
+        - stored food inventory
+        - cumulative produced food
+        - cumulative consumed food
+        - cumulative unmet food demand
+        - bounded nutritional stress and shortage streak state
+- daily resource scheduler tied to canonical simulation time
+- yearly demography remains scheduled separately, but now consumes food-stress signals
+
+Current food model is intentionally coarse and temporary. It abstracts Bronze Age household subsistence (hunting, gathering, primitive agriculture, household labour) and will later be replaced by explicit environment, labour, land, weather, technology, and logistics systems.
+
+Invariants:
+
+- canonical resource quantities use integer units only (no floating point canonical state)
+- resource outcomes depend on scoped seeds + stable household identity + canonical period identifier
+- equivalent canonical time advancement schedules must produce identical food outcomes and snapshots
+
 ### Phase C
 Cohort aggregation for distant populations.
 

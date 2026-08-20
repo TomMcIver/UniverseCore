@@ -21,6 +21,7 @@ enum class SeedDomain : std::uint64_t {
     HouseholdAssignment = 0x4D1278E6A3CF0B95ULL,
     ParentSelection = 0xB540DF7C9186EA23ULL,
     UnrelatedProbe = 0x9A6CBF35217DE804ULL,
+    FoodProduction = 0x2BD9AE10C4F3D77AULL,
 };
 
 [[nodiscard]] constexpr std::uint64_t mix_u64(const std::uint64_t value) noexcept {

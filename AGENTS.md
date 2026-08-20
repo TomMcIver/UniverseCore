@@ -94,6 +94,8 @@ Do not prematurely introduce distributed systems, GPU kernels, databases, ECS fr
 - Never serialize raw C++ object memory, pointers, padding, or ABI-dependent layouts.
 - Canonical serialized collection order must be explicit and deterministic.
 - Hidden mutable state that affects future outcomes must be either serialized or deterministically reconstructible.
+- Canonical resource quantities must use fixed-width integer units with explicitly documented semantics.
+- Resource-system randomness must be scoped by stable identity + resource domain + canonical period identifier.
 - Simulation state changes should flow through explicit systems/events.
 - Every world-critical algorithm needs deterministic tests.
 - Every persisted schema will eventually require versioning and migrations.
