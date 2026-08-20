@@ -61,4 +61,20 @@ struct FoodModelParameters {
     std::int32_t nutrition_points,
     std::int32_t health_points) noexcept;
 
+[[nodiscard]] std::int64_t age_based_labour_capacity_units(
+    std::uint32_t age_years,
+    const FoodModelParameters& parameters) noexcept;
+
+[[nodiscard]] std::uint32_t nutrition_health_labour_scale_percent(
+    std::int32_t nutrition_points,
+    std::int32_t health_points) noexcept;
+
+[[nodiscard]] std::int64_t person_labour_capacity_units(
+    bool alive,
+    std::uint32_t age_years,
+    std::int32_t nutrition_points,
+    std::int32_t health_points,
+    const FoodModelParameters& parameters,
+    std::uint32_t labour_scale_percent) noexcept;
+
 }  // namespace universe

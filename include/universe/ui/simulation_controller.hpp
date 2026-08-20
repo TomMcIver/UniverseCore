@@ -27,6 +27,14 @@ struct SimulationSummary {
     std::int64_t unmet_food{};
     std::uint64_t households_in_shortage{};
 
+    std::int64_t total_labour_capacity{};
+    std::int64_t total_labour_demand{};
+    std::uint64_t zero_capable_worker_households{};
+    std::uint64_t labour_constrained_households{};
+    std::uint64_t child_population{};
+    std::uint64_t working_age_population{};
+    std::uint64_t elderly_population{};
+
     std::uint64_t healthy_population{};
     std::uint64_t mildly_malnourished{};
     std::uint64_t severely_malnourished{};

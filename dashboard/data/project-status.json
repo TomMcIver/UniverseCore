@@ -1,14 +1,14 @@
 {
   "project": "UniverseCore",
   "as_of": "2026-08-20",
-  "current_phase": "Milestone 1C complete",
-  "current_task": "Milestone 1C complete; awaiting Milestone 1D kickoff",
-  "next_task": "Milestone 1D: labour model",
+  "current_phase": "Milestone 1D complete",
+  "current_task": "Milestone 1D labour capacity/allocation integrated via productive effort seam",
+  "next_task": "Milestone 1E: settlement systems",
   "build": {
     "canonical_workflow": "podman scripts/container-test.sh",
     "last_verified": "2026-08-20",
     "status": "passing",
-    "notes": "Verified with canonical Podman workflow plus clean UI-enabled Podman matrix (UNIVERSECORE_BUILD_UI=ON)"
+    "notes": "Verified with canonical Podman workflow and clean UI-enabled Podman matrix (UNIVERSECORE_BUILD_UI=ON, fresh build directory)"
   },
   "progress": {
     "simulation_foundation_percent": 95,
@@ -51,8 +51,8 @@
     {
       "id": "M1D",
       "name": "Labour",
-      "status": "planned",
-      "percent": 0
+      "status": "complete",
+      "percent": 100
     },
     {
       "id": "M1E",
@@ -86,6 +86,7 @@
       "Milestone 1B deterministic person health/nutrition",
       "Milestone 1B.5 basic simulation UI (optional SDL3 + Dear ImGui)",
       "Milestone 1C deterministic land/environment resources",
+      "Milestone 1D deterministic labour capacity and allocation",
       "Snapshot schema v4 and validation",
       "Canonical Podman build/test workflow",
       "Development dashboard + deployment workflow"
@@ -105,6 +106,12 @@
     "Snapshots serialize canonical deterministic state only."
   ],
   "recent_verified_commits": [
+    {
+      "hash": "7b7f534",
+      "date": "2026-08-21",
+      "summary": "Implement Milestone 1D deterministic labour capacity and allocation",
+      "verified": true
+    },
     {
       "hash": "2fe6451",
       "date": "2026-08-20",

@@ -4,6 +4,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
+#include <limits>
+#include <unordered_map>
 #include <vector>
 
 namespace universe::ui {
@@ -35,6 +37,7 @@ const Simulation& SimulationController::simulation() const noexcept {
 
 SimulationSummary SimulationController::summary() const noexcept {
     const auto& state = simulation_.state();
+    const auto labour_parameters = FoodModelParameters{};
 
     std::uint64_t healthy_population = 0;
     std::uint64_t mildly_malnourished = 0;
@@ -42,11 +45,50 @@ SimulationSummary SimulationController::summary() const noexcept {
     std::uint64_t critical_health = 0;
     std::int64_t total_health = 0;
     std::uint64_t health_count = 0;
+    std::uint64_t child_population = 0;
+    std::uint64_t working_age_population = 0;
+    std::uint64_t elderly_population = 0;
+
+    std::unordered_map<PersonId, std::int64_t> labour_capacity_by_person;
+    labour_capacity_by_person.reserve(state.people.size());
+    std::unordered_map<PersonId, std::int64_t> labour_demand_by_person;
+    labour_demand_by_person.reserve(state.people.size());
+    std::int64_t total_labour_capacity = 0;
+    std::int64_t total_labour_demand = 0;
 
     for (const auto& person : state.people) {
+        const auto age = (state.year > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+            ? std::numeric_limits<std::int64_t>::max()
+            : static_cast<std::int64_t>(state.year);
+        const auto person_age_years = (age > person.birth_year)
+            ? static_cast<std::uint32_t>(age - person.birth_year)
+            : 0U;
+
         if (!person.alive) {
+            labour_capacity_by_person.emplace(person.id, 0);
             continue;
         }
+
+        if (person_age_years < 18U) {
+            ++child_population;
+        } else if (person_age_years < 65U) {
+            ++working_age_population;
+        } else {
+            ++elderly_population;
+        }
+
+        const auto available_capacity = person_labour_capacity_units(
+            person.alive,
+            person_age_years,
+            person.nutrition_points,
+            person.health_points,
+            labour_parameters,
+            100U);
+        const auto demand_capacity = age_based_labour_capacity_units(person_age_years, labour_parameters);
+        labour_capacity_by_person.emplace(person.id, available_capacity);
+        labour_demand_by_person.emplace(person.id, demand_capacity);
+        total_labour_capacity += available_capacity;
+        total_labour_demand += demand_capacity;
 
         ++health_count;
         total_health += person.health_points;
@@ -66,6 +108,33 @@ SimulationSummary SimulationController::summary() const noexcept {
         ? static_cast<std::int32_t>(total_health / static_cast<std::int64_t>(health_count))
         : 0;
 
+    std::uint64_t zero_capable_worker_households = 0;
+    std::uint64_t labour_constrained_households = 0;
+
+    for (const auto& household : state.households) {
+        std::int64_t household_capacity = 0;
+        std::int64_t household_demand = 0;
+
+        for (const auto member_id : household.member_ids) {
+            const auto labour_it = labour_capacity_by_person.find(member_id);
+            if (labour_it != labour_capacity_by_person.end()) {
+                household_capacity += labour_it->second;
+            }
+
+            const auto demand_it = labour_demand_by_person.find(member_id);
+            if (demand_it != labour_demand_by_person.end()) {
+                household_demand += demand_it->second;
+            }
+        }
+
+        if (household_capacity <= 0) {
+            ++zero_capable_worker_households;
+        }
+        if (household_demand > household_capacity) {
+            ++labour_constrained_households;
+        }
+    }
+
     return SimulationSummary{
         .seed = state.seed,
         .time = state.time,
@@ -81,6 +150,13 @@ SimulationSummary SimulationController::summary() const noexcept {
         .food_consumed = state.total_food_consumed,
         .unmet_food = state.total_unmet_food,
         .households_in_shortage = state.households_in_shortage,
+        .total_labour_capacity = total_labour_capacity,
+        .total_labour_demand = total_labour_demand,
+        .zero_capable_worker_households = zero_capable_worker_households,
+        .labour_constrained_households = labour_constrained_households,
+        .child_population = child_population,
+        .working_age_population = working_age_population,
+        .elderly_population = elderly_population,
         .healthy_population = healthy_population,
         .mildly_malnourished = mildly_malnourished,
         .severely_malnourished = severely_malnourished,

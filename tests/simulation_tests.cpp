@@ -33,6 +33,78 @@ std::uint32_t age_years(const universe::WorldState& state, const universe::Perso
     return static_cast<std::uint32_t>(current_year - person.birth_year);
 }
 
+std::int64_t person_labour_capacity(
+    const universe::WorldState& state,
+    const universe::Person& person,
+    const std::uint32_t labour_scale_percent) {
+    const universe::FoodModelParameters parameters{};
+    return universe::person_labour_capacity_units(
+        person.alive,
+        age_years(state, person),
+        person.nutrition_points,
+        person.health_points,
+        parameters,
+        labour_scale_percent);
+}
+
+std::int64_t total_labour_capacity_by_people(
+    const universe::WorldState& state,
+    const std::uint32_t labour_scale_percent,
+    const bool reverse_order) {
+    std::vector<const universe::Person*> ordered;
+    ordered.reserve(state.people.size());
+    for (const auto& person : state.people) {
+        ordered.push_back(&person);
+    }
+    std::sort(ordered.begin(), ordered.end(), [](const universe::Person* lhs, const universe::Person* rhs) {
+        return lhs->id < rhs->id;
+    });
+    if (reverse_order) {
+        std::reverse(ordered.begin(), ordered.end());
+    }
+
+    std::int64_t total = 0;
+    for (const auto* person : ordered) {
+        total += person_labour_capacity(state, *person, labour_scale_percent);
+    }
+    return total;
+}
+
+std::int64_t total_labour_capacity_by_households(
+    const universe::WorldState& state,
+    const std::uint32_t labour_scale_percent,
+    const bool reverse_order) {
+    std::vector<const universe::Household*> ordered;
+    ordered.reserve(state.households.size());
+    for (const auto& household : state.households) {
+        ordered.push_back(&household);
+    }
+    std::sort(ordered.begin(), ordered.end(), [](const universe::Household* lhs, const universe::Household* rhs) {
+        return lhs->id < rhs->id;
+    });
+    if (reverse_order) {
+        std::reverse(ordered.begin(), ordered.end());
+    }
+
+    std::int64_t total = 0;
+    for (const auto* household : ordered) {
+        for (const auto member_id : household->member_ids) {
+            const universe::Person* person = nullptr;
+            for (const auto& candidate : state.people) {
+                if (candidate.id == member_id) {
+                    person = &candidate;
+                    break;
+                }
+            }
+            if (person == nullptr) {
+                continue;
+            }
+            total += person_labour_capacity(state, *person, labour_scale_percent);
+        }
+    }
+    return total;
+}
+
 const universe::Person* find_person(const universe::WorldState& state, const universe::PersonId id) {
     for (const auto& person : state.people) {
         if (person.id == id) {
@@ -368,6 +440,13 @@ void write_u64_le(std::vector<std::byte>& bytes, const std::size_t offset, const
     }
 }
 
+void write_u32_le(std::vector<std::byte>& bytes, const std::size_t offset, const std::uint32_t value) {
+    for (std::size_t i = 0; i < 4U; ++i) {
+        const auto shifted = static_cast<std::uint32_t>(value >> (8U * i));
+        bytes[offset + i] = static_cast<std::byte>(shifted & 0xFFU);
+    }
+}
+
 void refresh_snapshot_payload_hash(std::vector<std::byte>& bytes) {
     constexpr std::size_t header_size = 24U;
     constexpr std::size_t payload_size_offset = 8U;
@@ -502,6 +581,67 @@ int main() {
             universe::derive_seed(household_a, universe::SeedDomain::FoodProduction, 123U),
             10'000U);
         require(food_a_before == food_a_after, "household food production decisions must be independent of unrelated household processing");
+    }
+
+    {
+        const universe::FoodModelParameters labour_params{};
+
+        const auto dead_capacity = universe::person_labour_capacity_units(
+            false,
+            30U,
+            900,
+            900,
+            labour_params,
+            100U);
+        require(dead_capacity == 0, "dead person = zero labour");
+
+        const auto adult_capacity = universe::person_labour_capacity_units(
+            true,
+            30U,
+            900,
+            900,
+            labour_params,
+            100U);
+        const auto child_capacity = universe::person_labour_capacity_units(
+            true,
+            10U,
+            900,
+            900,
+            labour_params,
+            100U);
+        const auto elderly_capacity = universe::person_labour_capacity_units(
+            true,
+            75U,
+            900,
+            900,
+            labour_params,
+            100U);
+        require(adult_capacity > child_capacity, "healthy working-age adult > child labour capacity");
+        require(adult_capacity > elderly_capacity, "healthy working-age adult > elderly labour capacity");
+
+        const auto healthy_capacity = universe::person_labour_capacity_units(
+            true,
+            30U,
+            900,
+            900,
+            labour_params,
+            100U);
+        const auto malnourished_capacity = universe::person_labour_capacity_units(
+            true,
+            30U,
+            180,
+            220,
+            labour_params,
+            100U);
+        const auto recovered_capacity = universe::person_labour_capacity_units(
+            true,
+            30U,
+            900,
+            900,
+            labour_params,
+            100U);
+        require(malnourished_capacity < healthy_capacity, "malnutrition reduces capacity");
+        require(recovered_capacity >= healthy_capacity, "recovery restores capacity");
     }
 
     const universe::SimulationConfig config{
@@ -693,6 +833,111 @@ int main() {
     }
 
     {
+        universe::Simulation labour_order{config};
+        labour_order.run_years(5);
+        const auto& state = labour_order.state();
+
+        const auto people_forward = total_labour_capacity_by_people(state, config.productive_effort_scale_percent, false);
+        const auto people_reverse = total_labour_capacity_by_people(state, config.productive_effort_scale_percent, true);
+        require(people_forward == people_reverse, "person traversal order independence");
+
+        const auto households_forward = total_labour_capacity_by_households(state, config.productive_effort_scale_percent, false);
+        const auto households_reverse = total_labour_capacity_by_households(state, config.productive_effort_scale_percent, true);
+        require(households_forward == households_reverse, "household traversal order independence");
+        require(people_forward == households_forward, "household aggregation must equal person labour totals");
+    }
+
+    {
+        auto zero_worker_config = config;
+        zero_worker_config.initial_population = 1;
+        zero_worker_config.initial_household_food_units = 0;
+        zero_worker_config.food_production_scale_percent = 200;
+        zero_worker_config.productive_effort_scale_percent = 0;
+
+        universe::Simulation zero_worker_run{zero_worker_config};
+        std::unordered_map<universe::HouseholdId, std::int64_t> produced_before;
+        for (const auto& household : zero_worker_run.state().households) {
+            produced_before.emplace(household.id, household.resources.food_produced_total);
+        }
+
+        zero_worker_run.advance(universe::days(30));
+        for (const auto& household : zero_worker_run.state().households) {
+            const auto before_it = produced_before.find(household.id);
+            require(before_it != produced_before.end(), "zero-capable-worker household setup mismatch");
+            require(
+                household.resources.food_produced_total == before_it->second,
+                "zero-capable-worker household = zero productive effort");
+        }
+    }
+
+    {
+        auto labour_poor = config;
+        labour_poor.initial_household_food_units = 300;
+        labour_poor.food_production_scale_percent = 100;
+        labour_poor.productive_effort_scale_percent = 35;
+
+        auto labour_rich = labour_poor;
+        labour_rich.initial_household_food_units = 20;
+        labour_rich.productive_effort_scale_percent = 170;
+
+        universe::Simulation labour_poor_run{labour_poor};
+        universe::Simulation labour_rich_run{labour_rich};
+        labour_poor_run.run_years(2);
+        labour_rich_run.run_years(2);
+
+        require(
+            labour_poor_run.state().total_food_stored > labour_rich_run.state().total_food_stored,
+            "resource-rich but labour-poor household profile should retain larger food stock");
+        require(
+            labour_rich_run.state().total_food_produced > 0,
+            "labour-rich but resource-poor household profile should still produce food");
+        require(
+            labour_rich_run.state().total_unmet_food >= labour_poor_run.state().total_unmet_food,
+            "labour-rich but resource-poor household profile should face greater unmet demand");
+    }
+
+    {
+        auto pressure = config;
+        pressure.initial_household_food_units = 0;
+        pressure.food_production_scale_percent = 55;
+        pressure.productive_effort_scale_percent = 75;
+
+        universe::Simulation feedback{pressure};
+        feedback.run_years(10);
+        const auto before_relief_health = feedback.state().population_under_food_stress;
+        const auto before_relief_capacity = total_labour_capacity_by_people(
+            feedback.state(),
+            pressure.productive_effort_scale_percent,
+            false);
+
+        auto relieved = pressure;
+        relieved.food_production_scale_percent = 180;
+        universe::Simulation recovery{relieved};
+        recovery.run_years(10);
+        const auto relieved_health = recovery.state().population_under_food_stress;
+        const auto relieved_capacity = total_labour_capacity_by_people(
+            recovery.state(),
+            relieved.productive_effort_scale_percent,
+            false);
+
+        require(
+            before_relief_health >= relieved_health,
+            "food shortage -> health loss -> labour reduction feedback must be observable");
+        require(
+            relieved_capacity >= before_relief_capacity,
+            "recovery after pressure is removed should restore labour capacity");
+
+        const auto unexplained_production =
+            feedback.state().total_food_stored + feedback.state().total_food_consumed - feedback.state().total_food_produced;
+        const auto expected_initial = feedback.state().households.empty()
+            ? 0
+            : static_cast<std::int64_t>(feedback.state().households.size()) * pressure.initial_household_food_units;
+        require(
+            unexplained_production == expected_initial,
+            "no unexplained resource production");
+    }
+
+    {
         universe::Simulation boundary_a{config};
         boundary_a.advance(universe::days(364));
         require(boundary_a.state().year == 0, "partial year advance must not trigger yearly scheduler");
@@ -735,6 +980,10 @@ int main() {
             chunked_days.state(),
             contiguous_days.state(),
             "equivalent day chunking must produce identical yearly outcomes");
+        require(
+            total_labour_capacity_by_people(chunked_days.state(), config.productive_effort_scale_percent, false) ==
+                total_labour_capacity_by_people(contiguous_days.state(), config.productive_effort_scale_percent, false),
+            "equivalent time chunking must preserve derived labour capacity");
     }
 
     {
@@ -802,6 +1051,10 @@ int main() {
             continuous.state(),
             resumed.state(),
             "500 years continuous must equal 250+save/load+250");
+        require(
+            total_labour_capacity_by_people(continuous.state(), config.productive_effort_scale_percent, false) ==
+                total_labour_capacity_by_people(resumed.state(), config.productive_effort_scale_percent, false),
+            "save/load continuation must preserve derived labour capacity");
         require(
             continuous_bytes == resumed_bytes,
             "500 years continuous and 250+save/load+250 must serialize identically");

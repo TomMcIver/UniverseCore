@@ -174,4 +174,99 @@ std::uint32_t nutrition_health_fertility_scale_percent(
     return 100U;
 }
 
+std::int64_t age_based_labour_capacity_units(
+    const std::uint32_t age_years,
+    const FoodModelParameters& parameters) noexcept {
+    const auto adult_capacity = std::max<std::int64_t>(parameters.adult_daily_production_units, 0);
+    if (adult_capacity <= 0) {
+        return 0;
+    }
+
+    const auto child_capacity = std::max<std::int64_t>(parameters.child_daily_production_units, 0);
+
+    if (age_years < 8U) {
+        return 0;
+    }
+    if (age_years < 12U) {
+        return std::max<std::int64_t>(child_capacity / 2, child_capacity > 0 ? 1 : 0);
+    }
+    if (age_years < 16U) {
+        return std::max<std::int64_t>(child_capacity, child_capacity > 0 ? 1 : 0);
+    }
+    if (age_years < 18U) {
+        return std::max<std::int64_t>((adult_capacity * 75) / 100, 1);
+    }
+    if (age_years < 40U) {
+        return adult_capacity;
+    }
+    if (age_years < 55U) {
+        return std::max<std::int64_t>((adult_capacity * 95) / 100, 1);
+    }
+    if (age_years < 65U) {
+        return std::max<std::int64_t>((adult_capacity * 80) / 100, 1);
+    }
+    if (age_years < 75U) {
+        return std::max<std::int64_t>((adult_capacity * 55) / 100, 1);
+    }
+    if (age_years < 85U) {
+        return std::max<std::int64_t>((adult_capacity * 30) / 100, 1);
+    }
+    return std::max<std::int64_t>((adult_capacity * 10) / 100, 1);
+}
+
+std::uint32_t nutrition_health_labour_scale_percent(
+    const std::int32_t nutrition_points,
+    const std::int32_t health_points) noexcept {
+    if (nutrition_points < 80 || health_points < 120) {
+        return 0U;
+    }
+
+    const auto combined = std::min(nutrition_points, health_points);
+    if (combined < 220) {
+        return 25U;
+    }
+    if (combined < 350) {
+        return 45U;
+    }
+    if (combined < 500) {
+        return 65U;
+    }
+    if (combined < 700) {
+        return 85U;
+    }
+    if (combined < 850) {
+        return 95U;
+    }
+    return 100U;
+}
+
+std::int64_t person_labour_capacity_units(
+    const bool alive,
+    const std::uint32_t age_years,
+    const std::int32_t nutrition_points,
+    const std::int32_t health_points,
+    const FoodModelParameters& parameters,
+    const std::uint32_t labour_scale_percent) noexcept {
+    if (!alive) {
+        return 0;
+    }
+
+    auto capacity = age_based_labour_capacity_units(age_years, parameters);
+    if (capacity <= 0) {
+        return 0;
+    }
+
+    capacity = apply_scaled_percent(capacity, nutrition_health_labour_scale_percent(nutrition_points, health_points));
+    if (capacity <= 0) {
+        return 0;
+    }
+
+    capacity = apply_scaled_percent(capacity, labour_scale_percent);
+    if (capacity <= 0) {
+        return 0;
+    }
+
+    return std::max<std::int64_t>(capacity, 1);
+}
+
 }  // namespace universe

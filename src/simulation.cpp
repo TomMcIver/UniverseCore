@@ -550,15 +550,13 @@ std::int64_t Simulation::food_requirement_for_person(const Person& person) const
 }
 
 std::int64_t Simulation::productive_effort_for_person(const Person& person) const noexcept {
-    auto base_effort = age_years(person) >= kAdultAgeYears
-        ? food_parameters_.adult_daily_production_units
-        : food_parameters_.child_daily_production_units;
-
-    base_effort = apply_scaled_percent(base_effort, config_.productive_effort_scale_percent);
-    if (base_effort <= 0) {
-        return 0;
-    }
-    return std::max<std::int64_t>(base_effort, 1);
+    return person_labour_capacity_units(
+        person.alive,
+        age_years(person),
+        person.nutrition_points,
+        person.health_points,
+        food_parameters_,
+        config_.productive_effort_scale_percent);
 }
 
 std::uint32_t Simulation::effective_fertility_rate_per_10k(const Person& person) const noexcept {

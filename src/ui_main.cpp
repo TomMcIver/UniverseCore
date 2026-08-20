@@ -353,6 +353,15 @@ int main(int argc, char** argv) {
             static_cast<unsigned long long>(summary.severely_malnourished),
             static_cast<unsigned long long>(summary.critical_health),
             summary.average_health);
+        ImGui::Text("Labour: capacity=%lld demand=%lld constrained_households=%llu zero_capable_households=%llu",
+            static_cast<long long>(summary.total_labour_capacity),
+            static_cast<long long>(summary.total_labour_demand),
+            static_cast<unsigned long long>(summary.labour_constrained_households),
+            static_cast<unsigned long long>(summary.zero_capable_worker_households));
+        ImGui::Text("Age bands: child=%llu working_age=%llu elderly=%llu",
+            static_cast<unsigned long long>(summary.child_population),
+            static_cast<unsigned long long>(summary.working_age_population),
+            static_cast<unsigned long long>(summary.elderly_population));
 
         ImGui::Separator();
 
