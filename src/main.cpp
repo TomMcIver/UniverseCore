@@ -127,8 +127,10 @@ int main(int argc, char** argv) {
         std::cout << "\nlast_events=" << dump_count << '\n';
         for (std::size_t index = start_index; index < event_count; ++index) {
             const auto& event = state.event_log[index];
+            const auto event_year = universe::DemographicCalendarAdapter::demographic_year(event.timestamp);
             std::cout << "event_id=" << event.id
-                      << " year=" << event.year
+                      << " time_ticks=" << event.timestamp.ticks
+                      << " year=" << event_year
                       << " type=" << (event.type == universe::EventType::Birth ? "Birth" : "Death")
                       << " subject=" << event.subject_person_id;
             if (event.mother_id.has_value()) {

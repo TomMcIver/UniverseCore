@@ -12,6 +12,7 @@ The project deliberately starts without Unreal Engine. The initial objective is 
 - Cross-platform CMake build
 - Stable custom PRNG
 - Seeded simulation
+- Canonical fixed-width simulation clock
 - Stable person IDs
 - Individual birth year / age progression
 - Biological sex for demographic simulation
@@ -19,6 +20,8 @@ The project deliberately starts without Unreal Engine. The initial objective is 
 - Parent relationships for newborns
 - Household membership
 - Age-dependent mortality/fertility
+- Scheduled yearly demography on canonical time boundaries
+- Timestamped canonical birth/death event log
 - Reproducibility tests
 - No engine dependency
 

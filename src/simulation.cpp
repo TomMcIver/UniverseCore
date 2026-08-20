@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <stdexcept>
 #include <vector>
 
 namespace universe {
@@ -16,7 +17,7 @@ std::uint32_t bounded_u32(const std::uint64_t value) {
 
 Simulation::Simulation(SimulationConfig config)
     : config_(config),
-      state_{.seed = config.seed, .year = 0, .population = config.initial_population},
+      state_{.seed = config.seed, .time = SimulationTime{0}, .year = 0, .population = config.initial_population},
       simulation_seed_{config.seed} {
     initialize_population();
     initialize_households();
@@ -25,6 +26,49 @@ Simulation::Simulation(SimulationConfig config)
 
 const WorldState& Simulation::state() const noexcept {
     return state_;
+}
+
+SimulationTime Simulation::time() const noexcept {
+    return state_.time;
+}
+
+std::uint64_t Simulation::current_demographic_year() const noexcept {
+    return DemographicCalendarAdapter::demographic_year(state_.time);
+}
+
+void Simulation::advance(const SimulationDuration duration) {
+    if (duration.ticks < 0) {
+        throw std::invalid_argument("Simulation duration must be non-negative");
+    }
+
+    SimulationTime target_time{};
+    if (!checked_add_time(state_.time, duration, target_time)) {
+        throw std::overflow_error("Simulation time overflow");
+    }
+
+    run_scheduled_systems_until(target_time);
+    state_.time = target_time;
+    state_.year = current_demographic_year();
+}
+
+void Simulation::run_scheduled_systems_until(const SimulationTime target_time) {
+    while (demography_next_run_ <= target_time) {
+        state_.time = demography_next_run_;
+        state_.year = current_demographic_year();
+        process_demography_period(state_.year);
+
+        SimulationTime next_run{};
+        if (!checked_add_time(demography_next_run_, demography_interval_, next_run)) {
+            throw std::overflow_error("Scheduled demography time overflow");
+        }
+        demography_next_run_ = next_run;
+    }
+}
+
+void Simulation::process_demography_period(const std::uint64_t demographic_year) {
+    process_mortality(demographic_year);
+    process_births(demographic_year);
+    refresh_population_count();
 }
 
 PersonId Simulation::next_person_id() noexcept {
@@ -111,11 +155,12 @@ std::uint32_t Simulation::sample_initial_age_years(const PersonId person_id) con
 }
 
 std::int64_t Simulation::current_year_signed() const noexcept {
+    const auto year = current_demographic_year();
     const auto max_i64_u64 = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
-    if (state_.year > max_i64_u64) {
+    if (year > max_i64_u64) {
         return std::numeric_limits<std::int64_t>::max();
     }
-    return static_cast<std::int64_t>(state_.year);
+    return static_cast<std::int64_t>(year);
 }
 
 std::uint32_t Simulation::age_years(const Person& person) const noexcept {
@@ -310,16 +355,16 @@ void Simulation::initialize_households() {
     }
 }
 
-void Simulation::process_mortality() {
+void Simulation::process_mortality(const std::uint64_t demographic_year) {
     for (auto& person : state_.people) {
         if (!person.alive) {
             continue;
         }
 
         const auto mortality_rate = mortality_rate_per_10k(age_years(person));
-        const auto mortality_seed = derive_seed(person_seed(person.id), SeedDomain::Mortality, state_.year);
+        const auto mortality_seed = derive_seed(person_seed(person.id), SeedDomain::Mortality, demographic_year);
         if (config_.enable_unrelated_random_probe) {
-            const auto probe_seed = derive_seed(person_seed(person.id), SeedDomain::UnrelatedProbe, state_.year);
+            const auto probe_seed = derive_seed(person_seed(person.id), SeedDomain::UnrelatedProbe, demographic_year);
             (void)seed_random_u64(probe_seed);
         }
 
@@ -333,7 +378,7 @@ void Simulation::process_mortality() {
     }
 }
 
-void Simulation::process_births() {
+void Simulation::process_births(const std::uint64_t demographic_year) {
     struct PendingBirth {
         PersonId mother_id{};
         std::optional<PersonId> father_id{};
@@ -357,9 +402,9 @@ void Simulation::process_births() {
             continue;
         }
 
-        const auto fertility_seed = derive_seed(person_seed(person.id), SeedDomain::Fertility, state_.year);
+        const auto fertility_seed = derive_seed(person_seed(person.id), SeedDomain::Fertility, demographic_year);
         if (config_.enable_unrelated_random_probe) {
-            const auto probe_seed = derive_seed(person_seed(person.id), SeedDomain::UnrelatedProbe, state_.year ^ 0xABCDEFU);
+            const auto probe_seed = derive_seed(person_seed(person.id), SeedDomain::UnrelatedProbe, demographic_year ^ 0xABCDEFU);
             (void)seed_random_u64(probe_seed);
         }
 
@@ -379,7 +424,7 @@ void Simulation::process_births() {
 
     for (const auto& birth : pending_births) {
         const auto newborn_id = next_person_id();
-        const auto newborn_seed = derive_seed(person_seed(newborn_id), SeedDomain::Birth, state_.year);
+        const auto newborn_seed = derive_seed(person_seed(newborn_id), SeedDomain::Birth, demographic_year);
         const auto sex = sample_sex(newborn_seed) ? BiologicalSex::Female : BiologicalSex::Male;
 
         state_.people.push_back(Person{
@@ -412,7 +457,7 @@ void Simulation::append_event(SimulationEvent event) {
 void Simulation::emit_death_event(const PersonId person_id, const HouseholdId household_id) {
     append_event(SimulationEvent{
         .id = 0,
-        .year = state_.year,
+        .timestamp = state_.time,
         .type = EventType::Death,
         .subject_person_id = person_id,
         .mother_id = std::nullopt,
@@ -428,7 +473,7 @@ void Simulation::emit_birth_event(
     const std::optional<PersonId> father_id) {
     append_event(SimulationEvent{
         .id = 0,
-        .year = state_.year,
+        .timestamp = state_.time,
         .type = EventType::Birth,
         .subject_person_id = child_id,
         .mother_id = mother_id,
@@ -448,16 +493,22 @@ void Simulation::refresh_population_count() noexcept {
 }
 
 void Simulation::step_year() {
-    ++state_.year;
-    process_mortality();
-    process_births();
-    refresh_population_count();
+    advance(DemographicCalendarAdapter::year_duration());
 }
 
 void Simulation::run_years(const std::uint64_t years) {
-    for (std::uint64_t i = 0; i < years; ++i) {
-        step_year();
+    const auto years_i64_limit = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+    if (years > years_i64_limit) {
+        throw std::overflow_error("Requested simulation years exceed supported range");
     }
+
+    const auto yearly = DemographicCalendarAdapter::year_duration().ticks;
+    const auto years_i64 = static_cast<std::int64_t>(years);
+    if (years_i64 > 0 && yearly > (std::numeric_limits<std::int64_t>::max() / years_i64)) {
+        throw std::overflow_error("Requested simulation duration overflow");
+    }
+
+    advance(SimulationDuration{years_i64 * yearly});
 }
 
 }  // namespace universe

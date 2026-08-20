@@ -88,6 +88,8 @@ Do not prematurely introduce distributed systems, GPU kernels, databases, ECS fr
 - No global mutable state.
 - Canonical simulation behaviour must not depend on mutable sequential RNG consumption order.
 - Derive scoped deterministic randomness from parent seed + explicit domain + stable identifier/time.
+- Represent canonical elapsed time with fixed-width integer simulation time types.
+- Canonical simulation logic must not depend on wall-clock time or frame time.
 - Simulation state changes should flow through explicit systems/events.
 - Every world-critical algorithm needs deterministic tests.
 - Every persisted schema will eventually require versioning and migrations.

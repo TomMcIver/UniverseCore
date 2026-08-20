@@ -11,7 +11,7 @@ Status: **in progress**
 - [x] basic demographic smoke test
 - [x] deterministic unit test
 - [x] hierarchical seed derivation
-- [ ] canonical simulation clock
+- [x] canonical simulation clock
 - [x] event types and event log
 - [ ] snapshot serialization
 

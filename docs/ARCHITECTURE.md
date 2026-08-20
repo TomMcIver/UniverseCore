@@ -108,7 +108,7 @@ Current implementation status:
 - append-only canonical `event_log` in `WorldState`
 - stable deterministic `EventId` assignment
 - `Birth` and `Death` event emission from simulation state transitions
-- event payload includes simulation year timestamp and affected entity IDs
+- event payload includes canonical simulation timestamp (`SimulationTime`) and affected entity IDs
 - deterministic ordering derived from deterministic system update order
 
 ## Simulation LOD
@@ -157,6 +157,13 @@ Population: daily/monthly/yearly processes according to resolution
 ```
 
 Time acceleration changes simulation granularity. It does not alter physical law.
+
+Current implementation status:
+
+- strongly typed fixed-width canonical elapsed time (`SimulationTime`, `SimulationDuration`)
+- canonical simulation advancement via `advance(duration)`
+- yearly demography scheduled against canonical time boundaries, not ad-hoc year increments
+- derived demographic calendar year via `DemographicCalendarAdapter` for age/fertility/mortality systems
 
 ## Population architecture
 

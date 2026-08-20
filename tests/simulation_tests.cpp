@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
+#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -96,12 +98,22 @@ void verify_event_log_invariants(const universe::WorldState& state) {
     std::uint64_t birth_events = 0;
     std::uint64_t death_events = 0;
     universe::EventId expected_event_id = 1;
+    universe::SimulationTime last_timestamp{0};
+    bool saw_event = false;
 
     for (const auto& event : state.event_log) {
         require(event.id == expected_event_id, "event ids must be contiguous and deterministic");
         ++expected_event_id;
 
-        require(event.year <= state.year, "event year must not exceed simulation year");
+        require(event.timestamp.ticks <= state.time.ticks, "event timestamp must not exceed simulation time");
+        const auto event_year = universe::DemographicCalendarAdapter::demographic_year(event.timestamp);
+        require(event_year <= state.year, "event demographic year must not exceed simulation year");
+        if (saw_event) {
+            require(last_timestamp <= event.timestamp, "event timestamps must be monotonic non-decreasing");
+        }
+        last_timestamp = event.timestamp;
+        saw_event = true;
+
         const auto* subject = find_person(state, event.subject_person_id);
         require(subject != nullptr, "event subject id must reference an existing person");
 
@@ -139,6 +151,7 @@ void verify_event_log_invariants(const universe::WorldState& state) {
 }
 
 void require_world_state_equal(const universe::WorldState& lhs, const universe::WorldState& rhs, const char* context) {
+    require(lhs.time == rhs.time, context);
     require(lhs.year == rhs.year, context);
     require(lhs.population == rhs.population, context);
     require(lhs.total_births == rhs.total_births, context);
@@ -163,7 +176,7 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
         const auto& a = lhs.event_log[i];
         const auto& b = rhs.event_log[i];
         require(a.id == b.id, context);
-        require(a.year == b.year, context);
+        require(a.timestamp == b.timestamp, context);
         require(a.type == b.type, context);
         require(a.subject_person_id == b.subject_person_id, context);
         require(a.mother_id == b.mother_id, context);
@@ -175,6 +188,35 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
 }  // namespace
 
 int main() {
+    {
+        require(universe::seconds(1).ticks == 1, "seconds conversion must be exact");
+        require(universe::minutes(1).ticks == 60, "minutes conversion must be exact");
+        require(universe::hours(1).ticks == 3600, "hours conversion must be exact");
+        require(universe::days(1).ticks == 86400, "days conversion must be exact");
+        require(
+            universe::DemographicCalendarAdapter::year_duration().ticks == 365 * 24 * 60 * 60,
+            "demographic year duration must be 365 days");
+
+        const universe::SimulationTime t0{100};
+        const universe::SimulationTime t1{101};
+        require(t1 > t0, "time ordering must be strict");
+        require(t0 < t1, "time ordering must be strict");
+        require(t0 <= t1, "time ordering must support <=");
+        require(t1 >= t0, "time ordering must support >=");
+        require((t1 - t0).ticks == 1, "time subtraction must produce duration");
+
+        universe::SimulationTime sum{};
+        require(
+            universe::checked_add_time(universe::SimulationTime{10}, universe::SimulationDuration{15}, sum),
+            "checked_add_time should succeed for in-range additions");
+        require(sum.ticks == 25, "checked_add_time must compute exact sums");
+
+        const auto max_i64 = std::numeric_limits<std::int64_t>::max();
+        require(
+            !universe::checked_add_time(universe::SimulationTime{max_i64}, universe::SimulationDuration{1}, sum),
+            "checked_add_time must detect positive overflow");
+    }
+
     {
         const universe::SimulationSeed root{42};
         const auto a = universe::derive_seed(root, universe::SeedDomain::Person, 7U);
@@ -245,6 +287,86 @@ int main() {
         .initial_population = 200,
         .enable_unrelated_random_probe = false,
     };
+
+    {
+        universe::Simulation boundary_a{config};
+        boundary_a.advance(universe::days(364));
+        require(boundary_a.state().year == 0, "partial year advance must not trigger yearly scheduler");
+
+        boundary_a.advance(universe::days(1));
+        require(boundary_a.state().year == 1, "crossing yearly boundary should trigger one yearly tick");
+
+        universe::Simulation boundary_b{config};
+        boundary_b.advance(universe::days(365));
+        require_world_state_equal(
+            boundary_a.state(),
+            boundary_b.state(),
+            "364+1 day chunking must match 365 day single chunk state");
+    }
+
+    {
+        universe::Simulation three_steps{config};
+        three_steps.step_year();
+        three_steps.step_year();
+        three_steps.step_year();
+
+        universe::Simulation single_chunk{config};
+        single_chunk.run_years(3);
+        require_world_state_equal(
+            three_steps.state(),
+            single_chunk.state(),
+            "three yearly steps must match a single three-year advance");
+    }
+
+    {
+        universe::Simulation chunked_days{config};
+        chunked_days.advance(universe::days(17));
+        chunked_days.advance(universe::days(400));
+        chunked_days.advance(universe::days(300));
+        chunked_days.advance(universe::days(378));
+
+        universe::Simulation contiguous_days{config};
+        contiguous_days.advance(universe::days(1095));
+        require_world_state_equal(
+            chunked_days.state(),
+            contiguous_days.state(),
+            "equivalent day chunking must produce identical yearly outcomes");
+    }
+
+    {
+        universe::Simulation chunked{config};
+        for (std::uint64_t i = 0; i < 50; ++i) {
+            chunked.advance(universe::days(73));
+            chunked.advance(universe::days(292));
+        }
+
+        universe::Simulation contiguous{config};
+        contiguous.run_years(50);
+        require_world_state_equal(
+            chunked.state(),
+            contiguous.state(),
+            "equivalent yearly boundaries must preserve temporal-seed determinism");
+    }
+
+    {
+        universe::Simulation invalid_duration{config};
+        bool threw_invalid = false;
+        try {
+            invalid_duration.advance(universe::SimulationDuration{-1});
+        } catch (const std::invalid_argument&) {
+            threw_invalid = true;
+        }
+        require(threw_invalid, "negative duration advance must throw invalid_argument");
+
+        universe::Simulation overflow_years{config};
+        bool threw_years_overflow = false;
+        try {
+            overflow_years.run_years(static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()));
+        } catch (const std::overflow_error&) {
+            threw_years_overflow = true;
+        }
+        require(threw_years_overflow, "run_years must reject overflowing durations");
+    }
 
     universe::Simulation a{config};
     universe::Simulation b{config};
