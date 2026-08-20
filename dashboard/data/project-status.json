@@ -1,14 +1,14 @@
 {
   "project": "UniverseCore",
   "as_of": "2026-08-20",
-  "current_phase": "Milestone 1C",
-  "current_task": "Deterministic land and environmental resources",
+  "current_phase": "Milestone 1C complete",
+  "current_task": "Milestone 1C complete; awaiting Milestone 1D kickoff",
   "next_task": "Milestone 1D: labour model",
   "build": {
     "canonical_workflow": "podman scripts/container-test.sh",
     "last_verified": "2026-08-20",
     "status": "passing",
-    "notes": "Verified with canonical Podman workflow and optional UI smoke test enabled"
+    "notes": "Verified with canonical Podman workflow plus clean UI-enabled Podman matrix (UNIVERSECORE_BUILD_UI=ON)"
   },
   "progress": {
     "simulation_foundation_percent": 95,
@@ -45,8 +45,8 @@
     {
       "id": "M1C",
       "name": "Land & Environment",
-      "status": "active",
-      "percent": 0
+      "status": "complete",
+      "percent": 100
     },
     {
       "id": "M1D",
@@ -85,13 +85,12 @@
       "Milestone 1A deterministic household food/resources",
       "Milestone 1B deterministic person health/nutrition",
       "Milestone 1B.5 basic simulation UI (optional SDL3 + Dear ImGui)",
-      "Snapshot schema v3 and validation",
+      "Milestone 1C deterministic land/environment resources",
+      "Snapshot schema v4 and validation",
       "Canonical Podman build/test workflow",
       "Development dashboard + deployment workflow"
     ],
-    "active": [
-      "Milestone 1C deterministic land/environment resources"
-    ],
+    "active": [],
     "planned": [
       "Milestone 1D labour model",
       "Milestone 1E settlement systems",
@@ -106,6 +105,12 @@
     "Snapshots serialize canonical deterministic state only."
   ],
   "recent_verified_commits": [
+    {
+      "hash": "2fe6451",
+      "date": "2026-08-20",
+      "summary": "Implement Milestone 1C land and environmental resources",
+      "verified": true
+    },
     {
       "hash": "aff9cd7",
       "date": "2026-08-20",

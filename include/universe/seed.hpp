@@ -22,6 +22,13 @@ enum class SeedDomain : std::uint64_t {
     ParentSelection = 0xB540DF7C9186EA23ULL,
     UnrelatedProbe = 0x9A6CBF35217DE804ULL,
     FoodProduction = 0x2BD9AE10C4F3D77AULL,
+    Region = 0xD84A3C5F17BE9032ULL,
+    RegionAssignment = 0x6EAB1D278C05F43BULL,
+    RegionEnvironmentClass = 0x89F45CA20E13B7D2ULL,
+    RegionProductiveCapacity = 0xB91EC2D45A6708F1ULL,
+    RegionWildCapacity = 0x41C5A278D9B3EF64ULL,
+    RegionDailyVariation = 0x734DE90FC1A2BB57ULL,
+    RegionWildHarvest = 0xE13AC59472FB0D8EULL,
 };
 
 [[nodiscard]] constexpr std::uint64_t mix_u64(const std::uint64_t value) noexcept {

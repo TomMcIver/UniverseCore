@@ -114,9 +114,38 @@ void verify_resource_invariants(const universe::WorldState& state, const std::in
     std::int64_t total_unmet_food = 0;
     std::uint64_t households_in_shortage = 0;
     std::uint64_t stressed_population = 0;
+    std::int64_t total_productive_capacity_per_day = 0;
+    std::int64_t total_wild_food_capacity = 0;
+    std::int64_t total_wild_food_stock = 0;
+    std::int64_t total_wild_food_harvested = 0;
+    std::int64_t total_wild_food_regenerated = 0;
+
+    std::unordered_set<universe::RegionId> region_ids;
+    for (const auto& region : state.regions) {
+        require(region.id > 0, "region id must be non-zero");
+        require(region_ids.insert(region.id).second, "region ids must be unique");
+        require(region.land_area_units > 0, "region area must be positive");
+        require(region.productive_capacity_per_day >= 0, "region productive capacity must be non-negative");
+        require(region.wild_food_capacity >= 0, "region wild capacity must be non-negative");
+        require(region.wild_food_stock >= 0, "region wild stock must be non-negative");
+        require(region.wild_food_regeneration_per_day >= 0, "region wild regeneration must be non-negative");
+        require(region.wild_food_harvest_limit_per_day >= 0, "region wild harvest limit must be non-negative");
+        require(region.cumulative_wild_food_harvested >= 0, "region cumulative wild harvest must be non-negative");
+        require(region.cumulative_wild_food_regenerated >= 0, "region cumulative wild regeneration must be non-negative");
+        require(region.wild_food_stock <= region.wild_food_capacity, "region wild stock must not exceed capacity");
+
+        total_productive_capacity_per_day += region.productive_capacity_per_day;
+        total_wild_food_capacity += region.wild_food_capacity;
+        total_wild_food_stock += region.wild_food_stock;
+        total_wild_food_harvested += region.cumulative_wild_food_harvested;
+        total_wild_food_regenerated += region.cumulative_wild_food_regenerated;
+    }
+
+    require(!state.regions.empty(), "world must contain at least one region");
 
     for (const auto& household : state.households) {
         const auto& resources = household.resources;
+        require(region_ids.contains(household.region_id), "household region id must reference an existing region");
         require(resources.food_inventory.value >= 0, "household food inventory must never be negative");
         require(resources.food_produced_total >= 0, "household food produced total must never be negative");
         require(resources.food_consumed_total >= 0, "household food consumed total must never be negative");
@@ -156,6 +185,15 @@ void verify_resource_invariants(const universe::WorldState& state, const std::in
     require(total_unmet_food == state.total_unmet_food, "unmet food aggregate must match household totals");
     require(households_in_shortage == state.households_in_shortage, "shortage household aggregate must match");
     require(stressed_population == state.population_under_food_stress, "population under stress aggregate must match");
+    require(
+        total_productive_capacity_per_day == state.total_productive_capacity_per_day,
+        "productive capacity aggregate must match region totals");
+    require(total_wild_food_capacity == state.total_wild_food_capacity, "wild capacity aggregate must match region totals");
+    require(total_wild_food_stock == state.total_wild_food_stock, "wild stock aggregate must match region totals");
+    require(total_wild_food_harvested == state.total_wild_food_harvested, "wild harvest aggregate must match region totals");
+    require(
+        total_wild_food_regenerated == state.total_wild_food_regenerated,
+        "wild regeneration aggregate must match region totals");
 }
 
 void verify_person_health_invariants(const universe::WorldState& state) {
@@ -233,8 +271,14 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
     require(lhs.total_unmet_food == rhs.total_unmet_food, context);
     require(lhs.households_in_shortage == rhs.households_in_shortage, context);
     require(lhs.population_under_food_stress == rhs.population_under_food_stress, context);
+    require(lhs.total_productive_capacity_per_day == rhs.total_productive_capacity_per_day, context);
+    require(lhs.total_wild_food_capacity == rhs.total_wild_food_capacity, context);
+    require(lhs.total_wild_food_stock == rhs.total_wild_food_stock, context);
+    require(lhs.total_wild_food_harvested == rhs.total_wild_food_harvested, context);
+    require(lhs.total_wild_food_regenerated == rhs.total_wild_food_regenerated, context);
     require(lhs.people.size() == rhs.people.size(), context);
     require(lhs.households.size() == rhs.households.size(), context);
+    require(lhs.regions.size() == rhs.regions.size(), context);
     require(lhs.event_log.size() == rhs.event_log.size(), context);
 
     for (std::size_t i = 0; i < lhs.people.size(); ++i) {
@@ -256,6 +300,7 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
         const auto& a = lhs.households[i];
         const auto& b = rhs.households[i];
         require(a.id == b.id, context);
+        require(a.region_id == b.region_id, context);
 
         auto a_members = a.member_ids;
         auto b_members = b.member_ids;
@@ -269,6 +314,21 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
         require(a.resources.unmet_food_total == b.resources.unmet_food_total, context);
         require(a.resources.nutritional_stress_points == b.resources.nutritional_stress_points, context);
         require(a.resources.consecutive_shortage_days == b.resources.consecutive_shortage_days, context);
+    }
+
+    for (std::size_t i = 0; i < lhs.regions.size(); ++i) {
+        const auto& a = lhs.regions[i];
+        const auto& b = rhs.regions[i];
+        require(a.id == b.id, context);
+        require(a.land_area_units == b.land_area_units, context);
+        require(a.environment_class == b.environment_class, context);
+        require(a.productive_capacity_per_day == b.productive_capacity_per_day, context);
+        require(a.wild_food_capacity == b.wild_food_capacity, context);
+        require(a.wild_food_stock == b.wild_food_stock, context);
+        require(a.wild_food_regeneration_per_day == b.wild_food_regeneration_per_day, context);
+        require(a.wild_food_harvest_limit_per_day == b.wild_food_harvest_limit_per_day, context);
+        require(a.cumulative_wild_food_harvested == b.cumulative_wild_food_harvested, context);
+        require(a.cumulative_wild_food_regenerated == b.cumulative_wild_food_regenerated, context);
     }
 
     for (std::size_t i = 0; i < lhs.event_log.size(); ++i) {
@@ -583,6 +643,56 @@ int main() {
     }
 
     {
+        auto environment_stress = config;
+        environment_stress.initial_region_count = 3;
+        environment_stress.base_region_area_units = 120;
+        environment_stress.food_production_scale_percent = 70;
+        environment_stress.productive_effort_scale_percent = 65;
+
+        universe::Simulation stressed_run{environment_stress};
+        std::int64_t peak_wild_harvested = 0;
+        std::int64_t peak_wild_regenerated = 0;
+        for (std::uint64_t year = 0; year < 40U; ++year) {
+            stressed_run.run_years(1);
+            peak_wild_harvested = std::max(peak_wild_harvested, stressed_run.state().total_wild_food_harvested);
+            peak_wild_regenerated = std::max(peak_wild_regenerated, stressed_run.state().total_wild_food_regenerated);
+        }
+
+        verify_resource_invariants(stressed_run.state(), environment_stress.initial_household_food_units);
+        require(stressed_run.state().total_productive_capacity_per_day > 0, "regions must provide productive capacity");
+        require(stressed_run.state().total_wild_food_capacity > 0, "regions must provide wild capacity");
+        require(peak_wild_harvested > 0, "environment stress should trigger wild harvest usage");
+        require(peak_wild_regenerated > 0, "wild depletion should trigger regeneration over time");
+    }
+
+    {
+        auto low_pressure = config;
+        low_pressure.initial_region_count = 4;
+        low_pressure.base_region_area_units = 140;
+        low_pressure.food_production_scale_percent = 170;
+        low_pressure.productive_effort_scale_percent = 170;
+
+        auto high_pressure = low_pressure;
+        high_pressure.food_production_scale_percent = 60;
+        high_pressure.productive_effort_scale_percent = 60;
+
+        universe::Simulation low_pressure_run{low_pressure};
+        universe::Simulation high_pressure_run{high_pressure};
+        low_pressure_run.run_years(20);
+        high_pressure_run.run_years(20);
+
+        verify_resource_invariants(low_pressure_run.state(), low_pressure.initial_household_food_units);
+        verify_resource_invariants(high_pressure_run.state(), high_pressure.initial_household_food_units);
+
+        require(
+            high_pressure_run.state().total_unmet_food >= low_pressure_run.state().total_unmet_food,
+            "higher carrying-capacity pressure should not reduce unmet food demand");
+        require(
+            high_pressure_run.state().population_under_food_stress >= low_pressure_run.state().population_under_food_stress,
+            "higher carrying-capacity pressure should not reduce food stress");
+    }
+
+    {
         universe::Simulation boundary_a{config};
         boundary_a.advance(universe::days(364));
         require(boundary_a.state().year == 0, "partial year advance must not trigger yearly scheduler");
@@ -795,7 +905,7 @@ int main() {
         require_snapshot_load_fails(bad_magic, universe::SnapshotErrorCode::InvalidMagic, "bad magic must be rejected");
 
         auto bad_version = clone_bytes(valid);
-        bad_version[4] = std::byte{0x04};
+        bad_version[4] = std::byte{0x05};
         bad_version[5] = std::byte{0x00};
         require_snapshot_load_fails(
             bad_version,
@@ -817,8 +927,8 @@ int main() {
             "payload corruption must be rejected via checksum");
 
         constexpr std::size_t header_size = 24U;
-        constexpr std::size_t payload_people_count_offset = 182U;
-        constexpr std::size_t payload_first_person_offset = 190U;
+        constexpr std::size_t payload_people_count_offset = 250U;
+        constexpr std::size_t payload_first_person_offset = 258U;
         constexpr std::size_t payload_person_record_size = 40U;
         constexpr std::size_t person_sex_offset_in_record = 16U;
         constexpr std::size_t person_household_offset_in_record = 18U;

@@ -15,6 +15,7 @@ namespace universe {
 
 using PersonId = std::uint64_t;
 using HouseholdId = std::uint64_t;
+using RegionId = std::uint64_t;
 using EventId = std::uint64_t;
 
 enum class BiologicalSex : std::uint8_t {
@@ -37,8 +38,29 @@ struct Person {
 
 struct Household {
     HouseholdId id{};
+    RegionId region_id{};
     std::vector<PersonId> member_ids{};
     HouseholdResourceState resources{};
+};
+
+enum class EnvironmentClass : std::uint8_t {
+    ProductiveArable = 0,
+    Woodland = 1,
+    Marginal = 2,
+    WaterWetland = 3,
+};
+
+struct RegionEnvironmentState {
+    RegionId id{};
+    std::int64_t land_area_units{};
+    EnvironmentClass environment_class{EnvironmentClass::ProductiveArable};
+    std::int64_t productive_capacity_per_day{};
+    std::int64_t wild_food_capacity{};
+    std::int64_t wild_food_stock{};
+    std::int64_t wild_food_regeneration_per_day{};
+    std::int64_t wild_food_harvest_limit_per_day{};
+    std::int64_t cumulative_wild_food_harvested{};
+    std::int64_t cumulative_wild_food_regenerated{};
 };
 
 enum class EventType : std::uint8_t {
@@ -63,6 +85,9 @@ struct SimulationConfig {
     std::int64_t initial_household_food_units{80};
     std::uint32_t food_production_scale_percent{100};
     bool food_system_enabled{true};
+    std::uint64_t initial_region_count{4};
+    std::int64_t base_region_area_units{100};
+    std::uint32_t productive_effort_scale_percent{100};
 };
 
 struct WorldState {
@@ -78,8 +103,14 @@ struct WorldState {
     std::int64_t total_unmet_food{};
     std::uint64_t households_in_shortage{};
     std::uint64_t population_under_food_stress{};
+    std::int64_t total_productive_capacity_per_day{};
+    std::int64_t total_wild_food_capacity{};
+    std::int64_t total_wild_food_stock{};
+    std::int64_t total_wild_food_harvested{};
+    std::int64_t total_wild_food_regenerated{};
     std::vector<Person> people{};
     std::vector<Household> households{};
+    std::vector<RegionEnvironmentState> regions{};
     std::vector<SimulationEvent> event_log{};
 };
 
@@ -98,8 +129,11 @@ public:
 private:
     [[nodiscard]] PersonId next_person_id() noexcept;
     [[nodiscard]] HouseholdId next_household_id() noexcept;
+    [[nodiscard]] RegionId next_region_id() noexcept;
     [[nodiscard]] SimulationSeed root_seed() const noexcept;
     [[nodiscard]] SimulationSeed person_seed(PersonId person_id) const noexcept;
+    [[nodiscard]] SimulationSeed household_seed(HouseholdId household_id) const noexcept;
+    [[nodiscard]] SimulationSeed region_seed(RegionId region_id) const noexcept;
     [[nodiscard]] bool sample_sex(SimulationSeed seed) const noexcept;
     [[nodiscard]] std::uint32_t sample_initial_age_years(PersonId person_id) const noexcept;
     [[nodiscard]] std::uint32_t mortality_rate_per_10k(std::uint32_t age_years) const noexcept;
@@ -111,7 +145,7 @@ private:
     [[nodiscard]] bool is_alive_adult_male_in_household(HouseholdId household_id) const noexcept;
     [[nodiscard]] std::uint32_t alive_count_in_household(HouseholdId household_id) const noexcept;
     [[nodiscard]] std::int64_t food_requirement_for_person(const Person& person) const noexcept;
-    [[nodiscard]] std::int64_t food_production_for_person(const Person& person) const noexcept;
+    [[nodiscard]] std::int64_t productive_effort_for_person(const Person& person) const noexcept;
     [[nodiscard]] std::uint32_t effective_fertility_rate_per_10k(const Person& person) const noexcept;
     [[nodiscard]] std::int64_t household_stress_points(HouseholdId household_id) const noexcept;
     [[nodiscard]] std::optional<PersonId> sample_father_global(SimulationSeed selection_seed) noexcept;
@@ -124,6 +158,12 @@ private:
     void apply_person_nutrition_and_health(Person& person, std::int64_t required_food, std::int64_t allocated_food);
     void remove_from_household(HouseholdId household_id, PersonId person_id);
     void refresh_food_aggregates() noexcept;
+    void refresh_environment_aggregates() noexcept;
+    void initialize_regions();
+    void assign_households_to_regions();
+    [[nodiscard]] RegionEnvironmentState generate_region_state(RegionId region_id) const;
+    [[nodiscard]] RegionEnvironmentState* find_region_mutable(RegionId region_id) noexcept;
+    [[nodiscard]] const RegionEnvironmentState* find_region(RegionId region_id) const noexcept;
     void initialize_population();
     void initialize_households();
     void process_mortality(std::uint64_t demographic_year);
@@ -138,6 +178,7 @@ private:
     SimulationSeed simulation_seed_{};
     PersonId next_person_id_{1};
     HouseholdId next_household_id_{1};
+    RegionId next_region_id_{1};
     EventId next_event_id_{1};
     SimulationDuration demography_interval_{DemographicCalendarAdapter::year_duration()};
     SimulationTime demography_next_run_{DemographicCalendarAdapter::year_duration().ticks};

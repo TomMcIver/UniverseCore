@@ -198,8 +198,14 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
     payload.write_i64(simulation.state_.total_unmet_food);
     payload.write_u64(simulation.state_.households_in_shortage);
     payload.write_u64(simulation.state_.population_under_food_stress);
+    payload.write_i64(simulation.state_.total_productive_capacity_per_day);
+    payload.write_i64(simulation.state_.total_wild_food_capacity);
+    payload.write_i64(simulation.state_.total_wild_food_stock);
+    payload.write_i64(simulation.state_.total_wild_food_harvested);
+    payload.write_i64(simulation.state_.total_wild_food_regenerated);
     payload.write_u64(simulation.next_person_id_);
     payload.write_u64(simulation.next_household_id_);
+    payload.write_u64(simulation.next_region_id_);
     payload.write_u64(simulation.next_event_id_);
     payload.write_i64(simulation.demography_interval_.ticks);
     payload.write_i64(simulation.demography_next_run_.ticks);
@@ -211,6 +217,9 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
     payload.write_i64(simulation.config_.initial_household_food_units);
     payload.write_u32(simulation.config_.food_production_scale_percent);
     payload.write_bool(simulation.config_.food_system_enabled);
+    payload.write_u64(simulation.config_.initial_region_count);
+    payload.write_i64(simulation.config_.base_region_area_units);
+    payload.write_u32(simulation.config_.productive_effort_scale_percent);
 
     std::vector<const Person*> people_order;
     people_order.reserve(simulation.state_.people.size());
@@ -253,6 +262,7 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
     payload.write_u64(static_cast<std::uint64_t>(household_order.size()));
     for (const auto* household : household_order) {
         payload.write_u64(household->id);
+        payload.write_u64(household->region_id);
         payload.write_i64(household->resources.food_inventory.value);
         payload.write_i64(household->resources.food_produced_total);
         payload.write_i64(household->resources.food_consumed_total);
@@ -266,6 +276,29 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
         for (const auto member_id : member_ids) {
             payload.write_u64(member_id);
         }
+    }
+
+    std::vector<const RegionEnvironmentState*> region_order;
+    region_order.reserve(simulation.state_.regions.size());
+    for (const auto& region : simulation.state_.regions) {
+        region_order.push_back(&region);
+    }
+    std::sort(region_order.begin(), region_order.end(), [](const RegionEnvironmentState* lhs, const RegionEnvironmentState* rhs) {
+        return lhs->id < rhs->id;
+    });
+
+    payload.write_u64(static_cast<std::uint64_t>(region_order.size()));
+    for (const auto* region : region_order) {
+        payload.write_u64(region->id);
+        payload.write_i64(region->land_area_units);
+        payload.write_u8(static_cast<std::uint8_t>(region->environment_class));
+        payload.write_i64(region->productive_capacity_per_day);
+        payload.write_i64(region->wild_food_capacity);
+        payload.write_i64(region->wild_food_stock);
+        payload.write_i64(region->wild_food_regeneration_per_day);
+        payload.write_i64(region->wild_food_harvest_limit_per_day);
+        payload.write_i64(region->cumulative_wild_food_harvested);
+        payload.write_i64(region->cumulative_wild_food_regenerated);
     }
 
     std::vector<const SimulationEvent*> event_order;
@@ -361,6 +394,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
 
     std::uint64_t next_person_id = 0;
     std::uint64_t next_household_id = 0;
+    std::uint64_t next_region_id = 0;
     std::uint64_t next_event_id = 0;
     std::int64_t demography_interval_ticks = 0;
     std::int64_t demography_next_run_ticks = 0;
@@ -379,8 +413,14 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         !payload_reader.read_i64(restored_state.total_unmet_food) ||
         !payload_reader.read_u64(restored_state.households_in_shortage) ||
         !payload_reader.read_u64(restored_state.population_under_food_stress) ||
+        !payload_reader.read_i64(restored_state.total_productive_capacity_per_day) ||
+        !payload_reader.read_i64(restored_state.total_wild_food_capacity) ||
+        !payload_reader.read_i64(restored_state.total_wild_food_stock) ||
+        !payload_reader.read_i64(restored_state.total_wild_food_harvested) ||
+        !payload_reader.read_i64(restored_state.total_wild_food_regenerated) ||
         !payload_reader.read_u64(next_person_id) ||
         !payload_reader.read_u64(next_household_id) ||
+        !payload_reader.read_u64(next_region_id) ||
         !payload_reader.read_u64(next_event_id) ||
         !payload_reader.read_i64(demography_interval_ticks) ||
         !payload_reader.read_i64(demography_next_run_ticks) ||
@@ -391,7 +431,10 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         !payload_reader.read_bool(restored_config.enable_unrelated_random_probe) ||
         !payload_reader.read_i64(restored_config.initial_household_food_units) ||
         !payload_reader.read_u32(restored_config.food_production_scale_percent) ||
-        !payload_reader.read_bool(restored_config.food_system_enabled)) {
+        !payload_reader.read_bool(restored_config.food_system_enabled) ||
+        !payload_reader.read_u64(restored_config.initial_region_count) ||
+        !payload_reader.read_i64(restored_config.base_region_area_units) ||
+        !payload_reader.read_u32(restored_config.productive_effort_scale_percent)) {
         return load_error(SnapshotErrorCode::TruncatedData, "Snapshot fixed section is truncated");
     }
 
@@ -479,7 +522,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         return load_error(SnapshotErrorCode::TruncatedData, "Snapshot household section is truncated");
     }
 
-    if (household_count > payload_reader.remaining() / 60U) {
+    if (household_count > payload_reader.remaining() / 68U) {
         return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot household section has invalid length");
     }
 
@@ -491,6 +534,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         Household household{};
         std::uint64_t member_count = 0;
         if (!payload_reader.read_u64(household.id) ||
+            !payload_reader.read_u64(household.region_id) ||
             !payload_reader.read_i64(household.resources.food_inventory.value) ||
             !payload_reader.read_i64(household.resources.food_produced_total) ||
             !payload_reader.read_i64(household.resources.food_consumed_total) ||
@@ -537,6 +581,64 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         }
 
         restored_state.households.push_back(std::move(household));
+    }
+
+    std::uint64_t region_count = 0;
+    if (!payload_reader.read_u64(region_count)) {
+        return load_error(SnapshotErrorCode::TruncatedData, "Snapshot region section is truncated");
+    }
+
+    if (region_count > payload_reader.remaining() / 64U) {
+        return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot region section has invalid length");
+    }
+
+    restored_state.regions.clear();
+    restored_state.regions.reserve(static_cast<std::size_t>(region_count));
+    std::unordered_set<RegionId> region_ids;
+
+    for (std::uint64_t i = 0; i < region_count; ++i) {
+        RegionEnvironmentState region{};
+        std::uint8_t environment_class_raw = 0;
+
+        if (!payload_reader.read_u64(region.id) ||
+            !payload_reader.read_i64(region.land_area_units) ||
+            !payload_reader.read_u8(environment_class_raw) ||
+            !payload_reader.read_i64(region.productive_capacity_per_day) ||
+            !payload_reader.read_i64(region.wild_food_capacity) ||
+            !payload_reader.read_i64(region.wild_food_stock) ||
+            !payload_reader.read_i64(region.wild_food_regeneration_per_day) ||
+            !payload_reader.read_i64(region.wild_food_harvest_limit_per_day) ||
+            !payload_reader.read_i64(region.cumulative_wild_food_harvested) ||
+            !payload_reader.read_i64(region.cumulative_wild_food_regenerated)) {
+            return load_error(SnapshotErrorCode::TruncatedData, "Snapshot region record is truncated");
+        }
+
+        if (region.id == 0U) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot region id must be non-zero");
+        }
+        if (!region_ids.insert(region.id).second) {
+            return load_error(SnapshotErrorCode::DuplicateId, "Snapshot contains duplicate region ids");
+        }
+        if (environment_class_raw > 3U) {
+            return load_error(SnapshotErrorCode::InvalidEnum, "Snapshot region environment class is invalid");
+        }
+        region.environment_class = static_cast<EnvironmentClass>(environment_class_raw);
+
+        if (region.land_area_units <= 0 ||
+            region.productive_capacity_per_day < 0 ||
+            region.wild_food_capacity < 0 ||
+            region.wild_food_stock < 0 ||
+            region.wild_food_regeneration_per_day < 0 ||
+            region.wild_food_harvest_limit_per_day < 0 ||
+            region.cumulative_wild_food_harvested < 0 ||
+            region.cumulative_wild_food_regenerated < 0) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot region values must be non-negative (except ids)");
+        }
+        if (region.wild_food_stock > region.wild_food_capacity) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot region stock cannot exceed capacity");
+        }
+
+        restored_state.regions.push_back(region);
     }
 
     std::uint64_t event_count = 0;
@@ -662,6 +764,18 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         return load_error(SnapshotErrorCode::InvalidState, "Snapshot food production scale is out of range");
     }
 
+    if (restored_config.initial_region_count == 0U) {
+        return load_error(SnapshotErrorCode::InvalidState, "Snapshot initial region count must be positive");
+    }
+
+    if (restored_config.base_region_area_units <= 0) {
+        return load_error(SnapshotErrorCode::InvalidState, "Snapshot base region area units must be positive");
+    }
+
+    if (restored_config.productive_effort_scale_percent > 10'000U) {
+        return load_error(SnapshotErrorCode::InvalidState, "Snapshot productive effort scale is out of range");
+    }
+
     std::unordered_map<PersonId, const Person*> person_by_id;
     person_by_id.reserve(restored_state.people.size());
     for (const auto& person : restored_state.people) {
@@ -674,10 +788,31 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         household_by_id.emplace(household.id, &household);
     }
 
+    std::unordered_map<RegionId, const RegionEnvironmentState*> region_by_id;
+    region_by_id.reserve(restored_state.regions.size());
+    RegionId max_region_id = 0;
+    for (const auto& region : restored_state.regions) {
+        region_by_id.emplace(region.id, &region);
+        max_region_id = std::max(max_region_id, region.id);
+    }
+
+    if (restored_state.regions.empty()) {
+        return load_error(SnapshotErrorCode::InvalidState, "Snapshot must contain at least one region");
+    }
+
+    const auto expected_next_region_id = (max_region_id == 0U) ? 1U : (max_region_id + 1U);
+    if (next_region_id != expected_next_region_id) {
+        return load_error(SnapshotErrorCode::InvalidState, "Snapshot next region id is inconsistent");
+    }
+
     std::unordered_map<PersonId, std::uint32_t> membership_counts;
     membership_counts.reserve(restored_state.people.size());
 
     for (const auto& household : restored_state.households) {
+        if (!region_by_id.contains(household.region_id)) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot household references unknown region");
+        }
+
         for (const auto member_id : household.member_ids) {
             const auto person_it = person_by_id.find(member_id);
             if (person_it == person_by_id.end()) {
@@ -819,6 +954,28 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         return load_error(SnapshotErrorCode::InvalidState, "Snapshot event totals do not match cumulative counters");
     }
 
+    std::int64_t total_productive_capacity_per_day = 0;
+    std::int64_t total_wild_food_capacity = 0;
+    std::int64_t total_wild_food_stock = 0;
+    std::int64_t total_wild_food_harvested = 0;
+    std::int64_t total_wild_food_regenerated = 0;
+
+    for (const auto& region : restored_state.regions) {
+        total_productive_capacity_per_day += region.productive_capacity_per_day;
+        total_wild_food_capacity += region.wild_food_capacity;
+        total_wild_food_stock += region.wild_food_stock;
+        total_wild_food_harvested += region.cumulative_wild_food_harvested;
+        total_wild_food_regenerated += region.cumulative_wild_food_regenerated;
+    }
+
+    if (restored_state.total_productive_capacity_per_day != total_productive_capacity_per_day ||
+        restored_state.total_wild_food_capacity != total_wild_food_capacity ||
+        restored_state.total_wild_food_stock != total_wild_food_stock ||
+        restored_state.total_wild_food_harvested != total_wild_food_harvested ||
+        restored_state.total_wild_food_regenerated != total_wild_food_regenerated) {
+        return load_error(SnapshotErrorCode::InvalidState, "Snapshot environment aggregate totals are inconsistent");
+    }
+
     std::int64_t total_food_stored = 0;
     std::int64_t total_food_produced = 0;
     std::int64_t total_food_consumed = 0;
@@ -867,6 +1024,9 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     for (auto& household : restored_state.households) {
         std::sort(household.member_ids.begin(), household.member_ids.end());
     }
+    std::sort(restored_state.regions.begin(), restored_state.regions.end(), [](const RegionEnvironmentState& lhs, const RegionEnvironmentState& rhs) {
+        return lhs.id < rhs.id;
+    });
     std::sort(restored_state.event_log.begin(), restored_state.event_log.end(), [](const SimulationEvent& lhs, const SimulationEvent& rhs) {
         return lhs.id < rhs.id;
     });
@@ -876,6 +1036,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     destination.simulation_seed_ = SimulationSeed{destination.state_.seed};
     destination.next_person_id_ = next_person_id;
     destination.next_household_id_ = next_household_id;
+    destination.next_region_id_ = next_region_id;
     destination.next_event_id_ = next_event_id;
     destination.demography_interval_ = SimulationDuration{demography_interval_ticks};
     destination.demography_next_run_ = SimulationTime{demography_next_run_ticks};

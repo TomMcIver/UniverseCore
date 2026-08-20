@@ -30,6 +30,7 @@ Status: **in progress**
 - [x] food production/consumption
 - [x] health/nutrition
 - [x] basic simulation UI (optional SDL3 + Dear ImGui inspector with smoke test)
+- [x] deterministic land/environment resources
 - [ ] occupations
 - [x] resource inventory
 - [ ] migration

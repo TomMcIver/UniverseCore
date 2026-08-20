@@ -12,6 +12,8 @@ namespace universe {
 
 namespace {
 constexpr std::uint32_t kAdultAgeYears = 18;
+constexpr std::int64_t kMinRegionAreaUnits = 10;
+constexpr std::int64_t kMaxRegionAreaUnits = 10'000;
 
 std::uint32_t bounded_u32(const std::uint64_t value) {
     return static_cast<std::uint32_t>(std::min(value, static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max())));
@@ -19,6 +21,38 @@ std::uint32_t bounded_u32(const std::uint64_t value) {
 
 std::int32_t clamp_i32(const std::int32_t value, const std::int32_t lo, const std::int32_t hi) {
     return std::min(std::max(value, lo), hi);
+}
+
+std::int64_t clamp_i64(const std::int64_t value, const std::int64_t lo, const std::int64_t hi) {
+    return std::min(std::max(value, lo), hi);
+}
+
+std::int64_t environment_class_productive_units_per_area(const EnvironmentClass environment_class) {
+    switch (environment_class) {
+        case EnvironmentClass::ProductiveArable:
+            return 15;
+        case EnvironmentClass::Woodland:
+            return 9;
+        case EnvironmentClass::Marginal:
+            return 6;
+        case EnvironmentClass::WaterWetland:
+            return 5;
+    }
+    return 0;
+}
+
+std::int64_t environment_class_wild_capacity_units_per_area(const EnvironmentClass environment_class) {
+    switch (environment_class) {
+        case EnvironmentClass::ProductiveArable:
+            return 190;
+        case EnvironmentClass::Woodland:
+            return 250;
+        case EnvironmentClass::Marginal:
+            return 140;
+        case EnvironmentClass::WaterWetland:
+            return 220;
+    }
+    return 0;
 }
 }
 
@@ -32,6 +66,15 @@ Simulation::Simulation(SimulationConfig config)
     if (config_.food_production_scale_percent > 10'000U) {
         throw std::invalid_argument("Food production scale percent must be <= 10000");
     }
+    if (config_.initial_region_count == 0U) {
+        throw std::invalid_argument("Initial region count must be positive");
+    }
+    if (config_.base_region_area_units < kMinRegionAreaUnits || config_.base_region_area_units > kMaxRegionAreaUnits) {
+        throw std::invalid_argument("Base region area units out of supported range");
+    }
+    if (config_.productive_effort_scale_percent > 10'000U) {
+        throw std::invalid_argument("Productive effort scale percent must be <= 10000");
+    }
 
     if (!config_.food_system_enabled) {
         food_next_run_ = SimulationTime{std::numeric_limits<std::int64_t>::max()};
@@ -39,8 +82,11 @@ Simulation::Simulation(SimulationConfig config)
 
     initialize_population();
     initialize_households();
+    initialize_regions();
+    assign_households_to_regions();
     refresh_population_count();
     refresh_food_aggregates();
+    refresh_environment_aggregates();
 }
 
 const WorldState& Simulation::state() const noexcept {
@@ -124,51 +170,156 @@ void Simulation::run_scheduled_systems_until(const SimulationTime target_time) {
 }
 
 void Simulation::process_food_period(const std::uint64_t food_period) {
+    struct HouseholdDayState {
+        Household* household{};
+        std::vector<Person*> alive_members{};
+        std::vector<std::int64_t> per_person_required{};
+        std::int64_t required_food{};
+        std::int64_t productive_effort{};
+        std::int64_t produced_food{};
+    };
+
+    std::vector<HouseholdDayState> household_states;
+    household_states.reserve(state_.households.size());
+
     for (auto& household : state_.households) {
-        std::vector<Person*> alive_members;
-        alive_members.reserve(household.member_ids.size());
+        HouseholdDayState household_state{};
+        household_state.household = &household;
+        household_state.alive_members.reserve(household.member_ids.size());
         for (const auto member_id : household.member_ids) {
             for (auto& person : state_.people) {
                 if (person.id == member_id && person.alive) {
-                    alive_members.push_back(&person);
+                    household_state.alive_members.push_back(&person);
                     break;
                 }
             }
         }
 
-        std::sort(alive_members.begin(), alive_members.end(), [](const Person* lhs, const Person* rhs) {
+        std::sort(household_state.alive_members.begin(), household_state.alive_members.end(), [](const Person* lhs, const Person* rhs) {
             return lhs->id < rhs->id;
         });
 
-        std::int64_t required_food = 0;
-        std::int64_t baseline_production = 0;
-        std::vector<std::int64_t> per_person_required;
-        per_person_required.reserve(alive_members.size());
-        for (const auto* person : alive_members) {
+        household_state.per_person_required.reserve(household_state.alive_members.size());
+        for (const auto* person : household_state.alive_members) {
             const auto person_required = food_requirement_for_person(*person);
-            const auto person_production = food_production_for_person(*person);
-
-            if (!checked_add_i64(required_food, person_required, required_food) ||
-                !checked_add_i64(baseline_production, person_production, baseline_production)) {
+            const auto person_effort = productive_effort_for_person(*person);
+            if (!checked_add_i64(household_state.required_food, person_required, household_state.required_food) ||
+                !checked_add_i64(household_state.productive_effort, person_effort, household_state.productive_effort)) {
                 throw std::overflow_error("Food accounting overflow");
             }
-
-            per_person_required.push_back(person_required);
+            household_state.per_person_required.push_back(person_required);
         }
 
-        std::int64_t produced_food = 0;
-        if (!alive_members.empty()) {
-            produced_food = baseline_production;
-            if (config_.food_system_enabled) {
-                const auto household_seed_local = derive_seed(root_seed(), SeedDomain::Household, household.id);
-                const auto production_seed = derive_seed(household_seed_local, SeedDomain::FoodProduction, food_period);
-                const auto daily_variation_percent = 90U + static_cast<std::uint32_t>(seed_random_bounded(production_seed, 21U));
+        household_states.push_back(std::move(household_state));
+    }
 
-                produced_food = apply_scaled_percent(produced_food, household_base_productivity_percent(household.id));
-                produced_food = apply_scaled_percent(produced_food, daily_variation_percent);
-                produced_food = apply_scaled_percent(produced_food, config_.food_production_scale_percent);
+    std::sort(household_states.begin(), household_states.end(), [](const HouseholdDayState& lhs, const HouseholdDayState& rhs) {
+        return lhs.household->id < rhs.household->id;
+    });
+
+    for (auto& region : state_.regions) {
+        std::vector<HouseholdDayState*> region_households;
+        std::int64_t total_effort = 0;
+
+        for (auto& household_state : household_states) {
+            if (household_state.household->region_id != region.id) {
+                continue;
+            }
+            region_households.push_back(&household_state);
+            if (!checked_add_i64(total_effort, household_state.productive_effort, total_effort)) {
+                throw std::overflow_error("Region effort overflow");
             }
         }
+
+        if (region_households.empty() || total_effort <= 0) {
+            if (region.wild_food_stock < region.wild_food_capacity) {
+                const auto deficit = region.wild_food_capacity - region.wild_food_stock;
+                const auto regeneration = std::min(deficit, region.wild_food_regeneration_per_day);
+                if (!checked_add_i64(region.wild_food_stock, regeneration, region.wild_food_stock) ||
+                    !checked_add_i64(region.cumulative_wild_food_regenerated, regeneration, region.cumulative_wild_food_regenerated)) {
+                    throw std::overflow_error("Region regeneration overflow");
+                }
+            }
+            continue;
+        }
+
+        auto productive_available = apply_scaled_percent(region.productive_capacity_per_day, config_.food_production_scale_percent);
+        const auto productive_seed = derive_seed(region_seed(region.id), SeedDomain::RegionDailyVariation, food_period);
+        const auto productive_variation_percent = 85U + static_cast<std::uint32_t>(seed_random_bounded(productive_seed, 31U));
+        productive_available = apply_scaled_percent(productive_available, productive_variation_percent);
+
+        std::int64_t distributed_productive = 0;
+        for (auto* household_state : region_households) {
+            if (household_state->productive_effort <= 0) {
+                continue;
+            }
+            household_state->produced_food = (productive_available * household_state->productive_effort) / total_effort;
+            if (!checked_add_i64(distributed_productive, household_state->produced_food, distributed_productive)) {
+                throw std::overflow_error("Region productive distribution overflow");
+            }
+        }
+
+        auto productive_remainder = productive_available - distributed_productive;
+        for (auto* household_state : region_households) {
+            if (productive_remainder <= 0) {
+                break;
+            }
+            if (household_state->productive_effort <= 0) {
+                continue;
+            }
+            ++household_state->produced_food;
+            --productive_remainder;
+        }
+
+        auto wild_harvest_available = std::min(region.wild_food_stock, region.wild_food_harvest_limit_per_day);
+        const auto wild_seed = derive_seed(region_seed(region.id), SeedDomain::RegionWildHarvest, food_period);
+        const auto wild_variation_percent = 80U + static_cast<std::uint32_t>(seed_random_bounded(wild_seed, 41U));
+        wild_harvest_available = apply_scaled_percent(wild_harvest_available, wild_variation_percent);
+        wild_harvest_available = std::min(wild_harvest_available, region.wild_food_stock);
+
+        std::int64_t distributed_wild = 0;
+        for (auto* household_state : region_households) {
+            if (household_state->productive_effort <= 0) {
+                continue;
+            }
+            const auto wild_for_household = (wild_harvest_available * household_state->productive_effort) / total_effort;
+            if (!checked_add_i64(household_state->produced_food, wild_for_household, household_state->produced_food) ||
+                !checked_add_i64(distributed_wild, wild_for_household, distributed_wild)) {
+                throw std::overflow_error("Region wild distribution overflow");
+            }
+        }
+
+        auto wild_remainder = wild_harvest_available - distributed_wild;
+        for (auto* household_state : region_households) {
+            if (wild_remainder <= 0) {
+                break;
+            }
+            if (household_state->productive_effort <= 0) {
+                continue;
+            }
+            ++household_state->produced_food;
+            --wild_remainder;
+            ++distributed_wild;
+        }
+
+        region.wild_food_stock = std::max<std::int64_t>(0, region.wild_food_stock - distributed_wild);
+        if (!checked_add_i64(region.cumulative_wild_food_harvested, distributed_wild, region.cumulative_wild_food_harvested)) {
+            throw std::overflow_error("Region cumulative harvest overflow");
+        }
+
+        if (region.wild_food_stock < region.wild_food_capacity) {
+            const auto deficit = region.wild_food_capacity - region.wild_food_stock;
+            const auto regeneration = std::min(deficit, region.wild_food_regeneration_per_day);
+            if (!checked_add_i64(region.wild_food_stock, regeneration, region.wild_food_stock) ||
+                !checked_add_i64(region.cumulative_wild_food_regenerated, regeneration, region.cumulative_wild_food_regenerated)) {
+                throw std::overflow_error("Region regeneration overflow");
+            }
+        }
+    }
+
+    for (auto& household_state : household_states) {
+        auto& household = *household_state.household;
+        const auto produced_food = household_state.produced_food;
 
         std::int64_t inventory_after_production = 0;
         if (!checked_add_i64(household.resources.food_inventory.value, produced_food, inventory_after_production)) {
@@ -176,9 +327,9 @@ void Simulation::process_food_period(const std::uint64_t food_period) {
         }
         household.resources.food_inventory.value = inventory_after_production;
 
-        const auto consumed_food = std::min<std::int64_t>(household.resources.food_inventory.value, required_food);
+        const auto consumed_food = std::min<std::int64_t>(household.resources.food_inventory.value, household_state.required_food);
         household.resources.food_inventory.value -= consumed_food;
-        const auto unmet_food = required_food - consumed_food;
+        const auto unmet_food = household_state.required_food - consumed_food;
 
         if (household.resources.food_inventory.value < 0) {
             throw std::runtime_error("Food inventory must never be negative");
@@ -193,7 +344,7 @@ void Simulation::process_food_period(const std::uint64_t food_period) {
         if (unmet_food > 0) {
             ++household.resources.consecutive_shortage_days;
 
-            const auto delta = static_cast<std::int64_t>(shortage_stress_delta_per_day(required_food, unmet_food));
+            const auto delta = static_cast<std::int64_t>(shortage_stress_delta_per_day(household_state.required_food, unmet_food));
             std::int64_t new_stress = 0;
             if (!checked_add_i64(household.resources.nutritional_stress_points, delta, new_stress)) {
                 throw std::overflow_error("Food stress overflow");
@@ -206,29 +357,33 @@ void Simulation::process_food_period(const std::uint64_t food_period) {
                 household.resources.nutritional_stress_points - food_parameters_.stress_recovery_per_day);
         }
 
-        std::vector<std::int64_t> per_person_allocated(alive_members.size(), 0);
-        if (consumed_food > 0 && required_food > 0 && !alive_members.empty()) {
+        std::vector<std::int64_t> per_person_allocated(household_state.alive_members.size(), 0);
+        if (consumed_food > 0 && household_state.required_food > 0 && !household_state.alive_members.empty()) {
             std::int64_t allocated_sum = 0;
-            for (std::size_t i = 0; i < alive_members.size(); ++i) {
-                per_person_allocated[i] = (consumed_food * per_person_required[i]) / required_food;
+            for (std::size_t i = 0; i < household_state.alive_members.size(); ++i) {
+                per_person_allocated[i] = (consumed_food * household_state.per_person_required[i]) / household_state.required_food;
                 if (!checked_add_i64(allocated_sum, per_person_allocated[i], allocated_sum)) {
                     throw std::overflow_error("Per-person food allocation overflow");
                 }
             }
 
             auto remainder = consumed_food - allocated_sum;
-            for (std::size_t i = 0; i < alive_members.size() && remainder > 0; ++i) {
+            for (std::size_t i = 0; i < household_state.alive_members.size() && remainder > 0; ++i) {
                 ++per_person_allocated[i];
                 --remainder;
             }
         }
 
-        for (std::size_t i = 0; i < alive_members.size(); ++i) {
-            apply_person_nutrition_and_health(*alive_members[i], per_person_required[i], per_person_allocated[i]);
+        for (std::size_t i = 0; i < household_state.alive_members.size(); ++i) {
+            apply_person_nutrition_and_health(
+                *household_state.alive_members[i],
+                household_state.per_person_required[i],
+                per_person_allocated[i]);
         }
     }
 
     refresh_food_aggregates();
+    refresh_environment_aggregates();
 }
 
 void Simulation::process_demography_period(const std::uint64_t demographic_year) {
@@ -246,12 +401,24 @@ HouseholdId Simulation::next_household_id() noexcept {
     return next_household_id_++;
 }
 
+RegionId Simulation::next_region_id() noexcept {
+    return next_region_id_++;
+}
+
 SimulationSeed Simulation::root_seed() const noexcept {
     return simulation_seed_;
 }
 
 SimulationSeed Simulation::person_seed(const PersonId person_id) const noexcept {
     return derive_seed(root_seed(), SeedDomain::Person, person_id);
+}
+
+SimulationSeed Simulation::household_seed(const HouseholdId household_id) const noexcept {
+    return derive_seed(root_seed(), SeedDomain::Household, household_id);
+}
+
+SimulationSeed Simulation::region_seed(const RegionId region_id) const noexcept {
+    return derive_seed(root_seed(), SeedDomain::Region, region_id);
 }
 
 bool Simulation::sample_sex(const SimulationSeed seed) const noexcept {
@@ -382,10 +549,16 @@ std::int64_t Simulation::food_requirement_for_person(const Person& person) const
         : food_parameters_.child_daily_food_units;
 }
 
-std::int64_t Simulation::food_production_for_person(const Person& person) const noexcept {
-    return age_years(person) >= kAdultAgeYears
+std::int64_t Simulation::productive_effort_for_person(const Person& person) const noexcept {
+    auto base_effort = age_years(person) >= kAdultAgeYears
         ? food_parameters_.adult_daily_production_units
         : food_parameters_.child_daily_production_units;
+
+    base_effort = apply_scaled_percent(base_effort, config_.productive_effort_scale_percent);
+    if (base_effort <= 0) {
+        return 0;
+    }
+    return std::max<std::int64_t>(base_effort, 1);
 }
 
 std::uint32_t Simulation::effective_fertility_rate_per_10k(const Person& person) const noexcept {
@@ -571,6 +744,7 @@ void Simulation::initialize_households() {
     for (std::uint64_t i = 0; i < household_count; ++i) {
         state_.households.push_back(Household{
             .id = next_household_id(),
+            .region_id = 0,
             .member_ids = {},
             .resources = HouseholdResourceState{.food_inventory = ResourceAmount{config_.initial_household_food_units}},
         });
@@ -604,6 +778,117 @@ void Simulation::initialize_households() {
         const auto household_index = static_cast<std::size_t>(seed_random_bounded(assignment_seed, state_.households.size()));
         assign_person_to_household(child_id, state_.households[household_index].id);
     }
+
+    std::sort(state_.households.begin(), state_.households.end(), [](const Household& lhs, const Household& rhs) {
+        return lhs.id < rhs.id;
+    });
+    for (auto& household : state_.households) {
+        std::sort(household.member_ids.begin(), household.member_ids.end());
+    }
+}
+
+RegionEnvironmentState Simulation::generate_region_state(const RegionId region_id) const {
+    const auto seed = region_seed(region_id);
+
+    const auto area_variation_seed = derive_seed(seed, SeedDomain::RegionProductiveCapacity, 0U);
+    const auto area_variation = static_cast<std::int64_t>(seed_random_bounded(area_variation_seed, 41U)) - 20;
+    auto land_area_units = config_.base_region_area_units + ((config_.base_region_area_units * area_variation) / 100);
+    land_area_units = clamp_i64(land_area_units, kMinRegionAreaUnits, kMaxRegionAreaUnits);
+
+    const auto environment_seed = derive_seed(seed, SeedDomain::RegionEnvironmentClass, 0U);
+    const auto class_roll = static_cast<std::uint32_t>(seed_random_bounded(environment_seed, 100U));
+    EnvironmentClass environment_class = EnvironmentClass::Marginal;
+    if (class_roll < 45U) {
+        environment_class = EnvironmentClass::ProductiveArable;
+    } else if (class_roll < 70U) {
+        environment_class = EnvironmentClass::Woodland;
+    } else if (class_roll >= 90U) {
+        environment_class = EnvironmentClass::WaterWetland;
+    }
+
+    std::int64_t productive_capacity_per_day = 0;
+    if (!checked_mul_i64(land_area_units, environment_class_productive_units_per_area(environment_class), productive_capacity_per_day)) {
+        throw std::overflow_error("Region productive capacity overflow");
+    }
+
+    std::int64_t wild_food_capacity = 0;
+    if (!checked_mul_i64(land_area_units, environment_class_wild_capacity_units_per_area(environment_class), wild_food_capacity)) {
+        throw std::overflow_error("Region wild food capacity overflow");
+    }
+
+    const auto productive_jitter_seed = derive_seed(seed, SeedDomain::RegionProductiveCapacity, 1U);
+    const auto productive_jitter_percent = 90U + static_cast<std::uint32_t>(seed_random_bounded(productive_jitter_seed, 21U));
+    productive_capacity_per_day = apply_scaled_percent(productive_capacity_per_day, productive_jitter_percent);
+
+    const auto wild_jitter_seed = derive_seed(seed, SeedDomain::RegionWildCapacity, 1U);
+    const auto wild_jitter_percent = 90U + static_cast<std::uint32_t>(seed_random_bounded(wild_jitter_seed, 21U));
+    wild_food_capacity = apply_scaled_percent(wild_food_capacity, wild_jitter_percent);
+
+    const auto wild_food_regeneration_per_day = std::max<std::int64_t>(1, wild_food_capacity / 120);
+    const auto wild_food_harvest_limit_per_day = std::max<std::int64_t>(1, wild_food_capacity / 20);
+
+    return RegionEnvironmentState{
+        .id = region_id,
+        .land_area_units = land_area_units,
+        .environment_class = environment_class,
+        .productive_capacity_per_day = productive_capacity_per_day,
+        .wild_food_capacity = wild_food_capacity,
+        .wild_food_stock = wild_food_capacity,
+        .wild_food_regeneration_per_day = wild_food_regeneration_per_day,
+        .wild_food_harvest_limit_per_day = wild_food_harvest_limit_per_day,
+        .cumulative_wild_food_harvested = 0,
+        .cumulative_wild_food_regenerated = 0,
+    };
+}
+
+void Simulation::initialize_regions() {
+    state_.regions.clear();
+    state_.regions.reserve(static_cast<std::size_t>(config_.initial_region_count));
+    for (std::uint64_t i = 0; i < config_.initial_region_count; ++i) {
+        (void)i;
+        const auto region_id = next_region_id();
+        state_.regions.push_back(generate_region_state(region_id));
+    }
+    std::sort(state_.regions.begin(), state_.regions.end(), [](const RegionEnvironmentState& lhs, const RegionEnvironmentState& rhs) {
+        return lhs.id < rhs.id;
+    });
+}
+
+void Simulation::assign_households_to_regions() {
+    if (state_.regions.empty()) {
+        return;
+    }
+
+    std::vector<RegionId> region_ids;
+    region_ids.reserve(state_.regions.size());
+    for (const auto& region : state_.regions) {
+        region_ids.push_back(region.id);
+    }
+    std::sort(region_ids.begin(), region_ids.end());
+
+    for (auto& household : state_.households) {
+        const auto assignment_seed = derive_seed(household_seed(household.id), SeedDomain::RegionAssignment, 0U);
+        const auto region_index = static_cast<std::size_t>(seed_random_bounded(assignment_seed, region_ids.size()));
+        household.region_id = region_ids[region_index];
+    }
+}
+
+RegionEnvironmentState* Simulation::find_region_mutable(const RegionId region_id) noexcept {
+    for (auto& region : state_.regions) {
+        if (region.id == region_id) {
+            return &region;
+        }
+    }
+    return nullptr;
+}
+
+const RegionEnvironmentState* Simulation::find_region(const RegionId region_id) const noexcept {
+    for (const auto& region : state_.regions) {
+        if (region.id == region_id) {
+            return &region;
+        }
+    }
+    return nullptr;
 }
 
 void Simulation::process_mortality(const std::uint64_t demographic_year) {
@@ -753,9 +1038,6 @@ void Simulation::refresh_food_aggregates() noexcept {
     state_.households_in_shortage = 0;
     state_.population_under_food_stress = 0;
 
-    std::unordered_map<HouseholdId, bool> household_in_stress;
-    household_in_stress.reserve(state_.households.size());
-
     for (const auto& household : state_.households) {
         state_.total_food_stored += household.resources.food_inventory.value;
         state_.total_food_produced += household.resources.food_produced_total;
@@ -767,7 +1049,6 @@ void Simulation::refresh_food_aggregates() noexcept {
             ++state_.households_in_shortage;
         }
 
-        household_in_stress.emplace(household.id, household.resources.nutritional_stress_points > 0);
     }
 
     for (const auto& person : state_.people) {
@@ -778,6 +1059,22 @@ void Simulation::refresh_food_aggregates() noexcept {
         if (person.nutrition_points < 550 || person.health_points < 500) {
             ++state_.population_under_food_stress;
         }
+    }
+}
+
+void Simulation::refresh_environment_aggregates() noexcept {
+    state_.total_productive_capacity_per_day = 0;
+    state_.total_wild_food_capacity = 0;
+    state_.total_wild_food_stock = 0;
+    state_.total_wild_food_harvested = 0;
+    state_.total_wild_food_regenerated = 0;
+
+    for (const auto& region : state_.regions) {
+        state_.total_productive_capacity_per_day += region.productive_capacity_per_day;
+        state_.total_wild_food_capacity += region.wild_food_capacity;
+        state_.total_wild_food_stock += region.wild_food_stock;
+        state_.total_wild_food_harvested += region.cumulative_wild_food_harvested;
+        state_.total_wild_food_regenerated += region.cumulative_wild_food_regenerated;
     }
 }
 

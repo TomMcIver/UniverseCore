@@ -194,7 +194,7 @@ Current implementation status:
 
 ## Resource architecture
 
-Current implementation status (Milestone 1A):
+Current implementation status (Milestone 1C):
 
 - generic resource foundation with fixed-width integer quantities
 - `Food` as the first canonical resource type
@@ -204,10 +204,13 @@ Current implementation status (Milestone 1A):
         - cumulative consumed food
         - cumulative unmet food demand
         - bounded nutritional stress and shortage streak state
+- deterministic region environment state with stable region IDs and household-to-region assignment
+- finite per-region productive capacity and finite renewable wild-food stock/capacity
+- deterministic per-period regional variation and region-scoped wild harvest limits
+- bounded wild-stock depletion and deterministic regeneration with cumulative accounting
+- world-level environment aggregates derived from canonical region state
 - daily resource scheduler tied to canonical simulation time
 - yearly demography remains scheduled separately, but now consumes food-stress signals
-
-Current food model is intentionally coarse and temporary. It abstracts Bronze Age household subsistence (hunting, gathering, primitive agriculture, household labour) and will later be replaced by explicit environment, labour, land, weather, technology, and logistics systems.
 
 Invariants:
 
