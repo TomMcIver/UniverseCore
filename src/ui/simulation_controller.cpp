@@ -149,7 +149,7 @@ SimulationSummary SimulationController::summary() const noexcept {
         }
         total_settlement_population += settlement.alive_population;
         largest_settlement_population = std::max(largest_settlement_population, settlement.alive_population);
-        if (settlement.active && settlement.pressure_per_10k >= 11'500U) {
+        if (settlement.active && settlement.pressure_per_10k >= 5'000U) {
             ++high_pressure_settlements;
         }
     }

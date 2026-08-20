@@ -16,12 +16,12 @@ constexpr std::int64_t kMinRegionAreaUnits = 10;
 constexpr std::int64_t kMaxRegionAreaUnits = 10'000;
 constexpr std::uint32_t kSettlementShareScale = 10'000;
 constexpr std::uint32_t kInitialAllocatedSettlementShare = 8'500;
-constexpr std::uint32_t kHighPressureThresholdPer10k = 11'500;
+constexpr std::uint32_t kHighPressureThresholdPer10k = 5'000;
 constexpr std::uint32_t kFoundingMinimumUnallocatedShare = 800;
 constexpr std::uint32_t kFoundingDefaultShare = 1'200;
-constexpr std::uint64_t kFoundingMinimumSourceHouseholds = 6;
+constexpr std::uint64_t kFoundingMinimumSourceHouseholds = 3;
 constexpr std::uint64_t kFoundingMinimumNewHouseholds = 2;
-constexpr std::uint64_t kFoundingMinimumRemainingHouseholds = 3;
+constexpr std::uint64_t kFoundingMinimumRemainingHouseholds = 1;
 constexpr std::uint64_t kTargetHouseholdsPerSettlement = 8;
 constexpr std::uint64_t kMaxInitialSettlementsPerRegion = 6;
 

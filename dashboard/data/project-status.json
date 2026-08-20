@@ -106,7 +106,7 @@
   ],
   "recent_verified_commits": [
     {
-      "hash": "53547f1",
+      "hash": "9a478a8",
       "date": "2026-08-21",
       "summary": "Implement Milestone 1E deterministic settlements",
       "verified": true

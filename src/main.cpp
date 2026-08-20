@@ -251,7 +251,7 @@ int main(int argc, char** argv) {
 
                 if (settlement.active && settlement_required > 0 && settlement_capacity > 0) {
                     const auto pressure = (settlement_required * 10'000) / settlement_capacity;
-                    if (pressure >= 11'500) {
+                    if (pressure >= 5'000) {
                         ++high_pressure_settlements;
                     }
                 }

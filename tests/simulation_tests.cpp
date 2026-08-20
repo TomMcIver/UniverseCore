@@ -949,18 +949,13 @@ int main() {
 
         universe::Simulation a{founder};
         universe::Simulation b{founder};
+        const auto initial_settlement_count = a.state().settlements.size();
         a.run_years(120);
         b.run_years(120);
         require_world_state_equal(a.state(), b.state(), "settlement founding/splitting must be deterministic");
-
-        bool found_split = false;
-        for (const auto& settlement : a.state().settlements) {
-            if (settlement.id > 1U) {
-                found_split = true;
-                break;
-            }
-        }
-        require(found_split, "over-pressured region with spare share should found at least one new settlement");
+        require(
+            a.state().settlements.size() > initial_settlement_count,
+            "over-pressured region with spare share should found at least one additional settlement");
     }
 
     {
