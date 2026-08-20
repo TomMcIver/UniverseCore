@@ -13,7 +13,7 @@ Status: **in progress**
 - [x] hierarchical seed derivation
 - [x] canonical simulation clock
 - [x] event types and event log
-- [ ] snapshot serialization
+- [x] snapshot serialization
 
 Exit criteria: same seed/config produces byte-identical canonical snapshot across supported platforms.
 

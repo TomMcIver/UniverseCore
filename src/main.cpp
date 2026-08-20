@@ -1,12 +1,17 @@
 #include "universe/simulation.hpp"
+#include "universe/snapshot.hpp"
 
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <algorithm>
+#include <optional>
+#include <string>
 #include <string_view>
+#include <vector>
 
 namespace {
 
@@ -19,7 +24,49 @@ bool parse_number(const std::string_view text, T& value) {
 }
 
 void print_usage(const char* executable) {
-    std::cout << "Usage: " << executable << " [--seed N] [--years N] [--population N] [--dump-events N]\n";
+    std::cout << "Usage: " << executable
+              << " [--seed N] [--years N] [--population N] [--dump-events N] [--save PATH] [--load PATH]\n";
+}
+
+bool read_binary_file(const std::string_view path, std::vector<std::byte>& bytes) {
+    std::ifstream file{std::string{path}, std::ios::binary};
+    if (!file) {
+        return false;
+    }
+
+    file.seekg(0, std::ios::end);
+    const auto end_pos = file.tellg();
+    if (end_pos < 0) {
+        return false;
+    }
+    const auto file_size = static_cast<std::size_t>(end_pos);
+    file.seekg(0, std::ios::beg);
+
+    bytes.assign(file_size, std::byte{0});
+    if (file_size > 0) {
+        file.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(file_size));
+        if (!file) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool write_binary_file(const std::string_view path, const std::vector<std::byte>& bytes) {
+    std::ofstream file{std::string{path}, std::ios::binary | std::ios::trunc};
+    if (!file) {
+        return false;
+    }
+
+    if (!bytes.empty()) {
+        file.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        if (!file) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 }  // namespace
@@ -28,6 +75,8 @@ int main(int argc, char** argv) {
     universe::SimulationConfig config{};
     std::uint64_t years = 100;
     std::uint64_t dump_events = 0;
+    std::optional<std::string> save_path;
+    std::optional<std::string> load_path;
 
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg{argv[i]};
@@ -63,6 +112,10 @@ int main(int argc, char** argv) {
                 std::cerr << "Invalid dump-events count\n";
                 return 2;
             }
+        } else if (arg == "--save") {
+            save_path = std::string{value};
+        } else if (arg == "--load") {
+            load_path = std::string{value};
         } else {
             std::cerr << "Unknown argument: " << arg << '\n';
             print_usage(argv[0]);
@@ -70,15 +123,41 @@ int main(int argc, char** argv) {
         }
     }
 
-    universe::Simulation simulation{config};
+    std::optional<universe::Simulation> simulation;
+    if (load_path.has_value()) {
+        std::vector<std::byte> snapshot_bytes;
+        if (!read_binary_file(*load_path, snapshot_bytes)) {
+            std::cerr << "Failed to read snapshot file: " << *load_path << '\n';
+            return 2;
+        }
 
+        universe::Simulation loaded{universe::SimulationConfig{}};
+        const auto load_result = universe::Simulation::load_snapshot(snapshot_bytes, loaded);
+        if (!load_result.ok) {
+            std::cerr << "Snapshot load failed ("
+                      << static_cast<unsigned>(load_result.code)
+                      << "): " << load_result.message << '\n';
+            return 2;
+        }
+
+        std::cout << "loaded_snapshot=" << *load_path
+                  << " bytes=" << snapshot_bytes.size()
+                  << " snapshot_hash=" << universe::snapshot_hash64(snapshot_bytes)
+                  << '\n';
+        simulation.emplace(std::move(loaded));
+    } else {
+        simulation.emplace(config);
+    }
+
+    const auto& initial_state = simulation->state();
     std::cout << "UniverseCore prototype\n"
-              << "seed=" << config.seed << '\n'
-              << "year=0 population=" << config.initial_population << "\n\n";
+              << "seed=" << initial_state.seed << '\n'
+              << "year=" << initial_state.year
+              << " population=" << initial_state.population << "\n\n";
 
     for (std::uint64_t i = 0; i < years; ++i) {
-        simulation.step_year();
-        const auto& state = simulation.state();
+        simulation->step_year();
+        const auto& state = simulation->state();
         if (state.year <= 10 || state.year % 10 == 0 || state.year == years) {
             std::uint64_t adults = 0;
             std::uint64_t children = 0;
@@ -119,7 +198,7 @@ int main(int argc, char** argv) {
     }
 
     if (dump_events > 0) {
-        const auto& state = simulation.state();
+        const auto& state = simulation->state();
         const auto event_count = state.event_log.size();
         const auto dump_count = static_cast<std::size_t>(std::min<std::uint64_t>(dump_events, static_cast<std::uint64_t>(event_count)));
         const auto start_index = event_count - dump_count;
@@ -144,6 +223,19 @@ int main(int argc, char** argv) {
             }
             std::cout << '\n';
         }
+    }
+
+    if (save_path.has_value()) {
+        const auto snapshot_bytes = simulation->save_snapshot();
+        if (!write_binary_file(*save_path, snapshot_bytes)) {
+            std::cerr << "Failed to write snapshot file: " << *save_path << '\n';
+            return 2;
+        }
+
+        std::cout << "saved_snapshot=" << *save_path
+                  << " bytes=" << snapshot_bytes.size()
+                  << " snapshot_hash=" << universe::snapshot_hash64(snapshot_bytes)
+                  << '\n';
     }
 
     return 0;

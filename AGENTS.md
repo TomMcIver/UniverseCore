@@ -90,6 +90,10 @@ Do not prematurely introduce distributed systems, GPU kernels, databases, ECS fr
 - Derive scoped deterministic randomness from parent seed + explicit domain + stable identifier/time.
 - Represent canonical elapsed time with fixed-width integer simulation time types.
 - Canonical simulation logic must not depend on wall-clock time or frame time.
+- Canonical state changes require evaluating snapshot schema impact and versioning.
+- Never serialize raw C++ object memory, pointers, padding, or ABI-dependent layouts.
+- Canonical serialized collection order must be explicit and deterministic.
+- Hidden mutable state that affects future outcomes must be either serialized or deterministically reconstructible.
 - Simulation state changes should flow through explicit systems/events.
 - Every world-critical algorithm needs deterministic tests.
 - Every persisted schema will eventually require versioning and migrations.

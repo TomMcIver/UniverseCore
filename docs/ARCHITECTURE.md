@@ -246,6 +246,26 @@ Persistence will eventually require:
 
 Do not choose a database until data access patterns are measured.
 
+Current implementation status:
+
+- canonical binary snapshot codec (`snapshot.hpp` / `snapshot.cpp`) separated from filesystem I/O
+- explicit fixed header with magic + schema version + payload size + payload checksum
+- fixed-width little-endian encoding for all persisted primitives
+- canonical collection ordering during serialization (people/households/events by stable ID, household members by person ID)
+- explicit load validation for malformed/truncated data, enum validity, ID uniqueness, references and scheduler invariants
+
+Snapshot invariants:
+
+- snapshots are canonical simulation state, not debug dumps or raw memory images
+- snapshot bytes for identical canonical state + schema version should be byte-identical
+- no reliance on struct padding, native endianness, pointer values, or compiler ABI layout
+
+Near-term direction:
+
+- versioned schema dispatch (`load_v1`, future `load_v2`, ...)
+- periodic snapshots + event segments/checkpoints for very long histories
+- keep canonical encoding independent of storage transport (local files, object storage, databases, network blobs)
+
 ## Concurrency
 
 Initial implementation should remain single-threaded and deterministic.

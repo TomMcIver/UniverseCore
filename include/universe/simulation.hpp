@@ -1,10 +1,13 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 #include <optional>
+#include <span>
 #include <vector>
 
 #include "universe/seed.hpp"
+#include "universe/snapshot.hpp"
 #include "universe/time.hpp"
 
 namespace universe {
@@ -72,6 +75,8 @@ public:
 
     [[nodiscard]] const WorldState& state() const noexcept;
     [[nodiscard]] SimulationTime time() const noexcept;
+    [[nodiscard]] std::vector<std::byte> save_snapshot() const;
+    [[nodiscard]] static SnapshotLoadResult load_snapshot(std::span<const std::byte> data, Simulation& destination);
     void advance(SimulationDuration duration);
     void step_year();
     void run_years(std::uint64_t years);
@@ -114,6 +119,8 @@ private:
     EventId next_event_id_{1};
     SimulationDuration demography_interval_{DemographicCalendarAdapter::year_duration()};
     SimulationTime demography_next_run_{DemographicCalendarAdapter::year_duration().ticks};
+
+    friend class SnapshotCodec;
 };
 
 }  // namespace universe

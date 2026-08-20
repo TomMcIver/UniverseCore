@@ -22,6 +22,7 @@ The project deliberately starts without Unreal Engine. The initial objective is 
 - Age-dependent mortality/fertility
 - Scheduled yearly demography on canonical time boundaries
 - Timestamped canonical birth/death event log
+- Versioned deterministic canonical snapshots
 - Reproducibility tests
 - No engine dependency
 
@@ -75,6 +76,26 @@ podman run --rm \
 	-w /workspace \
 	universecore-dev \
 	./scripts/container-run.sh --seed 42 --years 20 --population 200 --dump-events 10
+```
+
+To save a canonical snapshot after simulation:
+
+```bash
+podman run --rm \
+	-v "${PWD}:/workspace" \
+	-w /workspace \
+	universecore-dev \
+	./scripts/container-run.sh --seed 42 --years 250 --population 200 --save build/settlement_250.ucore
+```
+
+To load a snapshot and continue simulation deterministically:
+
+```bash
+podman run --rm \
+	-v "${PWD}:/workspace" \
+	-w /workspace \
+	universecore-dev \
+	./scripts/container-run.sh --load build/settlement_250.ucore --years 250 --save build/settlement_500.ucore
 ```
 
 Container builds write artifacts to `build/container` in the mounted repository.

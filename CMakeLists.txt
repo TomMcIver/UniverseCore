@@ -9,6 +9,7 @@ option(UNIVERSECORE_BUILD_TESTS "Build UniverseCore tests" ON)
 
 add_library(universe_core
     src/simulation.cpp
+    src/snapshot.cpp
 )
 
 target_include_directories(universe_core

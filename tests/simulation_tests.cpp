@@ -1,7 +1,10 @@
 #include "universe/simulation.hpp"
+#include "universe/snapshot.hpp"
 #include "universe/seed.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
@@ -33,6 +36,15 @@ const universe::Person* find_person(const universe::WorldState& state, const uni
     for (const auto& person : state.people) {
         if (person.id == id) {
             return &person;
+        }
+    }
+    return nullptr;
+}
+
+const universe::Household* find_household(const universe::WorldState& state, const universe::HouseholdId id) {
+    for (const auto& household : state.households) {
+        if (household.id == id) {
+            return &household;
         }
     }
     return nullptr;
@@ -172,6 +184,18 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
         require(a.father_id == b.father_id, context);
     }
 
+    for (std::size_t i = 0; i < lhs.households.size(); ++i) {
+        const auto& a = lhs.households[i];
+        const auto& b = rhs.households[i];
+        require(a.id == b.id, context);
+
+        auto a_members = a.member_ids;
+        auto b_members = b.member_ids;
+        std::sort(a_members.begin(), a_members.end());
+        std::sort(b_members.begin(), b_members.end());
+        require(a_members == b_members, context);
+    }
+
     for (std::size_t i = 0; i < lhs.event_log.size(); ++i) {
         const auto& a = lhs.event_log[i];
         const auto& b = rhs.event_log[i];
@@ -183,6 +207,58 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
         require(a.father_id == b.father_id, context);
         require(a.household_id == b.household_id, context);
     }
+}
+
+std::vector<std::byte> clone_bytes(const std::vector<std::byte>& bytes) {
+    return std::vector<std::byte>(bytes.begin(), bytes.end());
+}
+
+void corrupt_byte(std::vector<std::byte>& bytes, const std::size_t index, const std::uint8_t mask) {
+    bytes[index] ^= static_cast<std::byte>(mask);
+}
+
+std::uint64_t read_u64_le(const std::vector<std::byte>& bytes, const std::size_t offset) {
+    std::uint64_t value = 0;
+    for (std::size_t i = 0; i < 8U; ++i) {
+        const auto current = static_cast<std::uint64_t>(std::to_integer<std::uint8_t>(bytes[offset + i]));
+        value |= (current << (8U * i));
+    }
+    return value;
+}
+
+void write_u64_le(std::vector<std::byte>& bytes, const std::size_t offset, const std::uint64_t value) {
+    for (std::size_t i = 0; i < 8U; ++i) {
+        const auto shifted = static_cast<std::uint64_t>(value >> (8U * i));
+        bytes[offset + i] = static_cast<std::byte>(shifted & 0xFFU);
+    }
+}
+
+void refresh_snapshot_payload_hash(std::vector<std::byte>& bytes) {
+    constexpr std::size_t header_size = 24U;
+    constexpr std::size_t payload_size_offset = 8U;
+    constexpr std::size_t payload_hash_offset = 16U;
+
+    const auto payload_size = static_cast<std::size_t>(read_u64_le(bytes, payload_size_offset));
+    const std::span<const std::byte> payload{bytes.data() + header_size, payload_size};
+    const auto hash = universe::snapshot_hash64(payload);
+    write_u64_le(bytes, payload_hash_offset, hash);
+}
+
+void require_snapshot_load_fails(
+    const std::vector<std::byte>& bytes,
+    const universe::SnapshotErrorCode expected_code,
+    const char* context) {
+    universe::Simulation destination{universe::SimulationConfig{.seed = 999U, .initial_population = 10U}};
+    const auto result = universe::Simulation::load_snapshot(bytes, destination);
+    require(!result.ok, context);
+    require(result.code == expected_code, context);
+}
+
+universe::Simulation load_from_snapshot_or_fail(const std::vector<std::byte>& bytes, const char* context) {
+    universe::Simulation loaded{universe::SimulationConfig{.seed = 999U, .initial_population = 10U}};
+    const auto load_result = universe::Simulation::load_snapshot(bytes, loaded);
+    require(load_result.ok, context);
+    return loaded;
 }
 
 }  // namespace
@@ -289,6 +365,18 @@ int main() {
     };
 
     {
+        universe::Simulation fresh{config};
+        const auto bytes_a = fresh.save_snapshot();
+        const auto bytes_b = fresh.save_snapshot();
+        require(bytes_a == bytes_b, "serializing identical state twice must be byte-identical");
+
+        auto loaded = load_from_snapshot_or_fail(bytes_a, "fresh snapshot must load");
+        require_world_state_equal(fresh.state(), loaded.state(), "fresh snapshot round-trip must preserve full world state");
+        const auto bytes_after_load = loaded.save_snapshot();
+        require(bytes_a == bytes_after_load, "fresh snapshot must be stable across load/save round-trip");
+    }
+
+    {
         universe::Simulation boundary_a{config};
         boundary_a.advance(universe::days(364));
         require(boundary_a.state().year == 0, "partial year advance must not trigger yearly scheduler");
@@ -346,6 +434,12 @@ int main() {
             chunked.state(),
             contiguous.state(),
             "equivalent yearly boundaries must preserve temporal-seed determinism");
+
+        const auto snapshot_chunked = chunked.save_snapshot();
+        const auto snapshot_contiguous = contiguous.save_snapshot();
+        require(
+            snapshot_chunked == snapshot_contiguous,
+            "equivalent advancement chunking should produce byte-identical snapshots");
     }
 
     {
@@ -366,6 +460,165 @@ int main() {
             threw_years_overflow = true;
         }
         require(threw_years_overflow, "run_years must reject overflowing durations");
+    }
+
+    {
+        universe::Simulation initial{config};
+        initial.run_years(100);
+        const auto bytes = initial.save_snapshot();
+        auto loaded = load_from_snapshot_or_fail(bytes, "100-year snapshot must load");
+        require_world_state_equal(initial.state(), loaded.state(), "100-year snapshot round-trip must preserve state");
+    }
+
+    {
+        universe::Simulation continuous{config};
+        continuous.run_years(500);
+        const auto continuous_bytes = continuous.save_snapshot();
+
+        universe::Simulation with_boundary{config};
+        with_boundary.run_years(250);
+        const auto mid_bytes = with_boundary.save_snapshot();
+        auto resumed = load_from_snapshot_or_fail(mid_bytes, "midpoint snapshot must load");
+        resumed.run_years(250);
+        const auto resumed_bytes = resumed.save_snapshot();
+
+        require_world_state_equal(
+            continuous.state(),
+            resumed.state(),
+            "500 years continuous must equal 250+save/load+250");
+        require(
+            continuous_bytes == resumed_bytes,
+            "500 years continuous and 250+save/load+250 must serialize identically");
+    }
+
+    {
+        universe::Simulation continuous{config};
+        continuous.run_years(500);
+
+        universe::Simulation segmented{config};
+        segmented.run_years(100);
+        auto snap1 = segmented.save_snapshot();
+        segmented = load_from_snapshot_or_fail(snap1, "snapshot boundary 1 must load");
+
+        segmented.run_years(100);
+        auto snap2 = segmented.save_snapshot();
+        segmented = load_from_snapshot_or_fail(snap2, "snapshot boundary 2 must load");
+
+        segmented.run_years(100);
+        auto snap3 = segmented.save_snapshot();
+        segmented = load_from_snapshot_or_fail(snap3, "snapshot boundary 3 must load");
+
+        segmented.run_years(200);
+
+        require_world_state_equal(
+            continuous.state(),
+            segmented.state(),
+            "continuous 500-year run must equal repeated save/load segmented run");
+        require(
+            continuous.save_snapshot() == segmented.save_snapshot(),
+            "continuous and repeated save/load segmented runs must serialize identically");
+    }
+
+    {
+        universe::Simulation before_boundary{config};
+        before_boundary.advance(universe::days(364));
+        const auto pre_bytes = before_boundary.save_snapshot();
+        auto pre_loaded = load_from_snapshot_or_fail(pre_bytes, "pre-boundary snapshot must load");
+        pre_loaded.advance(universe::days(1));
+
+        universe::Simulation direct_cross{config};
+        direct_cross.advance(universe::days(365));
+        require_world_state_equal(
+            pre_loaded.state(),
+            direct_cross.state(),
+            "saving before boundary then crossing must equal uninterrupted crossing");
+
+        universe::Simulation after_boundary{config};
+        after_boundary.advance(universe::days(365));
+        const auto post_bytes = after_boundary.save_snapshot();
+        auto post_loaded = load_from_snapshot_or_fail(post_bytes, "post-boundary snapshot must load");
+        require_world_state_equal(
+            after_boundary.state(),
+            post_loaded.state(),
+            "saving after boundary and reloading must not duplicate processing");
+    }
+
+    {
+        universe::Simulation source{config};
+        source.run_years(5);
+        const auto valid = source.save_snapshot();
+
+        auto bad_magic = clone_bytes(valid);
+        bad_magic[0] = std::byte{0};
+        require_snapshot_load_fails(bad_magic, universe::SnapshotErrorCode::InvalidMagic, "bad magic must be rejected");
+
+        auto bad_version = clone_bytes(valid);
+        bad_version[4] = std::byte{0x02};
+        bad_version[5] = std::byte{0x00};
+        require_snapshot_load_fails(
+            bad_version,
+            universe::SnapshotErrorCode::UnsupportedVersion,
+            "unsupported schema version must be rejected");
+
+        auto truncated = clone_bytes(valid);
+        truncated.pop_back();
+        require_snapshot_load_fails(
+            truncated,
+            universe::SnapshotErrorCode::TruncatedData,
+            "truncated snapshot must be rejected");
+
+        auto checksum_corrupt = clone_bytes(valid);
+        corrupt_byte(checksum_corrupt, 40, 0x01);
+        require_snapshot_load_fails(
+            checksum_corrupt,
+            universe::SnapshotErrorCode::InvalidChecksum,
+            "payload corruption must be rejected via checksum");
+
+        constexpr std::size_t header_size = 24U;
+        constexpr std::size_t payload_people_count_offset = 105U;
+        constexpr std::size_t payload_first_person_offset = 113U;
+        constexpr std::size_t payload_person_record_size = 28U;
+        constexpr std::size_t person_sex_offset_in_record = 16U;
+        constexpr std::size_t person_household_offset_in_record = 18U;
+
+        auto invalid_enum = clone_bytes(valid);
+        invalid_enum[header_size + payload_first_person_offset + person_sex_offset_in_record] = std::byte{2};
+        refresh_snapshot_payload_hash(invalid_enum);
+        require_snapshot_load_fails(
+            invalid_enum,
+            universe::SnapshotErrorCode::InvalidEnum,
+            "invalid enum values must be rejected");
+
+        auto duplicate_person_id = clone_bytes(valid);
+        const auto first_person_id = read_u64_le(duplicate_person_id, header_size + payload_first_person_offset);
+        write_u64_le(
+            duplicate_person_id,
+            header_size + payload_first_person_offset + payload_person_record_size,
+            first_person_id);
+        refresh_snapshot_payload_hash(duplicate_person_id);
+        require_snapshot_load_fails(
+            duplicate_person_id,
+            universe::SnapshotErrorCode::DuplicateId,
+            "duplicate stable person ids must be rejected");
+
+        auto invalid_reference = clone_bytes(valid);
+        write_u64_le(
+            invalid_reference,
+            header_size + payload_first_person_offset + person_household_offset_in_record,
+            9'999'999U);
+        refresh_snapshot_payload_hash(invalid_reference);
+        require_snapshot_load_fails(
+            invalid_reference,
+            universe::SnapshotErrorCode::InvalidReference,
+            "invalid person->household references must be rejected");
+
+        auto malformed_lengths = clone_bytes(valid);
+        write_u64_le(malformed_lengths, header_size + payload_people_count_offset, static_cast<std::uint64_t>(1'000'000U));
+        refresh_snapshot_payload_hash(malformed_lengths);
+        require_snapshot_load_fails(
+            malformed_lengths,
+            universe::SnapshotErrorCode::InvalidStructure,
+            "malformed collection lengths must be rejected");
     }
 
     universe::Simulation a{config};
@@ -394,6 +647,16 @@ int main() {
     universe::Simulation with_probe{probe_config};
     with_probe.run_years(100);
     require_world_state_equal(a.state(), with_probe.state(), "unrelated scoped random probes must not alter canonical results");
+
+    {
+        auto different_seed = config;
+        different_seed.seed = 43;
+        universe::Simulation lhs{config};
+        universe::Simulation rhs{different_seed};
+        lhs.run_years(100);
+        rhs.run_years(100);
+        require(lhs.save_snapshot() != rhs.save_snapshot(), "different seeds should produce different canonical snapshot bytes");
+    }
 
     verify_demographic_invariants(a.state());
     verify_event_log_invariants(a.state());

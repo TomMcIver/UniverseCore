@@ -1,5 +1,7 @@
 #include "universe/simulation.hpp"
 
+#include "universe/snapshot.hpp"
+
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
@@ -30,6 +32,14 @@ const WorldState& Simulation::state() const noexcept {
 
 SimulationTime Simulation::time() const noexcept {
     return state_.time;
+}
+
+std::vector<std::byte> Simulation::save_snapshot() const {
+    return SnapshotCodec::serialize(*this);
+}
+
+SnapshotLoadResult Simulation::load_snapshot(const std::span<const std::byte> data, Simulation& destination) {
+    return SnapshotCodec::deserialize(data, destination);
 }
 
 std::uint64_t Simulation::current_demographic_year() const noexcept {
