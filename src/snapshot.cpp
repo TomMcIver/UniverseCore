@@ -174,6 +174,10 @@ private:
     return id > 0U;
 }
 
+[[nodiscard]] bool is_valid_settlement_id(const SettlementId id) noexcept {
+    return id > 0U;
+}
+
 [[nodiscard]] bool is_valid_event_id(const EventId id) noexcept {
     return id > 0U;
 }
@@ -206,6 +210,7 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
     payload.write_u64(simulation.next_person_id_);
     payload.write_u64(simulation.next_household_id_);
     payload.write_u64(simulation.next_region_id_);
+    payload.write_u64(simulation.next_settlement_id_);
     payload.write_u64(simulation.next_event_id_);
     payload.write_i64(simulation.demography_interval_.ticks);
     payload.write_i64(simulation.demography_next_run_.ticks);
@@ -263,6 +268,7 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
     for (const auto* household : household_order) {
         payload.write_u64(household->id);
         payload.write_u64(household->region_id);
+        payload.write_u64(household->settlement_id);
         payload.write_i64(household->resources.food_inventory.value);
         payload.write_i64(household->resources.food_produced_total);
         payload.write_i64(household->resources.food_consumed_total);
@@ -299,6 +305,23 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
         payload.write_i64(region->wild_food_harvest_limit_per_day);
         payload.write_i64(region->cumulative_wild_food_harvested);
         payload.write_i64(region->cumulative_wild_food_regenerated);
+    }
+
+    std::vector<const Settlement*> settlement_order;
+    settlement_order.reserve(simulation.state_.settlements.size());
+    for (const auto& settlement : simulation.state_.settlements) {
+        settlement_order.push_back(&settlement);
+    }
+    std::sort(settlement_order.begin(), settlement_order.end(), [](const Settlement* lhs, const Settlement* rhs) {
+        return lhs->id < rhs->id;
+    });
+
+    payload.write_u64(static_cast<std::uint64_t>(settlement_order.size()));
+    for (const auto* settlement : settlement_order) {
+        payload.write_u64(settlement->id);
+        payload.write_u64(settlement->region_id);
+        payload.write_bool(settlement->active);
+        payload.write_u32(settlement->access_share_points);
     }
 
     std::vector<const SimulationEvent*> event_order;
@@ -395,6 +418,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     std::uint64_t next_person_id = 0;
     std::uint64_t next_household_id = 0;
     std::uint64_t next_region_id = 0;
+    std::uint64_t next_settlement_id = 0;
     std::uint64_t next_event_id = 0;
     std::int64_t demography_interval_ticks = 0;
     std::int64_t demography_next_run_ticks = 0;
@@ -421,6 +445,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         !payload_reader.read_u64(next_person_id) ||
         !payload_reader.read_u64(next_household_id) ||
         !payload_reader.read_u64(next_region_id) ||
+        !payload_reader.read_u64(next_settlement_id) ||
         !payload_reader.read_u64(next_event_id) ||
         !payload_reader.read_i64(demography_interval_ticks) ||
         !payload_reader.read_i64(demography_next_run_ticks) ||
@@ -522,7 +547,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         return load_error(SnapshotErrorCode::TruncatedData, "Snapshot household section is truncated");
     }
 
-    if (household_count > payload_reader.remaining() / 68U) {
+    if (household_count > payload_reader.remaining() / 76U) {
         return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot household section has invalid length");
     }
 
@@ -535,6 +560,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         std::uint64_t member_count = 0;
         if (!payload_reader.read_u64(household.id) ||
             !payload_reader.read_u64(household.region_id) ||
+            !payload_reader.read_u64(household.settlement_id) ||
             !payload_reader.read_i64(household.resources.food_inventory.value) ||
             !payload_reader.read_i64(household.resources.food_produced_total) ||
             !payload_reader.read_i64(household.resources.food_consumed_total) ||
@@ -639,6 +665,44 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         }
 
         restored_state.regions.push_back(region);
+    }
+
+    std::uint64_t settlement_count = 0;
+    if (!payload_reader.read_u64(settlement_count)) {
+        return load_error(SnapshotErrorCode::TruncatedData, "Snapshot settlement section is truncated");
+    }
+
+    if (settlement_count > payload_reader.remaining() / 21U) {
+        return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot settlement section has invalid length");
+    }
+
+    restored_state.settlements.clear();
+    restored_state.settlements.reserve(static_cast<std::size_t>(settlement_count));
+    std::unordered_set<SettlementId> settlement_ids;
+
+    for (std::uint64_t i = 0; i < settlement_count; ++i) {
+        Settlement settlement{};
+        if (!payload_reader.read_u64(settlement.id) ||
+            !payload_reader.read_u64(settlement.region_id) ||
+            !payload_reader.read_bool(settlement.active) ||
+            !payload_reader.read_u32(settlement.access_share_points)) {
+            return load_error(SnapshotErrorCode::TruncatedData, "Snapshot settlement record is truncated");
+        }
+
+        if (!is_valid_settlement_id(settlement.id)) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot settlement id must be non-zero");
+        }
+        if (!settlement_ids.insert(settlement.id).second) {
+            return load_error(SnapshotErrorCode::DuplicateId, "Snapshot contains duplicate settlement ids");
+        }
+        if (settlement.access_share_points > 10'000U) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot settlement share points are out of range");
+        }
+        if (!settlement.active && settlement.access_share_points != 0U) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot extinct settlement must not retain active share allocation");
+        }
+
+        restored_state.settlements.push_back(settlement);
     }
 
     std::uint64_t event_count = 0;
@@ -805,12 +869,52 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         return load_error(SnapshotErrorCode::InvalidState, "Snapshot next region id is inconsistent");
     }
 
+    std::unordered_map<SettlementId, const Settlement*> settlement_by_id;
+    settlement_by_id.reserve(restored_state.settlements.size());
+    SettlementId max_settlement_id = 0;
+    std::unordered_map<RegionId, std::uint32_t> settlement_share_by_region;
+
+    if (!restored_state.households.empty() && restored_state.settlements.empty()) {
+        return load_error(SnapshotErrorCode::InvalidState, "Snapshot households require settlement records");
+    }
+
+    for (const auto& settlement : restored_state.settlements) {
+        if (!region_by_id.contains(settlement.region_id)) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot settlement references unknown region");
+        }
+
+        settlement_by_id.emplace(settlement.id, &settlement);
+        max_settlement_id = std::max(max_settlement_id, settlement.id);
+        if (settlement.active) {
+            settlement_share_by_region[settlement.region_id] += settlement.access_share_points;
+        }
+    }
+
+    for (const auto& [region_id, allocated_share] : settlement_share_by_region) {
+        (void)region_id;
+        if (allocated_share > 10'000U) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot settlement allocations exceed regional capacity");
+        }
+    }
+
+    const auto expected_next_settlement_id = (max_settlement_id == 0U) ? 1U : (max_settlement_id + 1U);
+    if (next_settlement_id != expected_next_settlement_id) {
+        return load_error(SnapshotErrorCode::InvalidState, "Snapshot next settlement id is inconsistent");
+    }
+
     std::unordered_map<PersonId, std::uint32_t> membership_counts;
     membership_counts.reserve(restored_state.people.size());
 
     for (const auto& household : restored_state.households) {
         if (!region_by_id.contains(household.region_id)) {
             return load_error(SnapshotErrorCode::InvalidReference, "Snapshot household references unknown region");
+        }
+        if (!settlement_by_id.contains(household.settlement_id)) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot household references unknown settlement");
+        }
+        const auto* settlement = settlement_by_id.at(household.settlement_id);
+        if (settlement->region_id != household.region_id) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot household settlement/region mismatch");
         }
 
         for (const auto member_id : household.member_ids) {
@@ -820,6 +924,9 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
             }
             if (!person_it->second->alive) {
                 return load_error(SnapshotErrorCode::InvalidState, "Snapshot household member references a dead person");
+            }
+            if (!settlement->active) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot extinct settlement cannot contain alive household members");
             }
             if (person_it->second->household_id != household.id) {
                 return load_error(SnapshotErrorCode::InvalidReference, "Snapshot person household id does not match household membership");
@@ -1027,6 +1134,9 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     std::sort(restored_state.regions.begin(), restored_state.regions.end(), [](const RegionEnvironmentState& lhs, const RegionEnvironmentState& rhs) {
         return lhs.id < rhs.id;
     });
+    std::sort(restored_state.settlements.begin(), restored_state.settlements.end(), [](const Settlement& lhs, const Settlement& rhs) {
+        return lhs.id < rhs.id;
+    });
     std::sort(restored_state.event_log.begin(), restored_state.event_log.end(), [](const SimulationEvent& lhs, const SimulationEvent& rhs) {
         return lhs.id < rhs.id;
     });
@@ -1037,6 +1147,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     destination.next_person_id_ = next_person_id;
     destination.next_household_id_ = next_household_id;
     destination.next_region_id_ = next_region_id;
+    destination.next_settlement_id_ = next_settlement_id;
     destination.next_event_id_ = next_event_id;
     destination.demography_interval_ = SimulationDuration{demography_interval_ticks};
     destination.demography_next_run_ = SimulationTime{demography_next_run_ticks};

@@ -95,6 +95,8 @@ Do not prematurely introduce distributed systems, GPU kernels, databases, ECS fr
 - Canonical serialized collection order must be explicit and deterministic.
 - Hidden mutable state that affects future outcomes must be either serialized or deterministically reconstructible.
 - Canonical resource quantities must use fixed-width integer units with explicitly documented semantics.
+- Every active household must belong to exactly one valid settlement within its region.
+- Settlement-level access allocation must conserve finite regional capacity (no duplication by additional settlements).
 - Resource-system randomness must be scoped by stable identity + resource domain + canonical period identifier.
 - Simulation state changes should flow through explicit systems/events.
 - Every world-critical algorithm needs deterministic tests.

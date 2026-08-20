@@ -31,10 +31,11 @@ Status: **in progress**
 - [x] health/nutrition
 - [x] basic simulation UI (optional SDL3 + Dear ImGui inspector with smoke test)
 - [x] deterministic land/environment resources
+- [x] deterministic settlements and local carrying capacity
 - [ ] occupations
 - [x] resource inventory
 - [ ] migration
-- [ ] settlement population statistics
+- [x] settlement population statistics
 
 Exit criteria: 100-year runs remain internally valid and produce explainable demographic histories.
 

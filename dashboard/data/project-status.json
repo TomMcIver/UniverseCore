@@ -1,18 +1,18 @@
 {
   "project": "UniverseCore",
-  "as_of": "2026-08-20",
-  "current_phase": "Milestone 1D complete",
-  "current_task": "Milestone 1D labour capacity/allocation integrated via productive effort seam",
-  "next_task": "Milestone 1E: settlement systems",
+  "as_of": "2026-08-21",
+  "current_phase": "Milestone 1E complete",
+  "current_task": "Milestone 1E deterministic settlements and local carrying capacity",
+  "next_task": "Milestone 1F: occupations and specialization",
   "build": {
     "canonical_workflow": "podman scripts/container-test.sh",
-    "last_verified": "2026-08-20",
+    "last_verified": "2026-08-21",
     "status": "passing",
     "notes": "Verified with canonical Podman workflow and clean UI-enabled Podman matrix (UNIVERSECORE_BUILD_UI=ON, fresh build directory)"
   },
   "progress": {
-    "simulation_foundation_percent": 95,
-    "bronze_age_simulator_percent": 24,
+    "simulation_foundation_percent": 97,
+    "bronze_age_simulator_percent": 29,
     "playable_vertical_slice_percent": 6,
     "full_game_vision_percent": 1,
     "note": "Percentages are approximate planning estimates, not objective measurements."
@@ -57,13 +57,13 @@
     {
       "id": "M1E",
       "name": "Settlements",
-      "status": "planned",
-      "percent": 0
+      "status": "complete",
+      "percent": 100
     },
     {
       "id": "M1F",
       "name": "Occupations",
-      "status": "planned",
+      "status": "next",
       "percent": 0
     },
     {
@@ -87,15 +87,14 @@
       "Milestone 1B.5 basic simulation UI (optional SDL3 + Dear ImGui)",
       "Milestone 1C deterministic land/environment resources",
       "Milestone 1D deterministic labour capacity and allocation",
-      "Snapshot schema v4 and validation",
+      "Milestone 1E deterministic settlements and local carrying capacity",
+      "Snapshot schema v5 and validation",
       "Canonical Podman build/test workflow",
       "Development dashboard + deployment workflow"
     ],
     "active": [],
     "planned": [
-      "Milestone 1D labour model",
-      "Milestone 1E settlement systems",
-      "Milestone 1F occupations"
+      "Milestone 1F occupations and specialization"
     ]
   },
   "invariants": [
@@ -107,7 +106,13 @@
   ],
   "recent_verified_commits": [
     {
-      "hash": "7b7f534",
+      "hash": "53547f1",
+      "date": "2026-08-21",
+      "summary": "Implement Milestone 1E deterministic settlements",
+      "verified": true
+    },
+    {
+      "hash": "bd62ac5",
       "date": "2026-08-21",
       "summary": "Implement Milestone 1D deterministic labour capacity and allocation",
       "verified": true

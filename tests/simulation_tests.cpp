@@ -123,6 +123,43 @@ const universe::Household* find_household(const universe::WorldState& state, con
     return nullptr;
 }
 
+const universe::Settlement* find_settlement(const universe::WorldState& state, const universe::SettlementId id) {
+    for (const auto& settlement : state.settlements) {
+        if (settlement.id == id) {
+            return &settlement;
+        }
+    }
+    return nullptr;
+}
+
+void verify_settlement_invariants(const universe::WorldState& state) {
+    std::unordered_set<universe::SettlementId> settlement_ids;
+    std::unordered_map<universe::RegionId, std::uint32_t> allocated_share_by_region;
+
+    for (const auto& settlement : state.settlements) {
+        require(settlement.id > 0, "settlement id must be non-zero");
+        require(settlement_ids.insert(settlement.id).second, "settlement ids must be unique");
+        require(settlement.region_id > 0, "settlement region id must be non-zero");
+        require(settlement.access_share_points <= 10'000U, "settlement share points must be bounded");
+        if (!settlement.active) {
+            require(settlement.access_share_points == 0U, "extinct settlement must not retain active share points");
+        } else {
+            allocated_share_by_region[settlement.region_id] += settlement.access_share_points;
+        }
+    }
+
+    for (const auto& [region_id, share] : allocated_share_by_region) {
+        (void)region_id;
+        require(share <= 10'000U, "active settlement allocation must not exceed regional capacity");
+    }
+
+    for (const auto& household : state.households) {
+        const auto* settlement = find_settlement(state, household.settlement_id);
+        require(settlement != nullptr, "household settlement id must reference existing settlement");
+        require(settlement->region_id == household.region_id, "household settlement and region must be consistent");
+    }
+}
+
 void verify_household_membership(const universe::WorldState& state) {
     std::unordered_set<universe::PersonId> all_member_ids;
     for (const auto& household : state.households) {
@@ -193,6 +230,11 @@ void verify_resource_invariants(const universe::WorldState& state, const std::in
     std::int64_t total_wild_food_regenerated = 0;
 
     std::unordered_set<universe::RegionId> region_ids;
+    std::unordered_set<universe::SettlementId> settlement_ids;
+    for (const auto& settlement : state.settlements) {
+        settlement_ids.insert(settlement.id);
+    }
+
     for (const auto& region : state.regions) {
         require(region.id > 0, "region id must be non-zero");
         require(region_ids.insert(region.id).second, "region ids must be unique");
@@ -218,6 +260,7 @@ void verify_resource_invariants(const universe::WorldState& state, const std::in
     for (const auto& household : state.households) {
         const auto& resources = household.resources;
         require(region_ids.contains(household.region_id), "household region id must reference an existing region");
+        require(settlement_ids.contains(household.settlement_id), "household settlement id must reference an existing settlement");
         require(resources.food_inventory.value >= 0, "household food inventory must never be negative");
         require(resources.food_produced_total >= 0, "household food produced total must never be negative");
         require(resources.food_consumed_total >= 0, "household food consumed total must never be negative");
@@ -266,6 +309,8 @@ void verify_resource_invariants(const universe::WorldState& state, const std::in
     require(
         total_wild_food_regenerated == state.total_wild_food_regenerated,
         "wild regeneration aggregate must match region totals");
+
+    verify_settlement_invariants(state);
 }
 
 void verify_person_health_invariants(const universe::WorldState& state) {
@@ -351,6 +396,7 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
     require(lhs.people.size() == rhs.people.size(), context);
     require(lhs.households.size() == rhs.households.size(), context);
     require(lhs.regions.size() == rhs.regions.size(), context);
+    require(lhs.settlements.size() == rhs.settlements.size(), context);
     require(lhs.event_log.size() == rhs.event_log.size(), context);
 
     for (std::size_t i = 0; i < lhs.people.size(); ++i) {
@@ -373,6 +419,7 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
         const auto& b = rhs.households[i];
         require(a.id == b.id, context);
         require(a.region_id == b.region_id, context);
+        require(a.settlement_id == b.settlement_id, context);
 
         auto a_members = a.member_ids;
         auto b_members = b.member_ids;
@@ -401,6 +448,15 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
         require(a.wild_food_harvest_limit_per_day == b.wild_food_harvest_limit_per_day, context);
         require(a.cumulative_wild_food_harvested == b.cumulative_wild_food_harvested, context);
         require(a.cumulative_wild_food_regenerated == b.cumulative_wild_food_regenerated, context);
+    }
+
+    for (std::size_t i = 0; i < lhs.settlements.size(); ++i) {
+        const auto& a = lhs.settlements[i];
+        const auto& b = rhs.settlements[i];
+        require(a.id == b.id, context);
+        require(a.region_id == b.region_id, context);
+        require(a.active == b.active, context);
+        require(a.access_share_points == b.access_share_points, context);
     }
 
     for (std::size_t i = 0; i < lhs.event_log.size(); ++i) {
@@ -833,6 +889,121 @@ int main() {
     }
 
     {
+        auto settlement_config = config;
+        settlement_config.initial_population = 320;
+        settlement_config.initial_region_count = 2;
+
+        universe::Simulation lhs{settlement_config};
+        universe::Simulation rhs{settlement_config};
+        require_world_state_equal(lhs.state(), rhs.state(), "same seed must produce identical initial settlements");
+
+        auto different_seed = settlement_config;
+        different_seed.seed = 99;
+        universe::Simulation diverged{different_seed};
+
+        bool settlement_diverged = lhs.state().settlements.size() != diverged.state().settlements.size();
+        if (!settlement_diverged) {
+            for (std::size_t i = 0; i < lhs.state().settlements.size(); ++i) {
+                const auto& a = lhs.state().settlements[i];
+                const auto& b = diverged.state().settlements[i];
+                if (a.region_id != b.region_id || a.access_share_points != b.access_share_points) {
+                    settlement_diverged = true;
+                    break;
+                }
+            }
+        }
+        require(settlement_diverged, "different seeds should diverge in settlement generation");
+    }
+
+    {
+        auto multi_settlement = config;
+        multi_settlement.initial_population = 360;
+        multi_settlement.initial_region_count = 1;
+        multi_settlement.base_region_area_units = 90;
+
+        universe::Simulation simulation{multi_settlement};
+        verify_settlement_invariants(simulation.state());
+
+        std::unordered_map<universe::RegionId, std::uint64_t> settlement_counts;
+        for (const auto& settlement : simulation.state().settlements) {
+            ++settlement_counts[settlement.region_id];
+        }
+
+        bool has_multiple = false;
+        for (const auto& [region_id, count] : settlement_counts) {
+            (void)region_id;
+            if (count > 1U) {
+                has_multiple = true;
+            }
+        }
+        require(has_multiple, "a region should support multiple settlements");
+    }
+
+    {
+        auto founder = config;
+        founder.initial_population = 300;
+        founder.initial_region_count = 1;
+        founder.base_region_area_units = 60;
+        founder.initial_household_food_units = 10;
+        founder.food_production_scale_percent = 90;
+
+        universe::Simulation a{founder};
+        universe::Simulation b{founder};
+        a.run_years(120);
+        b.run_years(120);
+        require_world_state_equal(a.state(), b.state(), "settlement founding/splitting must be deterministic");
+
+        bool found_split = false;
+        for (const auto& settlement : a.state().settlements) {
+            if (settlement.id > 1U) {
+                found_split = true;
+                break;
+            }
+        }
+        require(found_split, "over-pressured region with spare share should found at least one new settlement");
+    }
+
+    {
+        auto resource_rich = config;
+        resource_rich.initial_population = 220;
+        resource_rich.initial_region_count = 1;
+        resource_rich.base_region_area_units = 180;
+
+        auto constrained = resource_rich;
+        constrained.base_region_area_units = 45;
+
+        universe::ui::SimulationController rich_controller{resource_rich};
+        universe::ui::SimulationController constrained_controller{constrained};
+        rich_controller.advance_years(15);
+        constrained_controller.advance_years(15);
+
+        const auto rich_settlements = rich_controller.settlement_summaries();
+        const auto constrained_settlements = constrained_controller.settlement_summaries();
+
+        std::int64_t rich_capacity = 0;
+        std::int64_t constrained_capacity = 0;
+        std::uint32_t rich_pressure = 0;
+        std::uint32_t constrained_pressure = 0;
+        for (const auto& settlement : rich_settlements) {
+            if (!settlement.active) {
+                continue;
+            }
+            rich_capacity += settlement.accessible_food_capacity_per_day;
+            rich_pressure = std::max(rich_pressure, settlement.pressure_per_10k);
+        }
+        for (const auto& settlement : constrained_settlements) {
+            if (!settlement.active) {
+                continue;
+            }
+            constrained_capacity += settlement.accessible_food_capacity_per_day;
+            constrained_pressure = std::max(constrained_pressure, settlement.pressure_per_10k);
+        }
+
+        require(rich_capacity > constrained_capacity, "resource-rich settlement profile should have higher local capacity");
+        require(constrained_pressure >= rich_pressure, "constrained local capacity should increase settlement pressure");
+    }
+
+    {
         universe::Simulation labour_order{config};
         labour_order.run_years(5);
         const auto& state = labour_order.state();
@@ -1158,7 +1329,7 @@ int main() {
         require_snapshot_load_fails(bad_magic, universe::SnapshotErrorCode::InvalidMagic, "bad magic must be rejected");
 
         auto bad_version = clone_bytes(valid);
-        bad_version[4] = std::byte{0x05};
+        bad_version[4] = std::byte{0x06};
         bad_version[5] = std::byte{0x00};
         require_snapshot_load_fails(
             bad_version,
@@ -1180,8 +1351,8 @@ int main() {
             "payload corruption must be rejected via checksum");
 
         constexpr std::size_t header_size = 24U;
-        constexpr std::size_t payload_people_count_offset = 250U;
-        constexpr std::size_t payload_first_person_offset = 258U;
+        constexpr std::size_t payload_people_count_offset = 258U;
+        constexpr std::size_t payload_first_person_offset = 266U;
         constexpr std::size_t payload_person_record_size = 40U;
         constexpr std::size_t person_sex_offset_in_record = 16U;
         constexpr std::size_t person_household_offset_in_record = 18U;

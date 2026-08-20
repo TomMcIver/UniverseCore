@@ -181,6 +181,15 @@ int main(int argc, char** argv) {
             std::uint64_t adults = 0;
             std::uint64_t children = 0;
             std::uint64_t alive_people = 0;
+            std::uint64_t settlements_active = 0;
+            std::uint64_t settlements_extinct = 0;
+            std::uint64_t largest_settlement = 0;
+            std::uint64_t high_pressure_settlements = 0;
+            std::uint64_t total_settlement_population = 0;
+            const auto max_i64_as_u64 = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+            const auto current_year = (state.year > max_i64_as_u64)
+                ? std::numeric_limits<std::int64_t>::max()
+                : static_cast<std::int64_t>(state.year);
 
             for (const auto& person : state.people) {
                 if (!person.alive) {
@@ -188,10 +197,6 @@ int main(int argc, char** argv) {
                 }
 
                 ++alive_people;
-                const auto max_i64_as_u64 = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
-                const auto current_year = (state.year > max_i64_as_u64)
-                    ? std::numeric_limits<std::int64_t>::max()
-                    : static_cast<std::int64_t>(state.year);
                 const auto age = (current_year > person.birth_year)
                     ? static_cast<std::uint64_t>(current_year - person.birth_year)
                     : 0ULL;
@@ -202,11 +207,70 @@ int main(int argc, char** argv) {
                 }
             }
 
+            for (const auto& settlement : state.settlements) {
+                if (settlement.active) {
+                    ++settlements_active;
+                } else {
+                    ++settlements_extinct;
+                }
+
+                std::int64_t settlement_required = 0;
+                std::uint64_t settlement_alive = 0;
+                for (const auto& household : state.households) {
+                    if (household.settlement_id != settlement.id) {
+                        continue;
+                    }
+                    for (const auto member_id : household.member_ids) {
+                        for (const auto& person : state.people) {
+                            if (person.id != member_id || !person.alive) {
+                                continue;
+                            }
+                            ++settlement_alive;
+                            const auto age = (current_year > person.birth_year)
+                                ? static_cast<std::uint64_t>(current_year - person.birth_year)
+                                : 0ULL;
+                            settlement_required += (age >= 18U) ? 10 : 6;
+                            break;
+                        }
+                    }
+                }
+
+                total_settlement_population += settlement_alive;
+                largest_settlement = std::max(largest_settlement, settlement_alive);
+
+                std::int64_t settlement_capacity = 0;
+                for (const auto& region : state.regions) {
+                    if (region.id != settlement.region_id) {
+                        continue;
+                    }
+                    settlement_capacity =
+                        (region.productive_capacity_per_day * static_cast<std::int64_t>(settlement.access_share_points)) / 10'000 +
+                        (region.wild_food_harvest_limit_per_day * static_cast<std::int64_t>(settlement.access_share_points)) / 10'000;
+                    break;
+                }
+
+                if (settlement.active && settlement_required > 0 && settlement_capacity > 0) {
+                    const auto pressure = (settlement_required * 10'000) / settlement_capacity;
+                    if (pressure >= 11'500) {
+                        ++high_pressure_settlements;
+                    }
+                }
+            }
+
+            const auto avg_settlement_population = settlements_active > 0
+                ? (total_settlement_population / settlements_active)
+                : 0U;
+
             std::cout << "year=" << state.year
                       << " population=" << state.population
                       << " people_total=" << state.people.size()
                       << " alive_people=" << alive_people
                       << " households=" << state.households.size()
+                      << " settlements_active=" << settlements_active
+                      << " settlements_extinct=" << settlements_extinct
+                      << " largest_settlement=" << largest_settlement
+                      << " avg_settlement_population=" << avg_settlement_population
+                      << " high_pressure_settlements=" << high_pressure_settlements
                       << " events_total=" << state.event_log.size()
                       << " food_stored=" << state.total_food_stored
                       << " food_produced=" << state.total_food_produced

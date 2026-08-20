@@ -38,6 +38,7 @@ const Simulation& SimulationController::simulation() const noexcept {
 SimulationSummary SimulationController::summary() const noexcept {
     const auto& state = simulation_.state();
     const auto labour_parameters = FoodModelParameters{};
+    const auto settlement_views = settlement_summaries();
 
     std::uint64_t healthy_population = 0;
     std::uint64_t mildly_malnourished = 0;
@@ -110,6 +111,11 @@ SimulationSummary SimulationController::summary() const noexcept {
 
     std::uint64_t zero_capable_worker_households = 0;
     std::uint64_t labour_constrained_households = 0;
+    std::uint64_t active_settlements = 0;
+    std::uint64_t extinct_settlements = 0;
+    std::uint64_t largest_settlement_population = 0;
+    std::uint64_t high_pressure_settlements = 0;
+    std::uint64_t total_settlement_population = 0;
 
     for (const auto& household : state.households) {
         std::int64_t household_capacity = 0;
@@ -135,6 +141,23 @@ SimulationSummary SimulationController::summary() const noexcept {
         }
     }
 
+    for (const auto& settlement : settlement_views) {
+        if (settlement.active) {
+            ++active_settlements;
+        } else {
+            ++extinct_settlements;
+        }
+        total_settlement_population += settlement.alive_population;
+        largest_settlement_population = std::max(largest_settlement_population, settlement.alive_population);
+        if (settlement.active && settlement.pressure_per_10k >= 11'500U) {
+            ++high_pressure_settlements;
+        }
+    }
+
+    const auto average_settlement_population = active_settlements > 0
+        ? (total_settlement_population / active_settlements)
+        : 0U;
+
     return SimulationSummary{
         .seed = state.seed,
         .time = state.time,
@@ -145,6 +168,11 @@ SimulationSummary SimulationController::summary() const noexcept {
         .households = static_cast<std::uint64_t>(state.households.size()),
         .births = state.total_births,
         .deaths = state.total_deaths,
+        .active_settlements = active_settlements,
+        .extinct_settlements = extinct_settlements,
+        .average_settlement_population = average_settlement_population,
+        .largest_settlement_population = largest_settlement_population,
+        .high_pressure_settlements = high_pressure_settlements,
         .food_stored = state.total_food_stored,
         .food_produced = state.total_food_produced,
         .food_consumed = state.total_food_consumed,
@@ -173,8 +201,100 @@ std::span<const Household> SimulationController::households() const noexcept {
     return simulation_.state().households;
 }
 
+std::span<const Settlement> SimulationController::settlements() const noexcept {
+    return simulation_.state().settlements;
+}
+
+std::span<const RegionEnvironmentState> SimulationController::regions() const noexcept {
+    return simulation_.state().regions;
+}
+
 std::span<const SimulationEvent> SimulationController::events() const noexcept {
     return simulation_.state().event_log;
+}
+
+std::vector<SettlementSummaryView> SimulationController::settlement_summaries() const {
+    const auto& state = simulation_.state();
+    const auto labour_parameters = FoodModelParameters{};
+
+    std::unordered_map<PersonId, const Person*> person_by_id;
+    person_by_id.reserve(state.people.size());
+    for (const auto& person : state.people) {
+        person_by_id.emplace(person.id, &person);
+    }
+
+    std::unordered_map<RegionId, const RegionEnvironmentState*> region_by_id;
+    region_by_id.reserve(state.regions.size());
+    for (const auto& region : state.regions) {
+        region_by_id.emplace(region.id, &region);
+    }
+
+    std::vector<SettlementSummaryView> summaries;
+    summaries.reserve(state.settlements.size());
+    for (const auto& settlement : state.settlements) {
+        SettlementSummaryView summary{};
+        summary.id = settlement.id;
+        summary.region_id = settlement.region_id;
+        summary.active = settlement.active;
+
+        const auto region_it = region_by_id.find(settlement.region_id);
+        const RegionEnvironmentState* region = (region_it == region_by_id.end()) ? nullptr : region_it->second;
+        if (region != nullptr && settlement.active) {
+            const auto productive =
+                (region->productive_capacity_per_day * static_cast<std::int64_t>(settlement.access_share_points)) / 10'000;
+            const auto wild =
+                (region->wild_food_harvest_limit_per_day * static_cast<std::int64_t>(settlement.access_share_points)) / 10'000;
+            summary.accessible_food_capacity_per_day = productive + wild;
+        }
+
+        for (const auto& household : state.households) {
+            if (household.settlement_id != settlement.id) {
+                continue;
+            }
+
+            ++summary.households;
+            summary.food_stored += household.resources.food_inventory.value;
+            summary.food_unmet_total += household.resources.unmet_food_total;
+
+            for (const auto member_id : household.member_ids) {
+                const auto person_it = person_by_id.find(member_id);
+                if (person_it == person_by_id.end() || !person_it->second->alive) {
+                    continue;
+                }
+
+                const auto* person = person_it->second;
+                const auto current_year = (state.year > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+                    ? std::numeric_limits<std::int64_t>::max()
+                    : static_cast<std::int64_t>(state.year);
+                const auto age = (current_year > person->birth_year)
+                    ? static_cast<std::uint32_t>(current_year - person->birth_year)
+                    : 0U;
+
+                ++summary.alive_population;
+                summary.labour_capacity += person_labour_capacity_units(
+                    true,
+                    age,
+                    person->nutrition_points,
+                    person->health_points,
+                    labour_parameters,
+                    100U);
+                summary.labour_demand += age_based_labour_capacity_units(age, labour_parameters);
+
+                if (summary.accessible_food_capacity_per_day > 0) {
+                    summary.pressure_per_10k = static_cast<std::uint32_t>(
+                        std::min<std::int64_t>(
+                            100'000,
+                            (summary.labour_demand * 10'000) / summary.accessible_food_capacity_per_day));
+                } else if (summary.labour_demand > 0) {
+                    summary.pressure_per_10k = 100'000U;
+                }
+            }
+        }
+
+        summaries.push_back(summary);
+    }
+
+    return summaries;
 }
 
 void SimulationController::advance_days(const std::uint64_t days_count) {

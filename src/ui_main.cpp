@@ -24,8 +24,11 @@ using universe::Household;
 using universe::HouseholdId;
 using universe::Person;
 using universe::PersonId;
+using universe::Settlement;
+using universe::SettlementId;
 using universe::SimulationEvent;
 using universe::ui::SimulationController;
+using universe::ui::SettlementSummaryView;
 using universe::ui::SimulationSummary;
 
 struct UiHistory {
@@ -62,6 +65,7 @@ struct UiState {
 
     std::optional<HouseholdId> selected_household{};
     std::optional<PersonId> selected_person{};
+    std::optional<SettlementId> selected_settlement{};
 
     bool show_birth_events{true};
     bool show_death_events{true};
@@ -81,6 +85,15 @@ struct UiState {
     for (const auto& household : households) {
         if (household.id == id) {
             return &household;
+        }
+    }
+    return nullptr;
+}
+
+[[nodiscard]] const Settlement* find_settlement(const std::span<const Settlement> settlements, const SettlementId id) {
+    for (const auto& settlement : settlements) {
+        if (settlement.id == id) {
+            return &settlement;
         }
     }
     return nullptr;
@@ -298,6 +311,7 @@ int main(int argc, char** argv) {
                 .seed = ui.seed_input,
                 .initial_population = ui.population_input,
             });
+            ui.selected_settlement.reset();
             ui.selected_household.reset();
             ui.selected_person.reset();
             ui.history = UiHistory{};
@@ -358,6 +372,12 @@ int main(int argc, char** argv) {
             static_cast<long long>(summary.total_labour_demand),
             static_cast<unsigned long long>(summary.labour_constrained_households),
             static_cast<unsigned long long>(summary.zero_capable_worker_households));
+        ImGui::Text("Settlements: active=%llu extinct=%llu avg_pop=%llu largest=%llu high_pressure=%llu",
+            static_cast<unsigned long long>(summary.active_settlements),
+            static_cast<unsigned long long>(summary.extinct_settlements),
+            static_cast<unsigned long long>(summary.average_settlement_population),
+            static_cast<unsigned long long>(summary.largest_settlement_population),
+            static_cast<unsigned long long>(summary.high_pressure_settlements));
         ImGui::Text("Age bands: child=%llu working_age=%llu elderly=%llu",
             static_cast<unsigned long long>(summary.child_population),
             static_cast<unsigned long long>(summary.working_age_population),
@@ -366,8 +386,53 @@ int main(int argc, char** argv) {
         ImGui::Separator();
 
         const auto households = controller.households();
+        const auto settlements = controller.settlements();
+        const auto settlement_summaries = controller.settlement_summaries();
         const auto people = controller.people();
         const auto events = controller.events();
+
+        ImGui::BeginChild("settlements", ImVec2(0, 180), true);
+        ImGui::Text("Settlements");
+        if (ImGui::BeginTable("settlement_table", 9, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable)) {
+            ImGui::TableSetupColumn("ID");
+            ImGui::TableSetupColumn("Region");
+            ImGui::TableSetupColumn("Status");
+            ImGui::TableSetupColumn("Pop");
+            ImGui::TableSetupColumn("Households");
+            ImGui::TableSetupColumn("Labour");
+            ImGui::TableSetupColumn("Capacity");
+            ImGui::TableSetupColumn("Pressure");
+            ImGui::TableSetupColumn("FoodStored");
+            ImGui::TableHeadersRow();
+
+            for (const auto& settlement : settlement_summaries) {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                const bool selected = ui.selected_settlement.has_value() && ui.selected_settlement.value() == settlement.id;
+                if (ImGui::Selectable(std::to_string(settlement.id).c_str(), selected, ImGuiSelectableFlags_SpanAllColumns)) {
+                    ui.selected_settlement = settlement.id;
+                }
+                ImGui::TableSetColumnIndex(1);
+                ImGui::TextUnformatted(std::to_string(settlement.region_id).c_str());
+                ImGui::TableSetColumnIndex(2);
+                ImGui::TextUnformatted(settlement.active ? "active" : "extinct");
+                ImGui::TableSetColumnIndex(3);
+                ImGui::TextUnformatted(std::to_string(settlement.alive_population).c_str());
+                ImGui::TableSetColumnIndex(4);
+                ImGui::TextUnformatted(std::to_string(settlement.households).c_str());
+                ImGui::TableSetColumnIndex(5);
+                ImGui::TextUnformatted(std::to_string(settlement.labour_capacity).c_str());
+                ImGui::TableSetColumnIndex(6);
+                ImGui::TextUnformatted(std::to_string(settlement.accessible_food_capacity_per_day).c_str());
+                ImGui::TableSetColumnIndex(7);
+                ImGui::TextUnformatted(std::to_string(settlement.pressure_per_10k).c_str());
+                ImGui::TableSetColumnIndex(8);
+                ImGui::TextUnformatted(std::to_string(settlement.food_stored).c_str());
+            }
+
+            ImGui::EndTable();
+        }
+        ImGui::EndChild();
 
         ImGui::BeginChild("households", ImVec2(0, 220), true);
         ImGui::Text("Households");
@@ -411,13 +476,36 @@ int main(int argc, char** argv) {
         ImGui::EndChild();
 
         ImGui::BeginChild("inspectors", ImVec2(0, 250), true);
-        ImGui::Columns(2);
+        ImGui::Columns(3);
 
+        ImGui::Text("Settlement Inspector");
+        if (ui.selected_settlement.has_value()) {
+            const auto* settlement = find_settlement(settlements, *ui.selected_settlement);
+            if (settlement != nullptr) {
+                ImGui::Text("ID: %llu", static_cast<unsigned long long>(settlement->id));
+                ImGui::Text("Region: %llu", static_cast<unsigned long long>(settlement->region_id));
+                ImGui::Text("Status: %s", settlement->active ? "active" : "extinct");
+                ImGui::Text("Access share: %u/10000", settlement->access_share_points);
+                ImGui::Separator();
+                ImGui::TextUnformatted("Households");
+                for (const auto& household : households) {
+                    if (household.settlement_id != settlement->id) {
+                        continue;
+                    }
+                    if (ImGui::SmallButton(("Household " + std::to_string(household.id)).c_str())) {
+                        ui.selected_household = household.id;
+                    }
+                }
+            }
+        }
+
+        ImGui::NextColumn();
         ImGui::Text("Household Inspector");
         if (ui.selected_household.has_value()) {
             const auto* household = find_household(households, *ui.selected_household);
             if (household != nullptr) {
                 ImGui::Text("ID: %llu", static_cast<unsigned long long>(household->id));
+                ImGui::Text("Settlement: %llu", static_cast<unsigned long long>(household->settlement_id));
                 ImGui::Text("Food inventory: %lld", static_cast<long long>(household->resources.food_inventory.value));
                 ImGui::Text("Produced: %lld", static_cast<long long>(household->resources.food_produced_total));
                 ImGui::Text("Consumed: %lld", static_cast<long long>(household->resources.food_consumed_total));

@@ -25,11 +25,13 @@ The project deliberately starts without Unreal Engine. The initial objective is 
 - Versioned deterministic canonical snapshots
 - Deterministic household food production/storage/consumption
 - Deterministic regional environment resources (finite productive capacity + renewable wild stock)
+- Deterministic settlement layer between regions and households
+- Deterministic local carrying-capacity pressure and settlement-level resource access
 - Deterministic person-level nutrition/health affecting demographic outcomes
 - Optional SDL3 + Dear ImGui simulation inspector (`UNIVERSECORE_BUILD_UI=ON`)
 - UI command/query adapter over canonical simulation state
 - UI smoke test validating deterministic advance/save/load behavior
-- Snapshot schema v4 with deterministic region/environment persistence and validation
+- Snapshot schema v5 with deterministic settlement persistence/validation
 - Reproducibility tests
 - No engine dependency
 

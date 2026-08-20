@@ -188,9 +188,19 @@ Current implementation status:
 - deterministic person ID allocation
 - person birth year, sex and alive/dead state
 - household membership with stable household IDs
+- settlement membership with stable settlement IDs
 - annual mortality by age band
 - annual fertility by age band with household-context father sampling
 - parent links on newborn creation
+
+Current canonical social hierarchy:
+
+```text
+Region
+  └── Settlement
+          └── Household
+                  └── Person
+```
 
 ## Resource architecture
 
@@ -211,6 +221,25 @@ Current implementation status (Milestone 1C):
 - world-level environment aggregates derived from canonical region state
 - daily resource scheduler tied to canonical simulation time
 - yearly demography remains scheduled separately, but now consumes food-stress signals
+
+Current implementation status (Milestone 1E):
+
+- deterministic settlement generation per region from canonical seed + stable IDs
+- deterministic household-to-settlement assignment (order independent)
+- multiple settlements per region with independent local outcomes
+- finite region capacity allocated to settlements via canonical access shares
+- local carrying-capacity pressure (settlement demand vs accessible capacity)
+- deterministic yearly settlement restructuring (founding/splitting + extinction)
+- extinct settlements retain identity but no active share allocation
+
+Finite resource-allocation hierarchy:
+
+```text
+Region environment capacity
+        -> Settlement local access share
+                        -> Household labour allocation
+                                        -> Food production/consumption outcomes
+```
 
 Invariants:
 

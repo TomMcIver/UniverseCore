@@ -29,6 +29,10 @@ enum class SeedDomain : std::uint64_t {
     RegionWildCapacity = 0x41C5A278D9B3EF64ULL,
     RegionDailyVariation = 0x734DE90FC1A2BB57ULL,
     RegionWildHarvest = 0xE13AC59472FB0D8EULL,
+    Settlement = 0x4E9F2A60D713B8C4ULL,
+    SettlementAssignment = 0x9D3C2F7AB16450E1ULL,
+    SettlementFounding = 0x21ACF89E57D4306BULL,
+    SettlementHouseholdSelection = 0xB3E2D1904A6FC87DULL,
 };
 
 [[nodiscard]] constexpr std::uint64_t mix_u64(const std::uint64_t value) noexcept {

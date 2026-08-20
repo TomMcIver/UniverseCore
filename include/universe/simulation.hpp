@@ -16,6 +16,7 @@ namespace universe {
 using PersonId = std::uint64_t;
 using HouseholdId = std::uint64_t;
 using RegionId = std::uint64_t;
+using SettlementId = std::uint64_t;
 using EventId = std::uint64_t;
 
 enum class BiologicalSex : std::uint8_t {
@@ -39,8 +40,16 @@ struct Person {
 struct Household {
     HouseholdId id{};
     RegionId region_id{};
+    SettlementId settlement_id{};
     std::vector<PersonId> member_ids{};
     HouseholdResourceState resources{};
+};
+
+struct Settlement {
+    SettlementId id{};
+    RegionId region_id{};
+    bool active{true};
+    std::uint32_t access_share_points{};
 };
 
 enum class EnvironmentClass : std::uint8_t {
@@ -111,6 +120,7 @@ struct WorldState {
     std::vector<Person> people{};
     std::vector<Household> households{};
     std::vector<RegionEnvironmentState> regions{};
+    std::vector<Settlement> settlements{};
     std::vector<SimulationEvent> event_log{};
 };
 
@@ -130,10 +140,12 @@ private:
     [[nodiscard]] PersonId next_person_id() noexcept;
     [[nodiscard]] HouseholdId next_household_id() noexcept;
     [[nodiscard]] RegionId next_region_id() noexcept;
+    [[nodiscard]] SettlementId next_settlement_id() noexcept;
     [[nodiscard]] SimulationSeed root_seed() const noexcept;
     [[nodiscard]] SimulationSeed person_seed(PersonId person_id) const noexcept;
     [[nodiscard]] SimulationSeed household_seed(HouseholdId household_id) const noexcept;
     [[nodiscard]] SimulationSeed region_seed(RegionId region_id) const noexcept;
+    [[nodiscard]] SimulationSeed settlement_seed(SettlementId settlement_id) const noexcept;
     [[nodiscard]] bool sample_sex(SimulationSeed seed) const noexcept;
     [[nodiscard]] std::uint32_t sample_initial_age_years(PersonId person_id) const noexcept;
     [[nodiscard]] std::uint32_t mortality_rate_per_10k(std::uint32_t age_years) const noexcept;
@@ -161,6 +173,14 @@ private:
     void refresh_environment_aggregates() noexcept;
     void initialize_regions();
     void assign_households_to_regions();
+    void initialize_settlements();
+    void process_settlement_restructuring(std::uint64_t demographic_year);
+    void process_settlement_extinction();
+    void process_settlement_founding(std::uint64_t demographic_year);
+    [[nodiscard]] std::uint32_t settlement_pressure_per_10k(const Settlement& settlement) const noexcept;
+    [[nodiscard]] std::int64_t settlement_accessible_food_capacity_per_day(const Settlement& settlement) const noexcept;
+    [[nodiscard]] Settlement* find_settlement_mutable(SettlementId settlement_id) noexcept;
+    [[nodiscard]] const Settlement* find_settlement(SettlementId settlement_id) const noexcept;
     [[nodiscard]] RegionEnvironmentState generate_region_state(RegionId region_id) const;
     [[nodiscard]] RegionEnvironmentState* find_region_mutable(RegionId region_id) noexcept;
     [[nodiscard]] const RegionEnvironmentState* find_region(RegionId region_id) const noexcept;
@@ -179,6 +199,7 @@ private:
     PersonId next_person_id_{1};
     HouseholdId next_household_id_{1};
     RegionId next_region_id_{1};
+    SettlementId next_settlement_id_{1};
     EventId next_event_id_{1};
     SimulationDuration demography_interval_{DemographicCalendarAdapter::year_duration()};
     SimulationTime demography_next_run_{DemographicCalendarAdapter::year_duration().ticks};

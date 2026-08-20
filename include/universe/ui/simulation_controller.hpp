@@ -4,6 +4,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <vector>
 
 #include "universe/simulation.hpp"
 #include "universe/snapshot.hpp"
@@ -20,6 +21,11 @@ struct SimulationSummary {
     std::uint64_t households{};
     std::uint64_t births{};
     std::uint64_t deaths{};
+    std::uint64_t active_settlements{};
+    std::uint64_t extinct_settlements{};
+    std::uint64_t average_settlement_population{};
+    std::uint64_t largest_settlement_population{};
+    std::uint64_t high_pressure_settlements{};
 
     std::int64_t food_stored{};
     std::int64_t food_produced{};
@@ -50,6 +56,20 @@ struct SnapshotOperationResult {
     std::string message{};
 };
 
+struct SettlementSummaryView {
+    SettlementId id{};
+    RegionId region_id{};
+    bool active{false};
+    std::uint64_t alive_population{};
+    std::uint64_t households{};
+    std::int64_t labour_capacity{};
+    std::int64_t labour_demand{};
+    std::int64_t accessible_food_capacity_per_day{};
+    std::uint32_t pressure_per_10k{};
+    std::int64_t food_stored{};
+    std::int64_t food_unmet_total{};
+};
+
 class SimulationController {
 public:
     explicit SimulationController(SimulationConfig config = {});
@@ -61,7 +81,10 @@ public:
 
     [[nodiscard]] std::span<const Person> people() const noexcept;
     [[nodiscard]] std::span<const Household> households() const noexcept;
+    [[nodiscard]] std::span<const Settlement> settlements() const noexcept;
+    [[nodiscard]] std::span<const RegionEnvironmentState> regions() const noexcept;
     [[nodiscard]] std::span<const SimulationEvent> events() const noexcept;
+    [[nodiscard]] std::vector<SettlementSummaryView> settlement_summaries() const;
 
     void advance_days(std::uint64_t days);
     void advance_years(std::uint64_t years);

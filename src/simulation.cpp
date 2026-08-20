@@ -14,6 +14,16 @@ namespace {
 constexpr std::uint32_t kAdultAgeYears = 18;
 constexpr std::int64_t kMinRegionAreaUnits = 10;
 constexpr std::int64_t kMaxRegionAreaUnits = 10'000;
+constexpr std::uint32_t kSettlementShareScale = 10'000;
+constexpr std::uint32_t kInitialAllocatedSettlementShare = 8'500;
+constexpr std::uint32_t kHighPressureThresholdPer10k = 11'500;
+constexpr std::uint32_t kFoundingMinimumUnallocatedShare = 800;
+constexpr std::uint32_t kFoundingDefaultShare = 1'200;
+constexpr std::uint64_t kFoundingMinimumSourceHouseholds = 6;
+constexpr std::uint64_t kFoundingMinimumNewHouseholds = 2;
+constexpr std::uint64_t kFoundingMinimumRemainingHouseholds = 3;
+constexpr std::uint64_t kTargetHouseholdsPerSettlement = 8;
+constexpr std::uint64_t kMaxInitialSettlementsPerRegion = 6;
 
 std::uint32_t bounded_u32(const std::uint64_t value) {
     return static_cast<std::uint32_t>(std::min(value, static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max())));
@@ -84,6 +94,7 @@ Simulation::Simulation(SimulationConfig config)
     initialize_households();
     initialize_regions();
     assign_households_to_regions();
+    initialize_settlements();
     refresh_population_count();
     refresh_food_aggregates();
     refresh_environment_aggregates();
@@ -218,58 +229,19 @@ void Simulation::process_food_period(const std::uint64_t food_period) {
     });
 
     for (auto& region : state_.regions) {
-        std::vector<HouseholdDayState*> region_households;
-        std::int64_t total_effort = 0;
-
-        for (auto& household_state : household_states) {
-            if (household_state.household->region_id != region.id) {
-                continue;
-            }
-            region_households.push_back(&household_state);
-            if (!checked_add_i64(total_effort, household_state.productive_effort, total_effort)) {
-                throw std::overflow_error("Region effort overflow");
+        std::vector<SettlementId> active_settlement_ids;
+        active_settlement_ids.reserve(state_.settlements.size());
+        for (const auto& settlement : state_.settlements) {
+            if (settlement.active && settlement.region_id == region.id && settlement.access_share_points > 0U) {
+                active_settlement_ids.push_back(settlement.id);
             }
         }
-
-        if (region_households.empty() || total_effort <= 0) {
-            if (region.wild_food_stock < region.wild_food_capacity) {
-                const auto deficit = region.wild_food_capacity - region.wild_food_stock;
-                const auto regeneration = std::min(deficit, region.wild_food_regeneration_per_day);
-                if (!checked_add_i64(region.wild_food_stock, regeneration, region.wild_food_stock) ||
-                    !checked_add_i64(region.cumulative_wild_food_regenerated, regeneration, region.cumulative_wild_food_regenerated)) {
-                    throw std::overflow_error("Region regeneration overflow");
-                }
-            }
-            continue;
-        }
+        std::sort(active_settlement_ids.begin(), active_settlement_ids.end());
 
         auto productive_available = apply_scaled_percent(region.productive_capacity_per_day, config_.food_production_scale_percent);
         const auto productive_seed = derive_seed(region_seed(region.id), SeedDomain::RegionDailyVariation, food_period);
         const auto productive_variation_percent = 85U + static_cast<std::uint32_t>(seed_random_bounded(productive_seed, 31U));
         productive_available = apply_scaled_percent(productive_available, productive_variation_percent);
-
-        std::int64_t distributed_productive = 0;
-        for (auto* household_state : region_households) {
-            if (household_state->productive_effort <= 0) {
-                continue;
-            }
-            household_state->produced_food = (productive_available * household_state->productive_effort) / total_effort;
-            if (!checked_add_i64(distributed_productive, household_state->produced_food, distributed_productive)) {
-                throw std::overflow_error("Region productive distribution overflow");
-            }
-        }
-
-        auto productive_remainder = productive_available - distributed_productive;
-        for (auto* household_state : region_households) {
-            if (productive_remainder <= 0) {
-                break;
-            }
-            if (household_state->productive_effort <= 0) {
-                continue;
-            }
-            ++household_state->produced_food;
-            --productive_remainder;
-        }
 
         auto wild_harvest_available = std::min(region.wild_food_stock, region.wild_food_harvest_limit_per_day);
         const auto wild_seed = derive_seed(region_seed(region.id), SeedDomain::RegionWildHarvest, food_period);
@@ -278,28 +250,88 @@ void Simulation::process_food_period(const std::uint64_t food_period) {
         wild_harvest_available = std::min(wild_harvest_available, region.wild_food_stock);
 
         std::int64_t distributed_wild = 0;
-        for (auto* household_state : region_households) {
-            if (household_state->productive_effort <= 0) {
+
+        for (const auto settlement_id : active_settlement_ids) {
+            const auto* settlement = find_settlement(settlement_id);
+            if (settlement == nullptr || settlement->access_share_points == 0U) {
                 continue;
             }
-            const auto wild_for_household = (wild_harvest_available * household_state->productive_effort) / total_effort;
-            if (!checked_add_i64(household_state->produced_food, wild_for_household, household_state->produced_food) ||
-                !checked_add_i64(distributed_wild, wild_for_household, distributed_wild)) {
+
+            std::vector<HouseholdDayState*> settlement_households;
+            std::int64_t settlement_effort = 0;
+            for (auto& household_state : household_states) {
+                if (household_state.household->region_id != region.id || household_state.household->settlement_id != settlement_id) {
+                    continue;
+                }
+                settlement_households.push_back(&household_state);
+                if (!checked_add_i64(settlement_effort, household_state.productive_effort, settlement_effort)) {
+                    throw std::overflow_error("Settlement effort overflow");
+                }
+            }
+
+            if (settlement_households.empty() || settlement_effort <= 0) {
+                continue;
+            }
+
+            const auto settlement_productive_budget =
+                (productive_available * static_cast<std::int64_t>(settlement->access_share_points)) /
+                static_cast<std::int64_t>(kSettlementShareScale);
+            const auto settlement_wild_budget =
+                (wild_harvest_available * static_cast<std::int64_t>(settlement->access_share_points)) /
+                static_cast<std::int64_t>(kSettlementShareScale);
+
+            std::int64_t distributed_productive = 0;
+            for (auto* household_state : settlement_households) {
+                if (household_state->productive_effort <= 0) {
+                    continue;
+                }
+                const auto produced = (settlement_productive_budget * household_state->productive_effort) / settlement_effort;
+                household_state->produced_food += produced;
+                if (!checked_add_i64(distributed_productive, produced, distributed_productive)) {
+                    throw std::overflow_error("Settlement productive distribution overflow");
+                }
+            }
+
+            auto productive_remainder = settlement_productive_budget - distributed_productive;
+            for (auto* household_state : settlement_households) {
+                if (productive_remainder <= 0) {
+                    break;
+                }
+                if (household_state->productive_effort <= 0) {
+                    continue;
+                }
+                ++household_state->produced_food;
+                --productive_remainder;
+            }
+
+            std::int64_t settlement_distributed_wild = 0;
+            for (auto* household_state : settlement_households) {
+                if (household_state->productive_effort <= 0) {
+                    continue;
+                }
+                const auto wild_for_household = (settlement_wild_budget * household_state->productive_effort) / settlement_effort;
+                household_state->produced_food += wild_for_household;
+                if (!checked_add_i64(settlement_distributed_wild, wild_for_household, settlement_distributed_wild)) {
+                    throw std::overflow_error("Settlement wild distribution overflow");
+                }
+            }
+
+            auto wild_remainder = settlement_wild_budget - settlement_distributed_wild;
+            for (auto* household_state : settlement_households) {
+                if (wild_remainder <= 0) {
+                    break;
+                }
+                if (household_state->productive_effort <= 0) {
+                    continue;
+                }
+                ++household_state->produced_food;
+                --wild_remainder;
+                ++settlement_distributed_wild;
+            }
+
+            if (!checked_add_i64(distributed_wild, settlement_distributed_wild, distributed_wild)) {
                 throw std::overflow_error("Region wild distribution overflow");
             }
-        }
-
-        auto wild_remainder = wild_harvest_available - distributed_wild;
-        for (auto* household_state : region_households) {
-            if (wild_remainder <= 0) {
-                break;
-            }
-            if (household_state->productive_effort <= 0) {
-                continue;
-            }
-            ++household_state->produced_food;
-            --wild_remainder;
-            ++distributed_wild;
         }
 
         region.wild_food_stock = std::max<std::int64_t>(0, region.wild_food_stock - distributed_wild);
@@ -389,6 +421,7 @@ void Simulation::process_food_period(const std::uint64_t food_period) {
 void Simulation::process_demography_period(const std::uint64_t demographic_year) {
     process_mortality(demographic_year);
     process_births(demographic_year);
+    process_settlement_restructuring(demographic_year);
     refresh_population_count();
     refresh_food_aggregates();
 }
@@ -405,6 +438,10 @@ RegionId Simulation::next_region_id() noexcept {
     return next_region_id_++;
 }
 
+SettlementId Simulation::next_settlement_id() noexcept {
+    return next_settlement_id_++;
+}
+
 SimulationSeed Simulation::root_seed() const noexcept {
     return simulation_seed_;
 }
@@ -419,6 +456,10 @@ SimulationSeed Simulation::household_seed(const HouseholdId household_id) const 
 
 SimulationSeed Simulation::region_seed(const RegionId region_id) const noexcept {
     return derive_seed(root_seed(), SeedDomain::Region, region_id);
+}
+
+SimulationSeed Simulation::settlement_seed(const SettlementId settlement_id) const noexcept {
+    return derive_seed(root_seed(), SeedDomain::Settlement, settlement_id);
 }
 
 bool Simulation::sample_sex(const SimulationSeed seed) const noexcept {
@@ -743,6 +784,7 @@ void Simulation::initialize_households() {
         state_.households.push_back(Household{
             .id = next_household_id(),
             .region_id = 0,
+            .settlement_id = 0,
             .member_ids = {},
             .resources = HouseholdResourceState{.food_inventory = ResourceAmount{config_.initial_household_food_units}},
         });
@@ -868,7 +910,127 @@ void Simulation::assign_households_to_regions() {
         const auto assignment_seed = derive_seed(household_seed(household.id), SeedDomain::RegionAssignment, 0U);
         const auto region_index = static_cast<std::size_t>(seed_random_bounded(assignment_seed, region_ids.size()));
         household.region_id = region_ids[region_index];
+        household.settlement_id = 0;
     }
+}
+
+void Simulation::initialize_settlements() {
+    state_.settlements.clear();
+
+    std::vector<RegionId> region_ids;
+    region_ids.reserve(state_.regions.size());
+    for (const auto& region : state_.regions) {
+        region_ids.push_back(region.id);
+    }
+    std::sort(region_ids.begin(), region_ids.end());
+
+    for (const auto region_id : region_ids) {
+        std::vector<Household*> region_households;
+        region_households.reserve(state_.households.size());
+        for (auto& household : state_.households) {
+            if (household.region_id == region_id) {
+                household.settlement_id = 0;
+                region_households.push_back(&household);
+            }
+        }
+
+        std::sort(region_households.begin(), region_households.end(), [](const Household* lhs, const Household* rhs) {
+            return lhs->id < rhs->id;
+        });
+
+        if (region_households.empty()) {
+            continue;
+        }
+
+        auto settlement_count = (static_cast<std::uint64_t>(region_households.size()) + (kTargetHouseholdsPerSettlement - 1U)) /
+            kTargetHouseholdsPerSettlement;
+        settlement_count = std::max<std::uint64_t>(1U, std::min<std::uint64_t>(settlement_count, kMaxInitialSettlementsPerRegion));
+
+        const auto allocated_share = std::min<std::uint32_t>(
+            kInitialAllocatedSettlementShare,
+            static_cast<std::uint32_t>(kSettlementShareScale));
+
+        std::vector<SettlementId> settlement_ids;
+        settlement_ids.reserve(static_cast<std::size_t>(settlement_count));
+
+        const auto base_share = allocated_share / static_cast<std::uint32_t>(settlement_count);
+        auto share_remainder = allocated_share % static_cast<std::uint32_t>(settlement_count);
+        for (std::uint64_t i = 0; i < settlement_count; ++i) {
+            const auto settlement_id = next_settlement_id();
+            std::uint32_t share = base_share;
+            if (share_remainder > 0U) {
+                ++share;
+                --share_remainder;
+            }
+
+            state_.settlements.push_back(Settlement{
+                .id = settlement_id,
+                .region_id = region_id,
+                .active = true,
+                .access_share_points = share,
+            });
+            settlement_ids.push_back(settlement_id);
+        }
+
+        for (auto* household : region_households) {
+            const auto assignment_seed = derive_seed(household_seed(household->id), SeedDomain::SettlementAssignment, 0U);
+            const auto settlement_index = static_cast<std::size_t>(seed_random_bounded(assignment_seed, settlement_ids.size()));
+            household->settlement_id = settlement_ids[settlement_index];
+        }
+
+        std::unordered_map<SettlementId, std::uint64_t> settlement_household_counts;
+        settlement_household_counts.reserve(settlement_ids.size());
+        for (const auto settlement_id : settlement_ids) {
+            settlement_household_counts.emplace(settlement_id, 0U);
+        }
+        for (const auto* household : region_households) {
+            ++settlement_household_counts[household->settlement_id];
+        }
+
+        for (const auto settlement_id : settlement_ids) {
+            auto count_it = settlement_household_counts.find(settlement_id);
+            if (count_it == settlement_household_counts.end() || count_it->second > 0U) {
+                continue;
+            }
+
+            Household* donor_household = nullptr;
+            SettlementId donor_settlement_id = 0;
+            std::uint64_t donor_count = 0;
+            for (const auto donor_id : settlement_ids) {
+                const auto donor_it = settlement_household_counts.find(donor_id);
+                if (donor_it == settlement_household_counts.end() || donor_it->second <= 1U) {
+                    continue;
+                }
+                if (donor_it->second > donor_count || (donor_it->second == donor_count && donor_id < donor_settlement_id)) {
+                    donor_count = donor_it->second;
+                    donor_settlement_id = donor_id;
+                }
+            }
+
+            if (donor_count <= 1U) {
+                continue;
+            }
+
+            for (auto* household : region_households) {
+                if (household->settlement_id == donor_settlement_id) {
+                    donor_household = household;
+                    break;
+                }
+            }
+
+            if (donor_household == nullptr) {
+                continue;
+            }
+
+            donor_household->settlement_id = settlement_id;
+            --settlement_household_counts[donor_settlement_id];
+            ++settlement_household_counts[settlement_id];
+        }
+    }
+
+    std::sort(state_.settlements.begin(), state_.settlements.end(), [](const Settlement& lhs, const Settlement& rhs) {
+        return lhs.id < rhs.id;
+    });
 }
 
 RegionEnvironmentState* Simulation::find_region_mutable(const RegionId region_id) noexcept {
@@ -887,6 +1049,257 @@ const RegionEnvironmentState* Simulation::find_region(const RegionId region_id) 
         }
     }
     return nullptr;
+}
+
+Settlement* Simulation::find_settlement_mutable(const SettlementId settlement_id) noexcept {
+    for (auto& settlement : state_.settlements) {
+        if (settlement.id == settlement_id) {
+            return &settlement;
+        }
+    }
+    return nullptr;
+}
+
+const Settlement* Simulation::find_settlement(const SettlementId settlement_id) const noexcept {
+    for (const auto& settlement : state_.settlements) {
+        if (settlement.id == settlement_id) {
+            return &settlement;
+        }
+    }
+    return nullptr;
+}
+
+std::int64_t Simulation::settlement_accessible_food_capacity_per_day(const Settlement& settlement) const noexcept {
+    if (!settlement.active || settlement.access_share_points == 0U) {
+        return 0;
+    }
+
+    const auto* region = find_region(settlement.region_id);
+    if (region == nullptr) {
+        return 0;
+    }
+
+    const auto productive = (region->productive_capacity_per_day * static_cast<std::int64_t>(settlement.access_share_points)) /
+        static_cast<std::int64_t>(kSettlementShareScale);
+    const auto wild = (region->wild_food_harvest_limit_per_day * static_cast<std::int64_t>(settlement.access_share_points)) /
+        static_cast<std::int64_t>(kSettlementShareScale);
+    return std::max<std::int64_t>(0, productive + wild);
+}
+
+std::uint32_t Simulation::settlement_pressure_per_10k(const Settlement& settlement) const noexcept {
+    if (!settlement.active) {
+        return 0U;
+    }
+
+    std::int64_t total_required = 0;
+    for (const auto& household : state_.households) {
+        if (household.settlement_id != settlement.id) {
+            continue;
+        }
+        for (const auto member_id : household.member_ids) {
+            for (const auto& person : state_.people) {
+                if (person.id == member_id && person.alive) {
+                    total_required += food_requirement_for_person(person);
+                    break;
+                }
+            }
+        }
+    }
+
+    if (total_required <= 0) {
+        return 0U;
+    }
+
+    const auto capacity = settlement_accessible_food_capacity_per_day(settlement);
+    if (capacity <= 0) {
+        return 100'000U;
+    }
+
+    const auto ratio = (total_required * 10'000) / capacity;
+    if (ratio < 0) {
+        return 0U;
+    }
+    return static_cast<std::uint32_t>(std::min<std::int64_t>(ratio, 100'000));
+}
+
+void Simulation::process_settlement_extinction() {
+    for (auto& settlement : state_.settlements) {
+        if (!settlement.active) {
+            continue;
+        }
+
+        std::uint64_t alive_members = 0;
+        for (const auto& household : state_.households) {
+            if (household.settlement_id != settlement.id) {
+                continue;
+            }
+            for (const auto member_id : household.member_ids) {
+                for (const auto& person : state_.people) {
+                    if (person.id == member_id && person.alive) {
+                        ++alive_members;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (alive_members == 0U) {
+            settlement.active = false;
+            settlement.access_share_points = 0U;
+        }
+    }
+}
+
+void Simulation::process_settlement_founding(const std::uint64_t demographic_year) {
+    std::vector<RegionId> region_ids;
+    region_ids.reserve(state_.regions.size());
+    for (const auto& region : state_.regions) {
+        region_ids.push_back(region.id);
+    }
+    std::sort(region_ids.begin(), region_ids.end());
+
+    for (const auto region_id : region_ids) {
+        std::vector<Settlement*> active_settlements;
+        active_settlements.reserve(state_.settlements.size());
+        std::uint32_t allocated_share = 0;
+        for (auto& settlement : state_.settlements) {
+            if (!settlement.active || settlement.region_id != region_id) {
+                continue;
+            }
+            active_settlements.push_back(&settlement);
+            allocated_share = std::min<std::uint32_t>(kSettlementShareScale, allocated_share + settlement.access_share_points);
+        }
+
+        if (active_settlements.empty()) {
+            continue;
+        }
+
+        const auto unallocated_share = (allocated_share >= kSettlementShareScale)
+            ? 0U
+            : (kSettlementShareScale - allocated_share);
+        if (unallocated_share < kFoundingMinimumUnallocatedShare) {
+            continue;
+        }
+
+        std::sort(active_settlements.begin(), active_settlements.end(), [](const Settlement* lhs, const Settlement* rhs) {
+            return lhs->id < rhs->id;
+        });
+
+        Settlement* source = nullptr;
+        std::uint32_t best_pressure = 0;
+
+        for (auto* candidate : active_settlements) {
+            std::uint64_t alive_households = 0;
+            for (const auto& household : state_.households) {
+                if (household.region_id != region_id || household.settlement_id != candidate->id) {
+                    continue;
+                }
+
+                bool has_alive = false;
+                for (const auto member_id : household.member_ids) {
+                    for (const auto& person : state_.people) {
+                        if (person.id == member_id && person.alive) {
+                            has_alive = true;
+                            break;
+                        }
+                    }
+                    if (has_alive) {
+                        break;
+                    }
+                }
+
+                if (has_alive) {
+                    ++alive_households;
+                }
+            }
+
+            if (alive_households < kFoundingMinimumSourceHouseholds) {
+                continue;
+            }
+
+            const auto pressure = settlement_pressure_per_10k(*candidate);
+            if (pressure < kHighPressureThresholdPer10k) {
+                continue;
+            }
+
+            if (source == nullptr || pressure > best_pressure || (pressure == best_pressure && candidate->id < source->id)) {
+                source = candidate;
+                best_pressure = pressure;
+            }
+        }
+
+        if (source == nullptr) {
+            continue;
+        }
+
+        std::vector<Household*> source_alive_households;
+        source_alive_households.reserve(state_.households.size());
+        for (auto& household : state_.households) {
+            if (household.region_id != region_id || household.settlement_id != source->id) {
+                continue;
+            }
+
+            bool has_alive = false;
+            for (const auto member_id : household.member_ids) {
+                for (const auto& person : state_.people) {
+                    if (person.id == member_id && person.alive) {
+                        has_alive = true;
+                        break;
+                    }
+                }
+                if (has_alive) {
+                    break;
+                }
+            }
+
+            if (has_alive) {
+                source_alive_households.push_back(&household);
+            }
+        }
+
+        if (source_alive_households.size() < kFoundingMinimumSourceHouseholds) {
+            continue;
+        }
+
+        auto move_count = std::max<std::uint64_t>(kFoundingMinimumNewHouseholds, source_alive_households.size() / 4U);
+        const auto max_movable = source_alive_households.size() - kFoundingMinimumRemainingHouseholds;
+        if (max_movable < kFoundingMinimumNewHouseholds) {
+            continue;
+        }
+        move_count = std::min<std::uint64_t>(move_count, max_movable);
+
+        const auto new_settlement_id = next_settlement_id();
+        const auto assigned_share = std::min<std::uint32_t>(unallocated_share, kFoundingDefaultShare);
+        state_.settlements.push_back(Settlement{
+            .id = new_settlement_id,
+            .region_id = region_id,
+            .active = true,
+            .access_share_points = assigned_share,
+        });
+
+        std::sort(source_alive_households.begin(), source_alive_households.end(), [&](const Household* lhs, const Household* rhs) {
+            const auto lhs_seed = derive_seed(household_seed(lhs->id), SeedDomain::SettlementHouseholdSelection, demographic_year ^ new_settlement_id);
+            const auto rhs_seed = derive_seed(household_seed(rhs->id), SeedDomain::SettlementHouseholdSelection, demographic_year ^ new_settlement_id);
+            if (lhs_seed.value != rhs_seed.value) {
+                return lhs_seed.value < rhs_seed.value;
+            }
+            return lhs->id < rhs->id;
+        });
+
+        for (std::uint64_t i = 0; i < move_count; ++i) {
+            source_alive_households[i]->settlement_id = new_settlement_id;
+        }
+    }
+
+    std::sort(state_.settlements.begin(), state_.settlements.end(), [](const Settlement& lhs, const Settlement& rhs) {
+        return lhs.id < rhs.id;
+    });
+}
+
+void Simulation::process_settlement_restructuring(const std::uint64_t demographic_year) {
+    process_settlement_extinction();
+    process_settlement_founding(demographic_year);
+    process_settlement_extinction();
 }
 
 void Simulation::process_mortality(const std::uint64_t demographic_year) {
