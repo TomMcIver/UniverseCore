@@ -16,6 +16,10 @@ constexpr std::uint32_t kAdultAgeYears = 18;
 std::uint32_t bounded_u32(const std::uint64_t value) {
     return static_cast<std::uint32_t>(std::min(value, static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max())));
 }
+
+std::int32_t clamp_i32(const std::int32_t value, const std::int32_t lo, const std::int32_t hi) {
+    return std::min(std::max(value, lo), hi);
+}
 }
 
 Simulation::Simulation(SimulationConfig config)
@@ -121,53 +125,49 @@ void Simulation::run_scheduled_systems_until(const SimulationTime target_time) {
 
 void Simulation::process_food_period(const std::uint64_t food_period) {
     for (auto& household : state_.households) {
-        std::uint64_t adults = 0;
-        std::uint64_t children = 0;
+        std::vector<Person*> alive_members;
+        alive_members.reserve(household.member_ids.size());
         for (const auto member_id : household.member_ids) {
-            for (const auto& person : state_.people) {
-                if (person.id != member_id || !person.alive) {
-                    continue;
+            for (auto& person : state_.people) {
+                if (person.id == member_id && person.alive) {
+                    alive_members.push_back(&person);
+                    break;
                 }
-
-                if (age_years(person) >= kAdultAgeYears) {
-                    ++adults;
-                } else {
-                    ++children;
-                }
-                break;
             }
         }
 
-        const auto adults_i64 = static_cast<std::int64_t>(adults);
-        const auto children_i64 = static_cast<std::int64_t>(children);
+        std::sort(alive_members.begin(), alive_members.end(), [](const Person* lhs, const Person* rhs) {
+            return lhs->id < rhs->id;
+        });
 
         std::int64_t required_food = 0;
-        std::int64_t adult_required = 0;
-        std::int64_t child_required = 0;
-        if (!checked_mul_i64(adults_i64, food_parameters_.adult_daily_food_units, adult_required) ||
-            !checked_mul_i64(children_i64, food_parameters_.child_daily_food_units, child_required) ||
-            !checked_add_i64(adult_required, child_required, required_food)) {
-            throw std::overflow_error("Food requirement overflow");
-        }
+        std::int64_t baseline_production = 0;
+        std::vector<std::int64_t> per_person_required;
+        per_person_required.reserve(alive_members.size());
+        for (const auto* person : alive_members) {
+            const auto person_required = food_requirement_for_person(*person);
+            const auto person_production = food_production_for_person(*person);
 
-        std::int64_t produced_food = required_food;
-        if (config_.food_system_enabled) {
-            std::int64_t adult_produced = 0;
-            std::int64_t child_produced = 0;
-            std::int64_t baseline_production = 0;
-            if (!checked_mul_i64(adults_i64, food_parameters_.adult_daily_production_units, adult_produced) ||
-                !checked_mul_i64(children_i64, food_parameters_.child_daily_production_units, child_produced) ||
-                !checked_add_i64(adult_produced, child_produced, baseline_production)) {
-                throw std::overflow_error("Food production overflow");
+            if (!checked_add_i64(required_food, person_required, required_food) ||
+                !checked_add_i64(baseline_production, person_production, baseline_production)) {
+                throw std::overflow_error("Food accounting overflow");
             }
 
-            const auto household_seed_local = derive_seed(root_seed(), SeedDomain::Household, household.id);
-            const auto production_seed = derive_seed(household_seed_local, SeedDomain::FoodProduction, food_period);
-            const auto daily_variation_percent = 90U + static_cast<std::uint32_t>(seed_random_bounded(production_seed, 21U));
+            per_person_required.push_back(person_required);
+        }
 
-            produced_food = apply_scaled_percent(baseline_production, household_base_productivity_percent(household.id));
-            produced_food = apply_scaled_percent(produced_food, daily_variation_percent);
-            produced_food = apply_scaled_percent(produced_food, config_.food_production_scale_percent);
+        std::int64_t produced_food = 0;
+        if (!alive_members.empty()) {
+            produced_food = baseline_production;
+            if (config_.food_system_enabled) {
+                const auto household_seed_local = derive_seed(root_seed(), SeedDomain::Household, household.id);
+                const auto production_seed = derive_seed(household_seed_local, SeedDomain::FoodProduction, food_period);
+                const auto daily_variation_percent = 90U + static_cast<std::uint32_t>(seed_random_bounded(production_seed, 21U));
+
+                produced_food = apply_scaled_percent(produced_food, household_base_productivity_percent(household.id));
+                produced_food = apply_scaled_percent(produced_food, daily_variation_percent);
+                produced_food = apply_scaled_percent(produced_food, config_.food_production_scale_percent);
+            }
         }
 
         std::int64_t inventory_after_production = 0;
@@ -204,6 +204,27 @@ void Simulation::process_food_period(const std::uint64_t food_period) {
             household.resources.nutritional_stress_points = std::max<std::int64_t>(
                 0,
                 household.resources.nutritional_stress_points - food_parameters_.stress_recovery_per_day);
+        }
+
+        std::vector<std::int64_t> per_person_allocated(alive_members.size(), 0);
+        if (consumed_food > 0 && required_food > 0 && !alive_members.empty()) {
+            std::int64_t allocated_sum = 0;
+            for (std::size_t i = 0; i < alive_members.size(); ++i) {
+                per_person_allocated[i] = (consumed_food * per_person_required[i]) / required_food;
+                if (!checked_add_i64(allocated_sum, per_person_allocated[i], allocated_sum)) {
+                    throw std::overflow_error("Per-person food allocation overflow");
+                }
+            }
+
+            auto remainder = consumed_food - allocated_sum;
+            for (std::size_t i = 0; i < alive_members.size() && remainder > 0; ++i) {
+                ++per_person_allocated[i];
+                --remainder;
+            }
+        }
+
+        for (std::size_t i = 0; i < alive_members.size(); ++i) {
+            apply_person_nutrition_and_health(*alive_members[i], per_person_required[i], per_person_allocated[i]);
         }
     }
 
@@ -269,10 +290,9 @@ std::uint32_t Simulation::mortality_rate_per_10k(const std::uint32_t age_years) 
     return 10'000;
 }
 
-std::uint32_t Simulation::mortality_penalty_from_food_stress_per_10k(const Person& person) const noexcept {
-    const auto stress_points = household_stress_points(person.household_id);
+std::uint32_t Simulation::mortality_penalty_from_person_health_per_10k(const Person& person) const noexcept {
     const auto is_child = age_years(person) < kAdultAgeYears;
-    return food_stress_mortality_penalty_per_10k(stress_points, is_child);
+    return nutrition_health_mortality_penalty_per_10k(person.nutrition_points, person.health_points, is_child);
 }
 
 std::uint32_t Simulation::fertility_rate_per_10k(const std::uint32_t age_years) const noexcept {
@@ -356,6 +376,18 @@ std::uint32_t Simulation::alive_count_in_household(const HouseholdId household_i
     return count;
 }
 
+std::int64_t Simulation::food_requirement_for_person(const Person& person) const noexcept {
+    return age_years(person) >= kAdultAgeYears
+        ? food_parameters_.adult_daily_food_units
+        : food_parameters_.child_daily_food_units;
+}
+
+std::int64_t Simulation::food_production_for_person(const Person& person) const noexcept {
+    return age_years(person) >= kAdultAgeYears
+        ? food_parameters_.adult_daily_production_units
+        : food_parameters_.child_daily_production_units;
+}
+
 std::uint32_t Simulation::effective_fertility_rate_per_10k(const Person& person) const noexcept {
     const auto base_rate = fertility_rate_per_10k(age_years(person));
     if (base_rate == 0U) {
@@ -371,9 +403,59 @@ std::uint32_t Simulation::effective_fertility_rate_per_10k(const Person& person)
     const auto scaled = static_cast<std::uint64_t>(base_rate) * capacity_remaining;
     auto effective = std::max<std::uint32_t>(static_cast<std::uint32_t>(scaled / 18U), 1U);
 
-    const auto stress_scale = food_stress_fertility_scale_percent(household_stress_points(person.household_id));
-    effective = static_cast<std::uint32_t>((static_cast<std::uint64_t>(effective) * stress_scale) / 100U);
+    const auto person_scale = nutrition_health_fertility_scale_percent(person.nutrition_points, person.health_points);
+    effective = static_cast<std::uint32_t>((static_cast<std::uint64_t>(effective) * person_scale) / 100U);
     return effective;
+}
+
+void Simulation::apply_person_nutrition_and_health(
+    Person& person,
+    const std::int64_t required_food,
+    const std::int64_t allocated_food) {
+    const auto required = std::max<std::int64_t>(required_food, 0);
+    const auto allocated = std::max<std::int64_t>(allocated_food, 0);
+
+    const auto deficit = std::max<std::int64_t>(required - allocated, 0);
+    const auto age = age_years(person);
+
+    std::int32_t nutrition_delta = 0;
+    if (deficit <= 0) {
+        nutrition_delta = 8;
+        person.consecutive_undernourished_days = 0;
+    } else {
+        const auto ratio_points = (required > 0) ? static_cast<std::int32_t>((deficit * 100) / required) : 100;
+        nutrition_delta = -(10 + ratio_points / 8);
+        ++person.consecutive_undernourished_days;
+    }
+
+    person.nutrition_points = clamp_i32(
+        person.nutrition_points + nutrition_delta,
+        food_parameters_.min_person_nutrition_points,
+        food_parameters_.max_person_nutrition_points);
+
+    std::int32_t health_delta = 0;
+    if (person.nutrition_points >= 750) {
+        health_delta = 3;
+    } else if (person.nutrition_points >= 550) {
+        health_delta = 0;
+    } else if (person.nutrition_points >= 350) {
+        health_delta = -3;
+    } else {
+        health_delta = -8;
+    }
+
+    if (age < 5U && deficit > 0) {
+        health_delta -= 2;
+    }
+
+    if (person.consecutive_undernourished_days >= 20U && deficit > 0) {
+        health_delta -= 2;
+    }
+
+    person.health_points = clamp_i32(
+        person.health_points + health_delta,
+        food_parameters_.min_person_health_points,
+        food_parameters_.max_person_health_points);
 }
 
 std::int64_t Simulation::household_stress_points(const HouseholdId household_id) const noexcept {
@@ -531,7 +613,7 @@ void Simulation::process_mortality(const std::uint64_t demographic_year) {
         }
 
         const auto baseline = mortality_rate_per_10k(age_years(person));
-        const auto food_penalty = mortality_penalty_from_food_stress_per_10k(person);
+        const auto food_penalty = mortality_penalty_from_person_health_per_10k(person);
         const auto mortality_rate = std::min<std::uint32_t>(10'000U, baseline + food_penalty);
         const auto mortality_seed = derive_seed(person_seed(person.id), SeedDomain::Mortality, demographic_year);
         if (config_.enable_unrelated_random_probe) {
@@ -693,8 +775,7 @@ void Simulation::refresh_food_aggregates() noexcept {
             continue;
         }
 
-        const auto it = household_in_stress.find(person.household_id);
-        if (it != household_in_stress.end() && it->second) {
+        if (person.nutrition_points < 550 || person.health_points < 500) {
             ++state_.population_under_food_stress;
         }
     }

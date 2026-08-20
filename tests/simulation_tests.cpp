@@ -114,9 +114,6 @@ void verify_resource_invariants(const universe::WorldState& state, const std::in
     std::uint64_t households_in_shortage = 0;
     std::uint64_t stressed_population = 0;
 
-    std::unordered_map<universe::HouseholdId, bool> household_stressed;
-    household_stressed.reserve(state.households.size());
-
     for (const auto& household : state.households) {
         const auto& resources = household.resources;
         require(resources.food_inventory.value >= 0, "household food inventory must never be negative");
@@ -139,15 +136,15 @@ void verify_resource_invariants(const universe::WorldState& state, const std::in
         if (resources.consecutive_shortage_days > 0U) {
             ++households_in_shortage;
         }
-        household_stressed.emplace(household.id, resources.nutritional_stress_points > 0);
     }
 
     for (const auto& person : state.people) {
         if (!person.alive) {
             continue;
         }
-        const auto it = household_stressed.find(person.household_id);
-        if (it != household_stressed.end() && it->second) {
+        require(person.nutrition_points >= 0 && person.nutrition_points <= 1000, "person nutrition points must remain bounded");
+        require(person.health_points >= 0 && person.health_points <= 1000, "person health points must remain bounded");
+        if (person.nutrition_points < 550 || person.health_points < 500) {
             ++stressed_population;
         }
     }
@@ -158,6 +155,13 @@ void verify_resource_invariants(const universe::WorldState& state, const std::in
     require(total_unmet_food == state.total_unmet_food, "unmet food aggregate must match household totals");
     require(households_in_shortage == state.households_in_shortage, "shortage household aggregate must match");
     require(stressed_population == state.population_under_food_stress, "population under stress aggregate must match");
+}
+
+void verify_person_health_invariants(const universe::WorldState& state) {
+    for (const auto& person : state.people) {
+        require(person.nutrition_points >= 0 && person.nutrition_points <= 1000, "nutrition points must be within canonical bounds");
+        require(person.health_points >= 0 && person.health_points <= 1000, "health points must be within canonical bounds");
+    }
 }
 
 void verify_event_log_invariants(const universe::WorldState& state) {
@@ -242,6 +246,9 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
         require(a.household_id == b.household_id, context);
         require(a.mother_id == b.mother_id, context);
         require(a.father_id == b.father_id, context);
+        require(a.nutrition_points == b.nutrition_points, context);
+        require(a.health_points == b.health_points, context);
+        require(a.consecutive_undernourished_days == b.consecutive_undernourished_days, context);
     }
 
     for (std::size_t i = 0; i < lhs.households.size(); ++i) {
@@ -494,6 +501,7 @@ int main() {
         universe::Simulation abundant_run{abundant};
         abundant_run.run_years(30);
         verify_resource_invariants(abundant_run.state(), abundant.initial_household_food_units);
+        verify_person_health_invariants(abundant_run.state());
         require(abundant_run.state().population_under_food_stress == 0, "sustained food surplus should avoid food stress");
         require(abundant_run.state().households_in_shortage == 0, "sustained food surplus should avoid active shortages");
 
@@ -502,6 +510,7 @@ int main() {
         universe::Simulation constrained_run{constrained};
         constrained_run.run_years(30);
         verify_resource_invariants(constrained_run.state(), constrained.initial_household_food_units);
+        verify_person_health_invariants(constrained_run.state());
 
         auto famine = config;
         famine.food_production_scale_percent = 40;
@@ -514,6 +523,7 @@ int main() {
             peak_unmet_food = std::max(peak_unmet_food, famine_run.state().total_unmet_food);
         }
         verify_resource_invariants(famine_run.state(), famine.initial_household_food_units);
+        verify_person_health_invariants(famine_run.state());
         require(peak_stressed_population > 0, "severe shortage should produce food stress");
         require(peak_unmet_food > 0, "severe shortage should produce unmet food demand");
         require(
@@ -704,6 +714,43 @@ int main() {
     }
 
     {
+        universe::Simulation empty_household_regression{universe::SimulationConfig{
+            .seed = 77,
+            .initial_population = 1,
+            .enable_unrelated_random_probe = false,
+            .initial_household_food_units = 0,
+            .food_production_scale_percent = 0,
+            .food_system_enabled = true,
+        }};
+
+        empty_household_regression.run_years(250);
+        const auto& before = empty_household_regression.state();
+
+        bool found_empty_household = false;
+        std::unordered_map<universe::HouseholdId, std::int64_t> produced_before;
+        for (const auto& household : before.households) {
+            if (!household.member_ids.empty()) {
+                continue;
+            }
+            found_empty_household = true;
+            produced_before.emplace(household.id, household.resources.food_produced_total);
+        }
+        require(found_empty_household, "regression setup must produce at least one empty household");
+
+        empty_household_regression.advance(universe::days(30));
+        const auto& after = empty_household_regression.state();
+        for (const auto& household : after.households) {
+            const auto it = produced_before.find(household.id);
+            if (it == produced_before.end()) {
+                continue;
+            }
+            require(
+                household.resources.food_produced_total == it->second,
+                "empty household must not produce food");
+        }
+    }
+
+    {
         universe::Simulation source{config};
         const auto valid = source.save_snapshot();
 
@@ -712,7 +759,7 @@ int main() {
         require_snapshot_load_fails(bad_magic, universe::SnapshotErrorCode::InvalidMagic, "bad magic must be rejected");
 
         auto bad_version = clone_bytes(valid);
-        bad_version[4] = std::byte{0x03};
+        bad_version[4] = std::byte{0x04};
         bad_version[5] = std::byte{0x00};
         require_snapshot_load_fails(
             bad_version,
@@ -736,7 +783,7 @@ int main() {
         constexpr std::size_t header_size = 24U;
         constexpr std::size_t payload_people_count_offset = 182U;
         constexpr std::size_t payload_first_person_offset = 190U;
-        constexpr std::size_t payload_person_record_size = 28U;
+        constexpr std::size_t payload_person_record_size = 40U;
         constexpr std::size_t person_sex_offset_in_record = 16U;
         constexpr std::size_t person_household_offset_in_record = 18U;
 
@@ -820,6 +867,7 @@ int main() {
     verify_demographic_invariants(a.state());
     verify_event_log_invariants(a.state());
     verify_resource_invariants(a.state(), config.initial_household_food_units);
+    verify_person_health_invariants(a.state());
 
     std::uint64_t people_with_recorded_parents = 0;
     for (const auto& person : a.state().people) {
@@ -859,6 +907,7 @@ int main() {
         verify_demographic_invariants(sweep.state());
         verify_event_log_invariants(sweep.state());
         verify_resource_invariants(sweep.state(), 80);
+        verify_person_health_invariants(sweep.state());
         if (sweep.state().population == 0) {
             ++extinct_runs;
         }
@@ -878,6 +927,7 @@ int main() {
         verify_demographic_invariants(long_horizon.state());
         verify_event_log_invariants(long_horizon.state());
         verify_resource_invariants(long_horizon.state(), 80);
+        verify_person_health_invariants(long_horizon.state());
         require(long_horizon.state().population < 1000, "small population long run should avoid uncontrolled explosion");
 
         if (long_horizon.state().population == 0) {

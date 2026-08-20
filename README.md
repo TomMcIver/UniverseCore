@@ -24,7 +24,7 @@ The project deliberately starts without Unreal Engine. The initial objective is 
 - Timestamped canonical birth/death event log
 - Versioned deterministic canonical snapshots
 - Deterministic household food production/storage/consumption
-- Bounded nutritional stress affecting demographic outcomes
+- Deterministic person-level nutrition/health affecting demographic outcomes
 - Reproducibility tests
 - No engine dependency
 

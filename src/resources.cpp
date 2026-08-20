@@ -128,4 +128,50 @@ std::uint32_t food_stress_fertility_scale_percent(const std::int64_t nutritional
     return 100U;
 }
 
+std::uint32_t nutrition_health_mortality_penalty_per_10k(
+    const std::int32_t nutrition_points,
+    const std::int32_t health_points,
+    const bool is_child) noexcept {
+    std::uint32_t penalty = 0;
+
+    if (nutrition_points < 80 || health_points < 120) {
+        penalty = 8'500;
+    } else if (nutrition_points < 180 || health_points < 220) {
+        penalty = 4'500;
+    } else if (nutrition_points < 320 || health_points < 350) {
+        penalty = 2'000;
+    } else if (nutrition_points < 500 || health_points < 500) {
+        penalty = 700;
+    }
+
+    if (!is_child) {
+        return penalty;
+    }
+
+    const auto adjusted = static_cast<std::uint64_t>(penalty) * 3U / 2U;
+    return static_cast<std::uint32_t>(std::min<std::uint64_t>(adjusted, 10'000U));
+}
+
+std::uint32_t nutrition_health_fertility_scale_percent(
+    const std::int32_t nutrition_points,
+    const std::int32_t health_points) noexcept {
+    const auto combined = std::min(nutrition_points, health_points);
+    if (combined < 100) {
+        return 0U;
+    }
+    if (combined < 220) {
+        return 12U;
+    }
+    if (combined < 350) {
+        return 35U;
+    }
+    if (combined < 500) {
+        return 65U;
+    }
+    if (combined < 700) {
+        return 85U;
+    }
+    return 100U;
+}
+
 }  // namespace universe

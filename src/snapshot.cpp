@@ -236,6 +236,9 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
         if (person->father_id.has_value()) {
             payload.write_u64(*person->father_id);
         }
+        payload.write_u32(static_cast<std::uint32_t>(person->nutrition_points));
+        payload.write_u32(static_cast<std::uint32_t>(person->health_points));
+        payload.write_u32(person->consecutive_undernourished_days);
     }
 
     std::vector<const Household*> household_order;
@@ -397,7 +400,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         return load_error(SnapshotErrorCode::TruncatedData, "Snapshot people section is truncated");
     }
 
-    if (people_count > payload_reader.remaining() / 28U) {
+    if (people_count > payload_reader.remaining() / 40U) {
         return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot people section has invalid length");
     }
 
@@ -410,6 +413,8 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         std::uint8_t sex_raw = 0;
         bool has_mother = false;
         bool has_father = false;
+        std::uint32_t nutrition_points = 0;
+        std::uint32_t health_points = 0;
 
         if (!payload_reader.read_u64(person.id) ||
             !payload_reader.read_i64(person.birth_year) ||
@@ -444,6 +449,19 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
             }
             person.father_id = father_id;
         }
+
+        if (!payload_reader.read_u32(nutrition_points) ||
+            !payload_reader.read_u32(health_points) ||
+            !payload_reader.read_u32(person.consecutive_undernourished_days)) {
+            return load_error(SnapshotErrorCode::TruncatedData, "Snapshot person health fields are truncated");
+        }
+
+        if (nutrition_points > 1'000U || health_points > 1'000U) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot person health fields are out of range");
+        }
+
+        person.nutrition_points = static_cast<std::int32_t>(nutrition_points);
+        person.health_points = static_cast<std::int32_t>(health_points);
 
         if (!is_valid_person_id(person.id)) {
             return load_error(SnapshotErrorCode::InvalidState, "Snapshot person id must be non-zero");
@@ -721,6 +739,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
                 return load_error(SnapshotErrorCode::InvalidState, "Snapshot father must be older than child");
             }
         }
+
     }
 
     if (restored_state.population != alive_count) {
@@ -825,8 +844,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
             continue;
         }
 
-        const auto it = household_in_stress.find(person.household_id);
-        if (it != household_in_stress.end() && it->second) {
+        if (person.nutrition_points < 550 || person.health_points < 500) {
             ++population_under_food_stress;
         }
     }

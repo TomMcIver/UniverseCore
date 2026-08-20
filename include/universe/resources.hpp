@@ -28,6 +28,10 @@ struct FoodModelParameters {
     std::int64_t child_daily_production_units{4};
     std::int64_t stress_recovery_per_day{6};
     std::int64_t max_stress_points{5'000};
+    std::int32_t min_person_nutrition_points{0};
+    std::int32_t max_person_nutrition_points{1'000};
+    std::int32_t min_person_health_points{0};
+    std::int32_t max_person_health_points{1'000};
 };
 
 [[nodiscard]] bool checked_add_i64(std::int64_t lhs, std::int64_t rhs, std::int64_t& result) noexcept;
@@ -47,5 +51,14 @@ struct FoodModelParameters {
 
 [[nodiscard]] std::uint32_t food_stress_fertility_scale_percent(
     std::int64_t nutritional_stress_points) noexcept;
+
+[[nodiscard]] std::uint32_t nutrition_health_mortality_penalty_per_10k(
+    std::int32_t nutrition_points,
+    std::int32_t health_points,
+    bool is_child) noexcept;
+
+[[nodiscard]] std::uint32_t nutrition_health_fertility_scale_percent(
+    std::int32_t nutrition_points,
+    std::int32_t health_points) noexcept;
 
 }  // namespace universe

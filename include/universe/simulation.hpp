@@ -30,6 +30,9 @@ struct Person {
     HouseholdId household_id{};
     std::optional<PersonId> mother_id{};
     std::optional<PersonId> father_id{};
+    std::int32_t nutrition_points{700};
+    std::int32_t health_points{850};
+    std::uint32_t consecutive_undernourished_days{};
 };
 
 struct Household {
@@ -100,13 +103,15 @@ private:
     [[nodiscard]] bool sample_sex(SimulationSeed seed) const noexcept;
     [[nodiscard]] std::uint32_t sample_initial_age_years(PersonId person_id) const noexcept;
     [[nodiscard]] std::uint32_t mortality_rate_per_10k(std::uint32_t age_years) const noexcept;
-    [[nodiscard]] std::uint32_t mortality_penalty_from_food_stress_per_10k(const Person& person) const noexcept;
+    [[nodiscard]] std::uint32_t mortality_penalty_from_person_health_per_10k(const Person& person) const noexcept;
     [[nodiscard]] std::uint32_t fertility_rate_per_10k(std::uint32_t age_years) const noexcept;
     [[nodiscard]] std::int64_t current_year_signed() const noexcept;
     [[nodiscard]] std::uint32_t age_years(const Person& person) const noexcept;
     [[nodiscard]] bool has_any_alive_adult_male() const noexcept;
     [[nodiscard]] bool is_alive_adult_male_in_household(HouseholdId household_id) const noexcept;
     [[nodiscard]] std::uint32_t alive_count_in_household(HouseholdId household_id) const noexcept;
+    [[nodiscard]] std::int64_t food_requirement_for_person(const Person& person) const noexcept;
+    [[nodiscard]] std::int64_t food_production_for_person(const Person& person) const noexcept;
     [[nodiscard]] std::uint32_t effective_fertility_rate_per_10k(const Person& person) const noexcept;
     [[nodiscard]] std::int64_t household_stress_points(HouseholdId household_id) const noexcept;
     [[nodiscard]] std::optional<PersonId> sample_father_global(SimulationSeed selection_seed) noexcept;
@@ -116,6 +121,7 @@ private:
     void run_scheduled_systems_until(SimulationTime target_time);
     void process_demography_period(std::uint64_t demographic_year);
     void process_food_period(std::uint64_t food_period);
+    void apply_person_nutrition_and_health(Person& person, std::int64_t required_food, std::int64_t allocated_food);
     void remove_from_household(HouseholdId household_id, PersonId person_id);
     void refresh_food_aggregates() noexcept;
     void initialize_population();
