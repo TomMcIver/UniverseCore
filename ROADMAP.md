@@ -2,7 +2,7 @@
 
 ## Milestone 0: Repository and deterministic kernel
 
-Status: **in progress**
+Status: **complete**
 
 - [x] C++23/CMake project
 - [x] headless executable
@@ -19,6 +19,8 @@ Exit criteria: same seed/config produces byte-identical canonical snapshot acros
 
 ## Milestone 1: 200-person settlement
 
+Status: **in progress**
+
 - [x] person IDs
 - [x] age/sex
 - [x] households
@@ -27,6 +29,7 @@ Exit criteria: same seed/config produces byte-identical canonical snapshot acros
 - [x] mortality by age/context
 - [x] food production/consumption
 - [x] health/nutrition
+- [x] basic simulation UI (optional SDL3 + Dear ImGui inspector with smoke test)
 - [ ] occupations
 - [x] resource inventory
 - [ ] migration

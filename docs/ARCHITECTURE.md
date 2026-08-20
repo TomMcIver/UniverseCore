@@ -36,6 +36,14 @@ AI / Cloud Services (future)
 
 UniverseCore must compile and run independently.
 
+Current implementation status:
+
+- headless canonical runtime via `universe_sim`
+- optional local inspector runtime via `universe_ui` (SDL3 + Dear ImGui)
+- explicit UI adapter boundary via `universe::ui::SimulationController`
+- UI issues explicit simulation commands (advance/reset/save/load) and consumes read-only query views
+- canonical simulation logic and state remain in `universe_core`
+
 ## Deterministic hierarchy
 
 World objects should derive seeds hierarchically rather than sharing a mutable global RNG stream whenever order independence matters.
@@ -310,3 +318,14 @@ Mass entities / actors / terrain / PCG / Chaos
 ```
 
 Unreal objects are presentation/runtime realizations, not the source of truth for long-lived civilization state.
+
+## Inspector UI boundary (current)
+
+The SDL3/ImGui inspector is a local debug/inspection surface, not canonical simulation state.
+
+Boundary rules:
+
+- UI must only mutate simulation through explicit command methods on `SimulationController`.
+- UI frame timing must not drive canonical simulation outcomes.
+- UI plots/history caches are derived view state and must remain non-canonical.
+- Snapshot save/load behavior in UI uses the same canonical snapshot codec as headless simulation.

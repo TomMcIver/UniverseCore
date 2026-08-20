@@ -6,7 +6,7 @@ The project deliberately starts without Unreal Engine. The initial objective is 
 
 ## Current milestone
 
-**Prototype 1 foundation: deterministic individual demographics**
+**Prototype 1 foundation: deterministic settlement simulation + inspector UI**
 
 - C++23
 - Cross-platform CMake build
@@ -25,6 +25,9 @@ The project deliberately starts without Unreal Engine. The initial objective is 
 - Versioned deterministic canonical snapshots
 - Deterministic household food production/storage/consumption
 - Deterministic person-level nutrition/health affecting demographic outcomes
+- Optional SDL3 + Dear ImGui simulation inspector (`UNIVERSECORE_BUILD_UI=ON`)
+- UI command/query adapter over canonical simulation state
+- UI smoke test validating deterministic advance/save/load behavior
 - Reproducibility tests
 - No engine dependency
 
@@ -129,6 +132,21 @@ ctest --test-dir build --output-on-failure
 ./build/universe_sim --seed 42 --years 100 --population 200
 ```
 
+Optional UI build + smoke test:
+
+```bash
+cmake -S . -B build-ui -DCMAKE_BUILD_TYPE=Release -DUNIVERSECORE_BUILD_UI=ON
+cmake --build build-ui -j
+ctest --test-dir build-ui --output-on-failure
+./build-ui/universe_ui --smoke-test
+```
+
+Run the interactive inspector:
+
+```bash
+./build-ui/universe_ui
+```
+
 ### Windows PowerShell
 
 ```powershell
@@ -136,6 +154,21 @@ cmake -S . -B build
 cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 .\build\Release\universe_sim.exe --seed 42 --years 100 --population 200
+```
+
+Optional UI build + smoke test:
+
+```powershell
+cmake -S . -B build-ui -DUNIVERSECORE_BUILD_UI=ON
+cmake --build build-ui --config Release
+ctest --test-dir build-ui -C Release --output-on-failure
+.\build-ui\Release\universe_ui.exe --smoke-test
+```
+
+Run the interactive inspector:
+
+```powershell
+.\build-ui\Release\universe_ui.exe
 ```
 
 ## Read first

@@ -1,6 +1,7 @@
 #include "universe/simulation.hpp"
 #include "universe/snapshot.hpp"
 #include "universe/seed.hpp"
+#include "universe/ui/simulation_controller.hpp"
 
 #include <algorithm>
 #include <array>
@@ -451,6 +452,41 @@ int main() {
         .food_production_scale_percent = 100,
         .food_system_enabled = true,
     };
+
+    {
+        universe::ui::SimulationController yearly_steps{config};
+        yearly_steps.advance_years(1);
+        yearly_steps.advance_years(1);
+        yearly_steps.advance_years(1);
+
+        universe::ui::SimulationController one_chunk{config};
+        one_chunk.advance_years(3);
+
+        require_world_state_equal(
+            yearly_steps.simulation().state(),
+            one_chunk.simulation().state(),
+            "ui controller: +1 year +1 year +1 year must equal +3 years");
+    }
+
+    {
+        universe::ui::SimulationController continuous{config};
+        continuous.advance_years(500);
+
+        universe::ui::SimulationController segmented{config};
+        segmented.advance_years(250);
+        const auto save_result = segmented.save_snapshot_file("ui_controller_resume_test.ucore");
+        require(save_result.ok, "ui controller save must succeed");
+
+        universe::ui::SimulationController resumed{universe::SimulationConfig{.seed = 999U, .initial_population = 10U}};
+        const auto load_result = resumed.load_snapshot_file("ui_controller_resume_test.ucore");
+        require(load_result.ok, "ui controller load must succeed");
+        resumed.advance_years(250);
+
+        require_world_state_equal(
+            continuous.simulation().state(),
+            resumed.simulation().state(),
+            "ui controller save/load continuation must preserve deterministic outcomes");
+    }
 
     {
         universe::Simulation fresh{config};

@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(UNIVERSECORE_BUILD_TESTS "Build UniverseCore tests" ON)
+option(UNIVERSECORE_BUILD_UI "Build SDL3 + Dear ImGui simulation inspector" OFF)
 
 add_library(universe_core
     src/resources.cpp
@@ -29,9 +30,79 @@ endif()
 add_executable(universe_sim src/main.cpp)
 target_link_libraries(universe_sim PRIVATE universe_core)
 
+add_library(universe_ui_support
+    src/ui/simulation_controller.cpp
+)
+
+target_include_directories(universe_ui_support
+    PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(universe_ui_support
+    PUBLIC
+        universe_core
+)
+
+if(UNIVERSECORE_BUILD_UI)
+    include(FetchContent)
+
+    set(SDL_TEST OFF CACHE BOOL "" FORCE)
+    set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+    set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(SDL_UNIX_CONSOLE_BUILD ON CACHE BOOL "" FORCE)
+
+    FetchContent_Declare(
+        SDL3
+        URL https://github.com/libsdl-org/SDL/releases/download/release-3.4.14/SDL3-3.4.14.tar.gz
+        URL_HASH SHA256=30d4aa2b3037718142b32dffd4e72f917ebb6cc5227150e7bb9c45efb2153aeb
+    )
+
+    FetchContent_Declare(
+        imgui
+        URL https://github.com/ocornut/imgui/archive/refs/tags/v1.92.9b.tar.gz
+        URL_HASH SHA256=21d8a0a565e85dce943e375db00812c2f3f0ab21f3f0f7964e364a63422d7f99
+    )
+
+    FetchContent_MakeAvailable(SDL3 imgui)
+
+    add_library(universe_imgui
+        ${imgui_SOURCE_DIR}/imgui.cpp
+        ${imgui_SOURCE_DIR}/imgui_draw.cpp
+        ${imgui_SOURCE_DIR}/imgui_tables.cpp
+        ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+        ${imgui_SOURCE_DIR}/imgui_demo.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_sdlrenderer3.cpp
+    )
+
+    target_include_directories(universe_imgui
+        PUBLIC
+            ${imgui_SOURCE_DIR}
+            ${imgui_SOURCE_DIR}/backends
+    )
+
+    target_link_libraries(universe_imgui
+        PUBLIC
+            SDL3::SDL3
+    )
+
+    add_executable(universe_ui src/ui_main.cpp)
+    target_link_libraries(universe_ui
+        PRIVATE
+            universe_ui_support
+            universe_imgui
+            SDL3::SDL3
+    )
+endif()
+
 if(UNIVERSECORE_BUILD_TESTS)
     enable_testing()
     add_executable(universe_core_tests tests/simulation_tests.cpp)
-    target_link_libraries(universe_core_tests PRIVATE universe_core)
+    target_link_libraries(universe_core_tests PRIVATE universe_core universe_ui_support)
     add_test(NAME universe_core_tests COMMAND universe_core_tests)
+
+    if(UNIVERSECORE_BUILD_UI)
+        add_test(NAME universe_ui_smoke COMMAND universe_ui --smoke-test)
+    endif()
 endif()
