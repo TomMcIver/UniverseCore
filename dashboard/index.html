@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>UniverseCore Development Dashboard</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="top">
+    <h1 id="projectName">UniverseCore</h1>
+    <p id="phaseLine">Loading status...</p>
+  </header>
+
+  <main>
+    <section class="card summary">
+      <div>
+        <h2>Current Task</h2>
+        <p id="currentTask"></p>
+      </div>
+      <div>
+        <h2>Next Task</h2>
+        <p id="nextTask"></p>
+      </div>
+      <div>
+        <h2>Build/Test</h2>
+        <p id="buildStatus"></p>
+      </div>
+      <div>
+        <h2>Latest Verified Commit</h2>
+        <p id="latestCommit"></p>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Major Progress</h2>
+      <div id="progressContainer" class="progress-grid"></div>
+      <p id="progressNote" class="note"></p>
+    </section>
+
+    <section class="card">
+      <div class="row-between">
+        <h2>Roadmap Milestones</h2>
+        <div class="filters" role="group" aria-label="Milestone filter">
+          <button class="filter active" data-filter="all">All</button>
+          <button class="filter" data-filter="active">Active</button>
+          <button class="filter" data-filter="complete">Complete</button>
+          <button class="filter" data-filter="planned">Planned</button>
+        </div>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Name</th>
+            <th>Status</th>
+            <th>Progress</th>
+          </tr>
+        </thead>
+        <tbody id="milestoneTable"></tbody>
+      </table>
+    </section>
+
+    <section class="grid-2">
+      <section class="card">
+        <h2>Completed Tasks</h2>
+        <ul id="completedTasks"></ul>
+      </section>
+      <section class="card">
+        <h2>Active Tasks</h2>
+        <ul id="activeTasks"></ul>
+      </section>
+    </section>
+
+    <section class="card">
+      <h2>Planned Tasks</h2>
+      <ul id="plannedTasks"></ul>
+    </section>
+
+    <section class="card">
+      <h2>Core Architectural Invariants</h2>
+      <ul id="invariants"></ul>
+    </section>
+
+    <section class="card">
+      <h2>Recent Verified Commits</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Hash</th>
+            <th>Date</th>
+            <th>Summary</th>
+          </tr>
+        </thead>
+        <tbody id="commitTable"></tbody>
+      </table>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

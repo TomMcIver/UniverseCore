@@ -108,6 +108,13 @@ Do not prematurely introduce distributed systems, GPU kernels, databases, ECS fr
 - Build/test/run through Podman by bind-mounting the repository into `/workspace`.
 - Use `build/container` as the default generated build directory.
 
+## Development dashboard
+
+- `dashboard/data/project-status.json` is the machine-readable development-status source of truth.
+- Every verified milestone/task commit must update it when current task, next task, build status, roadmap progress, recent verified commits, or major architecture state changes.
+- Do not mark work complete in the dashboard unless it compiled and passed the canonical Podman test workflow.
+- The dashboard is reporting/UI only and must never become canonical simulation state.
+
 ## Immediate goal
 
 Build a headless Bronze Age settlement simulator capable of starting from roughly 200 people and running for at least 100 simulated years with coherent:

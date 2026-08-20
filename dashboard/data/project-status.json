@@ -1,0 +1,128 @@
+{
+  "project": "UniverseCore",
+  "as_of": "2026-08-20",
+  "current_phase": "Milestone 1B.5",
+  "current_task": "Basic simulation UI",
+  "next_task": "Milestone 1C: deterministic land and environmental resources",
+  "build": {
+    "canonical_workflow": "podman scripts/container-test.sh",
+    "last_verified": "2026-08-20",
+    "status": "passing",
+    "notes": "Baseline verified at commit aff9cd7 before Milestone 1B.5 implementation"
+  },
+  "progress": {
+    "simulation_foundation_percent": 93,
+    "bronze_age_simulator_percent": 22,
+    "playable_vertical_slice_percent": 6,
+    "full_game_vision_percent": 1,
+    "note": "Percentages are approximate planning estimates, not objective measurements."
+  },
+  "milestones": [
+    {
+      "id": "M0",
+      "name": "Simulation Kernel",
+      "status": "active",
+      "percent": 0
+    },
+    {
+      "id": "M1A",
+      "name": "Food & Resources",
+      "status": "complete",
+      "percent": 100
+    },
+    {
+      "id": "M1B",
+      "name": "Health & Nutrition",
+      "status": "complete",
+      "percent": 100
+    },
+    {
+      "id": "M1B.5",
+      "name": "Simulation UI",
+      "status": "complete",
+      "percent": 100
+    },
+    {
+      "id": "M1C",
+      "name": "Land & Environment",
+      "status": "planned",
+      "percent": 0
+    },
+    {
+      "id": "M1D",
+      "name": "Labour",
+      "status": "planned",
+      "percent": 0
+    },
+    {
+      "id": "M1E",
+      "name": "Settlements",
+      "status": "planned",
+      "percent": 0
+    },
+    {
+      "id": "M1F",
+      "name": "Occupations",
+      "status": "planned",
+      "percent": 0
+    },
+    {
+      "id": "M2",
+      "name": "Civilization Systems",
+      "status": "planned",
+      "percent": 0
+    },
+    {
+      "id": "UE",
+      "name": "Unreal Integration",
+      "status": "future",
+      "percent": 0
+    }
+  ],
+  "tasks": {
+    "completed": [
+      "Milestone 0 deterministic kernel",
+      "Milestone 1A deterministic household food/resources",
+      "Milestone 1B deterministic person health/nutrition",
+      "Snapshot schema v3 and validation",
+      "Canonical Podman build/test workflow"
+    ],
+    "active": [
+      "Milestone 1B.5 basic simulation UI",
+      "Development dashboard + deployment"
+    ],
+    "planned": [
+      "Milestone 1C deterministic land/environment resources",
+      "Milestone 1D labour model",
+      "Milestone 1E settlement systems",
+      "Milestone 1F occupations"
+    ]
+  },
+  "invariants": [
+    "Simulation remains canonical and headless-capable.",
+    "Determinism: same version + seed + config + ordered commands => same state.",
+    "Canonical state must not depend on wall-clock time or frame time.",
+    "UI and dashboard are reporting/inspection layers only, never canonical simulation state.",
+    "Snapshots serialize canonical deterministic state only."
+  ],
+  "recent_verified_commits": [
+    {
+      "hash": "aff9cd7",
+      "date": "2026-08-20",
+      "summary": "Milestone 1B deterministic person nutrition/health and snapshot v3",
+      "verified": true
+    },
+    {
+      "hash": "7b4e5be",
+      "date": "2026-08-20",
+      "summary": "Deterministic household food resources and survival dynamics",
+      "verified": true
+    },
+    {
+      "hash": "9e2c58c",
+      "date": "2026-08-20",
+      "summary": "Versioned deterministic snapshot save/load continuation",
+      "verified": true
+    }
+  ]
+}
