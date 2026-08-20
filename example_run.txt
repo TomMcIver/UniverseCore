@@ -1,0 +1,15 @@
+UniverseCore prototype
+seed=42
+year=0 population=200
+
+year=1 population=200 births_total=2 deaths_total=2
+year=2 population=205 births_total=10 deaths_total=5
+year=3 population=205 births_total=15 deaths_total=10
+year=4 population=205 births_total=18 deaths_total=13
+year=5 population=207 births_total=25 deaths_total=18
+year=6 population=210 births_total=31 deaths_total=21
+year=7 population=212 births_total=35 deaths_total=23
+year=8 population=214 births_total=39 deaths_total=25
+year=9 population=220 births_total=48 deaths_total=28
+year=10 population=222 births_total=54 deaths_total=32
+year=20 population=233 births_total=102 deaths_total=69

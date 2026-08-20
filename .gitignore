@@ -1,0 +1,22 @@
+# Build outputs
+/build/
+/cmake-build-*/
+/out/
+
+# IDE/editor
+.vscode/
+.idea/
+.vs/
+*.user
+*.suo
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+
+# Generated simulation outputs
+*.simstate
+*.snapshot
+*.log
