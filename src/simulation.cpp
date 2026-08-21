@@ -18,14 +18,15 @@ constexpr std::int64_t kMinRegionAreaUnits = 10;
 constexpr std::int64_t kMaxRegionAreaUnits = 10'000;
 constexpr std::uint32_t kSettlementShareScale = 10'000;
 constexpr std::uint32_t kInitialAllocatedSettlementShare = 8'500;
-constexpr std::uint32_t kHighPressureThresholdPer10k = 5'000;
-constexpr std::uint32_t kFoundingMinimumUnallocatedShare = 800;
-constexpr std::uint32_t kFoundingDefaultShare = 1'200;
-constexpr std::uint64_t kFoundingMinimumSourceHouseholds = 3;
+constexpr std::uint32_t kHighPressureThresholdPer10k = 8'500;
+constexpr std::uint32_t kFoundingMinimumUnallocatedShare = 1'500;
+constexpr std::uint32_t kFoundingDefaultShare = 900;
+constexpr std::uint64_t kFoundingMinimumSourceHouseholds = 5;
 constexpr std::uint64_t kFoundingMinimumNewHouseholds = 2;
 constexpr std::uint64_t kFoundingMinimumRemainingHouseholds = 1;
 constexpr std::uint64_t kTargetHouseholdsPerSettlement = 8;
 constexpr std::uint64_t kMaxInitialSettlementsPerRegion = 6;
+constexpr std::int64_t kAssignmentRequiredCoveragePercent = 115;
 
 struct LabourDemandProfile {
     std::int64_t cultivation_labour_demand{};
@@ -46,14 +47,14 @@ struct LabourDemandProfile {
 
     const auto buffer_days = stored_food / std::max<std::int64_t>(1, daily_food_required);
     std::int64_t target = 0;
-    if (buffer_days >= 60) {
-        target = daily_food_required / 2;
-    } else if (buffer_days >= 30) {
+    if (buffer_days >= 90) {
+        target = (daily_food_required * 90) / 100;
+    } else if (buffer_days >= 45) {
         target = daily_food_required;
-    } else if (buffer_days >= 7) {
-        target = daily_food_required + (daily_food_required / 4);
+    } else if (buffer_days >= 14) {
+        target = daily_food_required + (daily_food_required / 5);
     } else {
-        target = daily_food_required + (daily_food_required / 2);
+        target = daily_food_required + ((daily_food_required * 45) / 100);
     }
 
     return std::min(output_opportunity, std::max<std::int64_t>(target, 0));
@@ -600,58 +601,145 @@ void Simulation::process_food_period(const std::uint64_t food_period) {
         }
         household.resources.food_inventory.value = inventory_after_production;
 
-        const auto consumed_food = std::min<std::int64_t>(household.resources.food_inventory.value, household_state.required_food);
-        household.resources.food_inventory.value -= consumed_food;
-        const auto unmet_food = household_state.required_food - consumed_food;
-
-        if (household.resources.food_inventory.value < 0) {
-            throw std::runtime_error("Food inventory must never be negative");
+        if (!checked_add_i64(household.resources.food_produced_total, produced_food, household.resources.food_produced_total)) {
+            throw std::overflow_error("Food produced total overflow");
         }
+    }
 
-        if (!checked_add_i64(household.resources.food_produced_total, produced_food, household.resources.food_produced_total) ||
-            !checked_add_i64(household.resources.food_consumed_total, consumed_food, household.resources.food_consumed_total) ||
-            !checked_add_i64(household.resources.unmet_food_total, unmet_food, household.resources.unmet_food_total)) {
-            throw std::overflow_error("Food accounting totals overflow");
-        }
+    std::unordered_map<SettlementId, std::vector<HouseholdDayState*>> settlement_households;
+    settlement_households.reserve(state_.settlements.size());
+    for (auto& household_state : household_states) {
+        settlement_households[household_state.household->settlement_id].push_back(&household_state);
+    }
 
-        if (unmet_food > 0) {
-            ++household.resources.consecutive_shortage_days;
+    for (auto& [settlement_id, grouped_households] : settlement_households) {
+        (void)settlement_id;
+        std::sort(grouped_households.begin(), grouped_households.end(), [](const HouseholdDayState* lhs, const HouseholdDayState* rhs) {
+            return lhs->household->id < rhs->household->id;
+        });
 
-            const auto delta = static_cast<std::int64_t>(shortage_stress_delta_per_day(household_state.required_food, unmet_food));
-            std::int64_t new_stress = 0;
-            if (!checked_add_i64(household.resources.nutritional_stress_points, delta, new_stress)) {
-                throw std::overflow_error("Food stress overflow");
+        std::int64_t settlement_required = 0;
+        std::int64_t settlement_inventory = 0;
+        for (const auto* household_state : grouped_households) {
+            if (!checked_add_i64(settlement_required, household_state->required_food, settlement_required) ||
+                !checked_add_i64(
+                    settlement_inventory,
+                    household_state->household->resources.food_inventory.value,
+                    settlement_inventory)) {
+                throw std::overflow_error("Settlement pooling aggregation overflow");
             }
-            household.resources.nutritional_stress_points = std::min<std::int64_t>(new_stress, food_parameters_.max_stress_points);
-        } else {
-            household.resources.consecutive_shortage_days = 0;
-            household.resources.nutritional_stress_points = std::max<std::int64_t>(
-                0,
-                household.resources.nutritional_stress_points - food_parameters_.stress_recovery_per_day);
         }
 
-        std::vector<std::int64_t> per_person_allocated(household_state.alive_members.size(), 0);
-        if (consumed_food > 0 && household_state.required_food > 0 && !household_state.alive_members.empty()) {
-            std::int64_t allocated_sum = 0;
-            for (std::size_t i = 0; i < household_state.alive_members.size(); ++i) {
-                per_person_allocated[i] = (consumed_food * household_state.per_person_required[i]) / household_state.required_food;
-                if (!checked_add_i64(allocated_sum, per_person_allocated[i], allocated_sum)) {
-                    throw std::overflow_error("Per-person food allocation overflow");
+        const auto settlement_consumed = std::min(settlement_inventory, settlement_required);
+        const auto settlement_leftover = std::max<std::int64_t>(0, settlement_inventory - settlement_consumed);
+
+        std::unordered_map<HouseholdId, std::int64_t> household_allocated;
+        std::unordered_map<HouseholdId, std::int64_t> household_leftover;
+        household_allocated.reserve(grouped_households.size());
+        household_leftover.reserve(grouped_households.size());
+
+        std::int64_t distributed_consumed = 0;
+        for (const auto* household_state : grouped_households) {
+            std::int64_t allocated = 0;
+            if (settlement_consumed > 0 && settlement_required > 0 && household_state->required_food > 0) {
+                allocated = (settlement_consumed * household_state->required_food) / settlement_required;
+            }
+            household_allocated.emplace(household_state->household->id, allocated);
+            if (!checked_add_i64(distributed_consumed, allocated, distributed_consumed)) {
+                throw std::overflow_error("Settlement pooled consumed distribution overflow");
+            }
+        }
+
+        auto consumed_remainder = settlement_consumed - distributed_consumed;
+        for (const auto* household_state : grouped_households) {
+            if (consumed_remainder <= 0) {
+                break;
+            }
+            if (household_state->required_food <= 0) {
+                continue;
+            }
+            ++household_allocated[household_state->household->id];
+            --consumed_remainder;
+        }
+
+        std::int64_t distributed_leftover = 0;
+        for (const auto* household_state : grouped_households) {
+            std::int64_t leftover = 0;
+            if (settlement_leftover > 0 && settlement_inventory > 0 && household_state->household->resources.food_inventory.value > 0) {
+                leftover =
+                    (settlement_leftover * household_state->household->resources.food_inventory.value) /
+                    settlement_inventory;
+            }
+            household_leftover.emplace(household_state->household->id, leftover);
+            if (!checked_add_i64(distributed_leftover, leftover, distributed_leftover)) {
+                throw std::overflow_error("Settlement pooled leftover distribution overflow");
+            }
+        }
+
+        auto leftover_remainder = settlement_leftover - distributed_leftover;
+        for (const auto* household_state : grouped_households) {
+            if (leftover_remainder <= 0) {
+                break;
+            }
+            if (household_state->household->resources.food_inventory.value <= 0) {
+                continue;
+            }
+            ++household_leftover[household_state->household->id];
+            --leftover_remainder;
+        }
+
+        for (auto* household_state : grouped_households) {
+            auto& household = *household_state->household;
+            const auto consumed_food = household_allocated[household.id];
+            const auto unmet_food = std::max<std::int64_t>(0, household_state->required_food - consumed_food);
+            household.resources.food_inventory.value = std::max<std::int64_t>(0, household_leftover[household.id]);
+
+            if (!checked_add_i64(household.resources.food_consumed_total, consumed_food, household.resources.food_consumed_total) ||
+                !checked_add_i64(household.resources.unmet_food_total, unmet_food, household.resources.unmet_food_total)) {
+                throw std::overflow_error("Food accounting totals overflow");
+            }
+
+            if (unmet_food > 0) {
+                ++household.resources.consecutive_shortage_days;
+
+                const auto delta = static_cast<std::int64_t>(shortage_stress_delta_per_day(household_state->required_food, unmet_food));
+                std::int64_t new_stress = 0;
+                if (!checked_add_i64(household.resources.nutritional_stress_points, delta, new_stress)) {
+                    throw std::overflow_error("Food stress overflow");
+                }
+                household.resources.nutritional_stress_points = std::min<std::int64_t>(new_stress, food_parameters_.max_stress_points);
+            } else {
+                household.resources.consecutive_shortage_days = 0;
+                household.resources.nutritional_stress_points = std::max<std::int64_t>(
+                    0,
+                    household.resources.nutritional_stress_points - food_parameters_.stress_recovery_per_day);
+            }
+
+            std::vector<std::int64_t> per_person_allocated(household_state->alive_members.size(), 0);
+            if (consumed_food > 0 && household_state->required_food > 0 && !household_state->alive_members.empty()) {
+                std::int64_t allocated_sum = 0;
+                for (std::size_t i = 0; i < household_state->alive_members.size(); ++i) {
+                    per_person_allocated[i] =
+                        (consumed_food * household_state->per_person_required[i]) /
+                        household_state->required_food;
+                    if (!checked_add_i64(allocated_sum, per_person_allocated[i], allocated_sum)) {
+                        throw std::overflow_error("Per-person food allocation overflow");
+                    }
+                }
+
+                auto remainder = consumed_food - allocated_sum;
+                for (std::size_t i = 0; i < household_state->alive_members.size() && remainder > 0; ++i) {
+                    ++per_person_allocated[i];
+                    --remainder;
                 }
             }
 
-            auto remainder = consumed_food - allocated_sum;
-            for (std::size_t i = 0; i < household_state.alive_members.size() && remainder > 0; ++i) {
-                ++per_person_allocated[i];
-                --remainder;
+            for (std::size_t i = 0; i < household_state->alive_members.size(); ++i) {
+                apply_person_nutrition_and_health(
+                    *household_state->alive_members[i],
+                    household_state->per_person_required[i],
+                    per_person_allocated[i]);
             }
-        }
-
-        for (std::size_t i = 0; i < household_state.alive_members.size(); ++i) {
-            apply_person_nutrition_and_health(
-                *household_state.alive_members[i],
-                household_state.per_person_required[i],
-                per_person_allocated[i]);
         }
     }
 
@@ -712,31 +800,31 @@ bool Simulation::sample_sex(const SimulationSeed seed) const noexcept {
 
 std::uint32_t Simulation::mortality_rate_per_10k(const std::uint32_t age_years) const noexcept {
     if (age_years == 0U) {
-        return 500;
+        return 380;
     }
     if (age_years <= 4U) {
-        return 50;
+        return 35;
     }
     if (age_years <= 14U) {
-        return 20;
+        return 15;
     }
     if (age_years <= 49U) {
-        return 30;
+        return 20;
     }
     if (age_years <= 64U) {
-        return 80;
+        return 60;
     }
     if (age_years <= 74U) {
-        return 250;
+        return 180;
     }
     if (age_years <= 84U) {
-        return 1'200;
+        return 900;
     }
     if (age_years <= 94U) {
-        return 4'000;
+        return 2'500;
     }
     if (age_years <= 104U) {
-        return 8'000;
+        return 5'000;
     }
     return 10'000;
 }
@@ -747,19 +835,22 @@ std::uint32_t Simulation::mortality_penalty_from_person_health_per_10k(const Per
 }
 
 std::uint32_t Simulation::fertility_rate_per_10k(const std::uint32_t age_years) const noexcept {
-    if (age_years < 18U || age_years > 44U) {
+    if (age_years < 18U || age_years > 49U) {
         return 0;
     }
     if (age_years <= 24U) {
-        return 1'800;
-    }
-    if (age_years <= 34U) {
         return 2'200;
     }
-    if (age_years <= 39U) {
-        return 900;
+    if (age_years <= 34U) {
+        return 2'800;
     }
-    return 200;
+    if (age_years <= 39U) {
+        return 1'300;
+    }
+    if (age_years <= 44U) {
+        return 500;
+    }
+    return 180;
 }
 
 std::uint32_t Simulation::sample_initial_age_years(const PersonId person_id) const noexcept {
@@ -863,13 +954,13 @@ std::uint32_t Simulation::effective_fertility_rate_per_10k(const Person& person)
     }
 
     const auto household_alive = alive_count_in_household(person.household_id);
-    if (household_alive >= 18U) {
+    if (household_alive >= 24U) {
         return std::max<std::uint32_t>(base_rate / 20U, 1U);
     }
 
-    const auto capacity_remaining = 18U - household_alive;
+    const auto capacity_remaining = 24U - household_alive;
     const auto scaled = static_cast<std::uint64_t>(base_rate) * capacity_remaining;
-    auto effective = std::max<std::uint32_t>(static_cast<std::uint32_t>(scaled / 18U), 1U);
+    auto effective = std::max<std::uint32_t>(static_cast<std::uint32_t>(scaled / 24U), 1U);
 
     const auto person_scale = nutrition_health_fertility_scale_percent(person.nutrition_points, person.health_points);
     effective = static_cast<std::uint32_t>((static_cast<std::uint64_t>(effective) * person_scale) / 100U);
@@ -1688,7 +1779,13 @@ void Simulation::process_occupation_reassignment(const std::uint64_t demographic
             settlement_required_food,
             settlement_stored_food,
             cultivation_opportunity + gathering_opportunity);
-        const auto demand = split_demand_by_opportunity(output_target, cultivation_opportunity, gathering_opportunity);
+        auto assignment_target = output_target;
+        if (settlement_required_food > 0) {
+            const auto required_coverage_target = (settlement_required_food * kAssignmentRequiredCoveragePercent) / 100;
+            assignment_target = std::max(assignment_target, required_coverage_target);
+        }
+        assignment_target = std::min(assignment_target, cultivation_opportunity + gathering_opportunity);
+        const auto demand = split_demand_by_opportunity(assignment_target, cultivation_opportunity, gathering_opportunity);
 
         std::int64_t cultivation_remaining = std::max<std::int64_t>(0, demand.cultivation_labour_demand);
         std::int64_t gathering_remaining = std::max<std::int64_t>(0, demand.gathering_labour_demand);

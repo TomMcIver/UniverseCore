@@ -96,6 +96,26 @@ podman run --rm \
 	./scripts/container-run.sh --seed 42 --years 100 --population 200 --food-scale 40
 ```
 
+Run labour-constrained diagnostics by reducing effective labour capacity:
+
+```bash
+podman run --rm \
+	-v "${PWD}:/workspace" \
+	-w /workspace \
+	universecore-dev \
+	./scripts/container-run.sh --seed 42 --years 100 --population 200 --effort-scale 55
+```
+
+Run yearly calibration diagnostics with detailed derived metrics:
+
+```bash
+podman run --rm \
+	-v "${PWD}:/workspace" \
+	-w /workspace \
+	universecore-dev \
+	./scripts/container-run.sh --seed 42 --years 150 --population 200 --report-interval 1
+```
+
 To print recent canonical simulation events from the run:
 
 ```bash

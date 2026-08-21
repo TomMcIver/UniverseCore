@@ -27,6 +27,7 @@ void print_usage(const char* executable) {
     std::cout << "Usage: " << executable
               << " [--seed N] [--years N] [--population N] [--dump-events N]"
               << " [--food-scale N] [--initial-food N] [--food-system 0|1]"
+              << " [--effort-scale N] [--report-interval N]"
               << " [--save PATH] [--load PATH]\n";
 }
 
@@ -77,6 +78,7 @@ int main(int argc, char** argv) {
     universe::SimulationConfig config{};
     std::uint64_t years = 100;
     std::uint64_t dump_events = 0;
+    std::uint64_t report_interval = 10;
     std::optional<std::string> save_path;
     std::optional<std::string> load_path;
 
@@ -131,6 +133,16 @@ int main(int argc, char** argv) {
                 return 2;
             }
             config.food_system_enabled = (enabled == 1U);
+        } else if (arg == "--effort-scale") {
+            if (!parse_number(value, config.productive_effort_scale_percent)) {
+                std::cerr << "Invalid effort-scale\n";
+                return 2;
+            }
+        } else if (arg == "--report-interval") {
+            if (!parse_number(value, report_interval) || report_interval == 0U) {
+                std::cerr << "Invalid report-interval\n";
+                return 2;
+            }
         } else if (arg == "--save") {
             save_path = std::string{value};
         } else if (arg == "--load") {
@@ -174,18 +186,35 @@ int main(int argc, char** argv) {
               << "year=" << initial_state.year
               << " population=" << initial_state.population << "\n\n";
 
+    std::uint64_t last_births = initial_state.total_births;
+    std::uint64_t last_deaths = initial_state.total_deaths;
+    std::uint64_t last_population = initial_state.population;
+    std::uint64_t last_active_settlements = 0;
+    for (const auto& settlement : initial_state.settlements) {
+        if (settlement.active) {
+            ++last_active_settlements;
+        }
+    }
+
     for (std::uint64_t i = 0; i < years; ++i) {
         simulation->step_year();
         const auto& state = simulation->state();
-        if (state.year <= 10 || state.year % 10 == 0 || state.year == years) {
+        if (state.year <= 10 || state.year % report_interval == 0 || state.year == years) {
             std::uint64_t adults = 0;
             std::uint64_t children = 0;
             std::uint64_t alive_people = 0;
+            std::uint64_t reproductive_females = 0;
             std::uint64_t settlements_active = 0;
             std::uint64_t settlements_extinct = 0;
             std::uint64_t largest_settlement = 0;
             std::uint64_t high_pressure_settlements = 0;
             std::uint64_t total_settlement_population = 0;
+            std::uint64_t nutrition_under_350 = 0;
+            std::uint64_t nutrition_under_180 = 0;
+            std::uint64_t health_under_400 = 0;
+            std::uint64_t health_under_220 = 0;
+            std::int64_t total_nutrition = 0;
+            std::int64_t total_health = 0;
             const auto max_i64_as_u64 = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
             const auto current_year = (state.year > max_i64_as_u64)
                 ? std::numeric_limits<std::int64_t>::max()
@@ -205,6 +234,25 @@ int main(int argc, char** argv) {
                 } else {
                     ++children;
                 }
+
+                if (person.sex == universe::BiologicalSex::Female && age >= 18U && age <= 44U) {
+                    ++reproductive_females;
+                }
+
+                if (person.nutrition_points < 350) {
+                    ++nutrition_under_350;
+                }
+                if (person.nutrition_points < 180) {
+                    ++nutrition_under_180;
+                }
+                if (person.health_points < 400) {
+                    ++health_under_400;
+                }
+                if (person.health_points < 220) {
+                    ++health_under_220;
+                }
+                total_nutrition += person.nutrition_points;
+                total_health += person.health_points;
             }
 
             for (const auto& settlement : state.settlements) {
@@ -261,13 +309,48 @@ int main(int argc, char** argv) {
                 ? (total_settlement_population / settlements_active)
                 : 0U;
 
+            const auto births_period = state.total_births - last_births;
+            const auto deaths_period = state.total_deaths - last_deaths;
+            const auto population_change = static_cast<std::int64_t>(state.population) - static_cast<std::int64_t>(last_population);
+            const auto settlements_founded_period = settlements_active > last_active_settlements
+                ? (settlements_active - last_active_settlements)
+                : 0U;
+            const auto settlements_lost_period = settlements_active < last_active_settlements
+                ? (last_active_settlements - settlements_active)
+                : 0U;
+            const auto births_per_1k = alive_people > 0
+                ? ((births_period * 1'000U) / alive_people)
+                : 0U;
+            const auto deaths_per_1k = alive_people > 0
+                ? ((deaths_period * 1'000U) / alive_people)
+                : 0U;
+            const auto avg_nutrition = alive_people > 0
+                ? (total_nutrition / static_cast<std::int64_t>(alive_people))
+                : 0;
+            const auto avg_health = alive_people > 0
+                ? (total_health / static_cast<std::int64_t>(alive_people))
+                : 0;
+
+            last_births = state.total_births;
+            last_deaths = state.total_deaths;
+            last_population = state.population;
+            last_active_settlements = settlements_active;
+
             std::cout << "year=" << state.year
                       << " population=" << state.population
+                      << " population_change=" << population_change
                       << " people_total=" << state.people.size()
                       << " alive_people=" << alive_people
+                      << " births_period=" << births_period
+                      << " deaths_period=" << deaths_period
+                      << " births_per_1k=" << births_per_1k
+                      << " deaths_per_1k=" << deaths_per_1k
+                      << " reproductive_females=" << reproductive_females
                       << " households=" << state.households.size()
                       << " settlements_active=" << settlements_active
                       << " settlements_extinct=" << settlements_extinct
+                      << " settlements_founded_period=" << settlements_founded_period
+                      << " settlements_lost_period=" << settlements_lost_period
                       << " largest_settlement=" << largest_settlement
                       << " avg_settlement_population=" << avg_settlement_population
                       << " high_pressure_settlements=" << high_pressure_settlements
@@ -289,8 +372,17 @@ int main(int argc, char** argv) {
                       << " food_produced=" << state.total_food_produced
                       << " food_consumed=" << state.total_food_consumed
                       << " unmet_food=" << state.total_unmet_food
+                      << " wild_stock=" << state.total_wild_food_stock
+                      << " wild_capacity=" << state.total_wild_food_capacity
+                      << " productive_capacity_per_day=" << state.total_productive_capacity_per_day
                       << " households_in_shortage=" << state.households_in_shortage
                       << " population_under_food_stress=" << state.population_under_food_stress
+                      << " nutrition_under_350=" << nutrition_under_350
+                      << " nutrition_under_180=" << nutrition_under_180
+                      << " health_under_400=" << health_under_400
+                      << " health_under_220=" << health_under_220
+                      << " avg_nutrition=" << avg_nutrition
+                      << " avg_health=" << avg_health
                       << " adults=" << adults
                       << " children=" << children
                       << " births_total=" << state.total_births

@@ -24,8 +24,8 @@ struct HouseholdResourceState {
 struct FoodModelParameters {
     std::int64_t adult_daily_food_units{10};
     std::int64_t child_daily_food_units{6};
-    std::int64_t adult_daily_production_units{14};
-    std::int64_t child_daily_production_units{4};
+    std::int64_t adult_daily_production_units{22};
+    std::int64_t child_daily_production_units{6};
     std::int64_t stress_recovery_per_day{6};
     std::int64_t max_stress_points{5'000};
     std::int32_t min_person_nutrition_points{0};

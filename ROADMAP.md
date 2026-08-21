@@ -39,6 +39,15 @@ Status: **in progress**
 
 Exit criteria: 100-year runs remain internally valid and produce explainable demographic histories.
 
+## Milestone 1 stabilization pass (post-1F integration)
+
+Status: **in progress**
+
+- [x] deterministic diagnostics for yearly demographic/resource/labour signals
+- [x] integrated food-labour-health feedback calibration pass
+- [x] deterministic regime regression scenarios (sustainable / famine / constrained)
+- [ ] extend long-horizon viability across broader baseline seed distributions
+
 ## Milestone 2: Persistent history and knowledge
 
 - [ ] event journal

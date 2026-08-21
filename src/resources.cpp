@@ -135,13 +135,13 @@ std::uint32_t nutrition_health_mortality_penalty_per_10k(
     std::uint32_t penalty = 0;
 
     if (nutrition_points < 80 || health_points < 120) {
-        penalty = 8'500;
+        penalty = 6'500;
     } else if (nutrition_points < 180 || health_points < 220) {
-        penalty = 4'500;
+        penalty = 3'000;
     } else if (nutrition_points < 320 || health_points < 350) {
-        penalty = 2'000;
+        penalty = 1'200;
     } else if (nutrition_points < 500 || health_points < 500) {
-        penalty = 700;
+        penalty = 350;
     }
 
     if (!is_child) {
