@@ -204,15 +204,24 @@ int main(int argc, char** argv) {
             std::uint64_t children = 0;
             std::uint64_t alive_people = 0;
             std::uint64_t reproductive_females = 0;
+            std::uint64_t reproductive_males = 0;
             std::uint64_t settlements_active = 0;
             std::uint64_t settlements_extinct = 0;
             std::uint64_t largest_settlement = 0;
+            std::uint64_t smallest_active_settlement = std::numeric_limits<std::uint64_t>::max();
+            std::uint64_t settlements_under_10 = 0;
+            std::uint64_t settlements_under_25 = 0;
             std::uint64_t high_pressure_settlements = 0;
             std::uint64_t total_settlement_population = 0;
             std::uint64_t nutrition_under_350 = 0;
             std::uint64_t nutrition_under_180 = 0;
             std::uint64_t health_under_400 = 0;
             std::uint64_t health_under_220 = 0;
+            std::uint64_t age_0_9 = 0;
+            std::uint64_t age_10_19 = 0;
+            std::uint64_t age_20_39 = 0;
+            std::uint64_t age_40_59 = 0;
+            std::uint64_t age_60_plus = 0;
             std::int64_t total_nutrition = 0;
             std::int64_t total_health = 0;
             const auto max_i64_as_u64 = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
@@ -237,6 +246,21 @@ int main(int argc, char** argv) {
 
                 if (person.sex == universe::BiologicalSex::Female && age >= 18U && age <= 44U) {
                     ++reproductive_females;
+                }
+                if (person.sex == universe::BiologicalSex::Male && age >= 18U && age <= 59U) {
+                    ++reproductive_males;
+                }
+
+                if (age <= 9U) {
+                    ++age_0_9;
+                } else if (age <= 19U) {
+                    ++age_10_19;
+                } else if (age <= 39U) {
+                    ++age_20_39;
+                } else if (age <= 59U) {
+                    ++age_40_59;
+                } else {
+                    ++age_60_plus;
                 }
 
                 if (person.nutrition_points < 350) {
@@ -285,6 +309,15 @@ int main(int argc, char** argv) {
 
                 total_settlement_population += settlement_alive;
                 largest_settlement = std::max(largest_settlement, settlement_alive);
+                if (settlement.active) {
+                    smallest_active_settlement = std::min(smallest_active_settlement, settlement_alive);
+                    if (settlement_alive < 10U) {
+                        ++settlements_under_10;
+                    }
+                    if (settlement_alive < 25U) {
+                        ++settlements_under_25;
+                    }
+                }
 
                 std::int64_t settlement_capacity = 0;
                 for (const auto& region : state.regions) {
@@ -308,6 +341,9 @@ int main(int argc, char** argv) {
             const auto avg_settlement_population = settlements_active > 0
                 ? (total_settlement_population / settlements_active)
                 : 0U;
+            if (settlements_active == 0U) {
+                smallest_active_settlement = 0U;
+            }
 
             const auto births_period = state.total_births - last_births;
             const auto deaths_period = state.total_deaths - last_deaths;
@@ -331,6 +367,39 @@ int main(int argc, char** argv) {
                 ? (total_health / static_cast<std::int64_t>(alive_people))
                 : 0;
 
+            std::uint64_t fertile_households = 0;
+            for (const auto& household : state.households) {
+                bool has_reproductive_female = false;
+                bool has_reproductive_male = false;
+                for (const auto member_id : household.member_ids) {
+                    for (const auto& person : state.people) {
+                        if (person.id != member_id || !person.alive) {
+                            continue;
+                        }
+
+                        const auto age = (current_year > person.birth_year)
+                            ? static_cast<std::uint64_t>(current_year - person.birth_year)
+                            : 0ULL;
+                        if (person.sex == universe::BiologicalSex::Female && age >= 18U && age <= 44U) {
+                            has_reproductive_female = true;
+                        }
+                        if (person.sex == universe::BiologicalSex::Male && age >= 18U && age <= 59U) {
+                            has_reproductive_male = true;
+                        }
+                        if (has_reproductive_female && has_reproductive_male) {
+                            break;
+                        }
+                    }
+                    if (has_reproductive_female && has_reproductive_male) {
+                        break;
+                    }
+                }
+
+                if (has_reproductive_female && has_reproductive_male) {
+                    ++fertile_households;
+                }
+            }
+
             last_births = state.total_births;
             last_deaths = state.total_deaths;
             last_population = state.population;
@@ -346,12 +415,17 @@ int main(int argc, char** argv) {
                       << " births_per_1k=" << births_per_1k
                       << " deaths_per_1k=" << deaths_per_1k
                       << " reproductive_females=" << reproductive_females
+                      << " reproductive_males=" << reproductive_males
+                      << " fertile_households=" << fertile_households
                       << " households=" << state.households.size()
                       << " settlements_active=" << settlements_active
                       << " settlements_extinct=" << settlements_extinct
                       << " settlements_founded_period=" << settlements_founded_period
                       << " settlements_lost_period=" << settlements_lost_period
                       << " largest_settlement=" << largest_settlement
+                      << " smallest_active_settlement=" << smallest_active_settlement
+                      << " settlements_under_10=" << settlements_under_10
+                      << " settlements_under_25=" << settlements_under_25
                       << " avg_settlement_population=" << avg_settlement_population
                       << " high_pressure_settlements=" << high_pressure_settlements
                       << " eligible_workers=" << state.eligible_workers
@@ -385,6 +459,11 @@ int main(int argc, char** argv) {
                       << " avg_health=" << avg_health
                       << " adults=" << adults
                       << " children=" << children
+                      << " age_0_9=" << age_0_9
+                      << " age_10_19=" << age_10_19
+                      << " age_20_39=" << age_20_39
+                      << " age_40_59=" << age_40_59
+                      << " age_60_plus=" << age_60_plus
                       << " births_total=" << state.total_births
                       << " deaths_total=" << state.total_deaths
                       << '\n';

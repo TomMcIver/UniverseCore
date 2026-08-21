@@ -116,6 +116,19 @@ podman run --rm \
 	./scripts/container-run.sh --seed 42 --years 150 --population 200 --report-interval 1
 ```
 
+Run the deterministic long-horizon viability matrix benchmark (noncanonical analysis tooling):
+
+```powershell
+./scripts/run-viability-matrix.ps1 -SeedStart 1 -SeedEnd 50 -Years 1000 -Population 200 -FoodScale 100 -EffortScale 100 -OutputDir build/viability/baseline_p200_s1_50
+```
+
+This writes:
+
+- `per_seed_per_year.csv`
+- `per_seed_summary.csv`
+- `horizon_summary.csv`
+- `summary.txt`
+
 To print recent canonical simulation events from the run:
 
 ```bash

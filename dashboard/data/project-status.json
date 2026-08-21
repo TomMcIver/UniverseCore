@@ -1,8 +1,8 @@
 {
   "project": "UniverseCore",
   "as_of": "2026-08-21",
-  "current_phase": "Milestone 1 stabilization",
-  "current_task": "Calibrate demographic/resource/labour equilibrium after 1F integration",
+  "current_phase": "Milestone 1 robustness",
+  "current_task": "Characterize long-horizon population viability",
   "next_task": "Milestone 1 migration and demographic stability",
   "build": {
     "canonical_workflow": "podman scripts/container-test.sh",
