@@ -24,6 +24,12 @@ enum class BiologicalSex : std::uint8_t {
     Male = 1,
 };
 
+enum class Occupation : std::uint8_t {
+    None = 0,
+    SubsistenceCultivator = 1,
+    WildFoodGatherer = 2,
+};
+
 struct Person {
     PersonId id{};
     std::int64_t birth_year{};
@@ -35,6 +41,7 @@ struct Person {
     std::int32_t nutrition_points{700};
     std::int32_t health_points{850};
     std::uint32_t consecutive_undernourished_days{};
+    Occupation occupation{Occupation::None};
 };
 
 struct Household {
@@ -117,6 +124,19 @@ struct WorldState {
     std::int64_t total_wild_food_stock{};
     std::int64_t total_wild_food_harvested{};
     std::int64_t total_wild_food_regenerated{};
+    std::uint64_t eligible_workers{};
+    std::uint64_t active_workers{};
+    std::uint64_t unallocated_workers{};
+    std::uint64_t cultivators{};
+    std::uint64_t gatherers{};
+    std::int64_t total_labour_capacity{};
+    std::int64_t total_labour_demand{};
+    std::int64_t total_labour_allocated{};
+    std::int64_t cultivation_labour_available{};
+    std::int64_t cultivation_labour_allocated{};
+    std::int64_t gathering_labour_available{};
+    std::int64_t gathering_labour_allocated{};
+    std::int64_t labour_shortfall{};
     std::vector<Person> people{};
     std::vector<Household> households{};
     std::vector<RegionEnvironmentState> regions{};
@@ -158,6 +178,7 @@ private:
     [[nodiscard]] std::uint32_t alive_count_in_household(HouseholdId household_id) const noexcept;
     [[nodiscard]] std::int64_t food_requirement_for_person(const Person& person) const noexcept;
     [[nodiscard]] std::int64_t productive_effort_for_person(const Person& person) const noexcept;
+    [[nodiscard]] bool occupation_eligible_for_productive_work(const Person& person) const noexcept;
     [[nodiscard]] std::uint32_t effective_fertility_rate_per_10k(const Person& person) const noexcept;
     [[nodiscard]] std::int64_t household_stress_points(HouseholdId household_id) const noexcept;
     [[nodiscard]] std::optional<PersonId> sample_father_global(SimulationSeed selection_seed) noexcept;
@@ -167,6 +188,9 @@ private:
     void run_scheduled_systems_until(SimulationTime target_time);
     void process_demography_period(std::uint64_t demographic_year);
     void process_food_period(std::uint64_t food_period);
+    void process_occupation_reassignment(std::uint64_t demographic_year);
+    void clear_occupations_for_extinct_or_invalid_households();
+    void refresh_labour_aggregates();
     void apply_person_nutrition_and_health(Person& person, std::int64_t required_food, std::int64_t allocated_food);
     void remove_from_household(HouseholdId household_id, PersonId person_id);
     void refresh_food_aggregates() noexcept;

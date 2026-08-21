@@ -52,10 +52,8 @@ SimulationSummary SimulationController::summary() const noexcept {
 
     std::unordered_map<PersonId, std::int64_t> labour_capacity_by_person;
     labour_capacity_by_person.reserve(state.people.size());
-    std::unordered_map<PersonId, std::int64_t> labour_demand_by_person;
-    labour_demand_by_person.reserve(state.people.size());
-    std::int64_t total_labour_capacity = 0;
-    std::int64_t total_labour_demand = 0;
+    std::unordered_map<PersonId, std::int64_t> food_need_by_person;
+    food_need_by_person.reserve(state.people.size());
 
     for (const auto& person : state.people) {
         const auto age = (state.year > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
@@ -85,11 +83,10 @@ SimulationSummary SimulationController::summary() const noexcept {
             person.health_points,
             labour_parameters,
             100U);
-        const auto demand_capacity = age_based_labour_capacity_units(person_age_years, labour_parameters);
         labour_capacity_by_person.emplace(person.id, available_capacity);
-        labour_demand_by_person.emplace(person.id, demand_capacity);
-        total_labour_capacity += available_capacity;
-        total_labour_demand += demand_capacity;
+        food_need_by_person.emplace(
+            person.id,
+            person_age_years >= 18U ? labour_parameters.adult_daily_food_units : labour_parameters.child_daily_food_units);
 
         ++health_count;
         total_health += person.health_points;
@@ -127,8 +124,8 @@ SimulationSummary SimulationController::summary() const noexcept {
                 household_capacity += labour_it->second;
             }
 
-            const auto demand_it = labour_demand_by_person.find(member_id);
-            if (demand_it != labour_demand_by_person.end()) {
+            const auto demand_it = food_need_by_person.find(member_id);
+            if (demand_it != food_need_by_person.end()) {
                 household_demand += demand_it->second;
             }
         }
@@ -178,10 +175,21 @@ SimulationSummary SimulationController::summary() const noexcept {
         .food_consumed = state.total_food_consumed,
         .unmet_food = state.total_unmet_food,
         .households_in_shortage = state.households_in_shortage,
-        .total_labour_capacity = total_labour_capacity,
-        .total_labour_demand = total_labour_demand,
+        .total_labour_capacity = state.total_labour_capacity,
+        .total_labour_demand = state.total_labour_demand,
+        .total_labour_allocated = state.total_labour_allocated,
+        .labour_shortfall = state.labour_shortfall,
         .zero_capable_worker_households = zero_capable_worker_households,
         .labour_constrained_households = labour_constrained_households,
+        .eligible_workers = state.eligible_workers,
+        .active_workers = state.active_workers,
+        .unallocated_workers = state.unallocated_workers,
+        .cultivators = state.cultivators,
+        .gatherers = state.gatherers,
+        .cultivation_labour_available = state.cultivation_labour_available,
+        .cultivation_labour_allocated = state.cultivation_labour_allocated,
+        .gathering_labour_available = state.gathering_labour_available,
+        .gathering_labour_allocated = state.gathering_labour_allocated,
         .child_population = child_population,
         .working_age_population = working_age_population,
         .elderly_population = elderly_population,
@@ -243,9 +251,12 @@ std::vector<SettlementSummaryView> SimulationController::settlement_summaries() 
             const auto productive =
                 (region->productive_capacity_per_day * static_cast<std::int64_t>(settlement.access_share_points)) / 10'000;
             const auto wild =
-                (region->wild_food_harvest_limit_per_day * static_cast<std::int64_t>(settlement.access_share_points)) / 10'000;
+                (std::min(region->wild_food_stock, region->wild_food_harvest_limit_per_day) * static_cast<std::int64_t>(settlement.access_share_points)) / 10'000;
             summary.accessible_food_capacity_per_day = productive + wild;
         }
+
+        std::int64_t settlement_required_food = 0;
+        std::int64_t settlement_stored_food = 0;
 
         for (const auto& household : state.households) {
             if (household.settlement_id != settlement.id) {
@@ -255,6 +266,7 @@ std::vector<SettlementSummaryView> SimulationController::settlement_summaries() 
             ++summary.households;
             summary.food_stored += household.resources.food_inventory.value;
             summary.food_unmet_total += household.resources.unmet_food_total;
+            settlement_stored_food += household.resources.food_inventory.value;
 
             for (const auto member_id : household.member_ids) {
                 const auto person_it = person_by_id.find(member_id);
@@ -271,25 +283,88 @@ std::vector<SettlementSummaryView> SimulationController::settlement_summaries() 
                     : 0U;
 
                 ++summary.alive_population;
-                summary.labour_capacity += person_labour_capacity_units(
+                const auto labour_capacity = person_labour_capacity_units(
                     true,
                     age,
                     person->nutrition_points,
                     person->health_points,
                     labour_parameters,
                     100U);
-                summary.labour_demand += age_based_labour_capacity_units(age, labour_parameters);
+                const auto required_food = age >= 18U
+                    ? labour_parameters.adult_daily_food_units
+                    : labour_parameters.child_daily_food_units;
+                settlement_required_food += required_food;
+                summary.labour_capacity += labour_capacity;
 
-                if (summary.accessible_food_capacity_per_day > 0) {
-                    summary.pressure_per_10k = static_cast<std::uint32_t>(
-                        std::min<std::int64_t>(
-                            100'000,
-                            (summary.labour_demand * 10'000) / summary.accessible_food_capacity_per_day));
-                } else if (summary.labour_demand > 0) {
-                    summary.pressure_per_10k = 100'000U;
+                const bool occupation_eligible =
+                    age >= 18U &&
+                    person->nutrition_points >= 160 &&
+                    person->health_points >= 160 &&
+                    labour_capacity > 0;
+                if (!occupation_eligible) {
+                    continue;
+                }
+
+                ++summary.eligible_workers;
+                if (person->occupation == Occupation::SubsistenceCultivator) {
+                    ++summary.active_workers;
+                    ++summary.cultivators;
+                    summary.cultivation_labour_available += labour_capacity;
+                } else if (person->occupation == Occupation::WildFoodGatherer) {
+                    ++summary.active_workers;
+                    ++summary.gatherers;
+                    summary.gathering_labour_available += labour_capacity;
+                } else {
+                    ++summary.unallocated_workers;
                 }
             }
         }
+
+        if (summary.accessible_food_capacity_per_day > 0) {
+            summary.pressure_per_10k = static_cast<std::uint32_t>(
+                std::min<std::int64_t>(
+                    100'000,
+                    (settlement_required_food * 10'000) / summary.accessible_food_capacity_per_day));
+        } else if (settlement_required_food > 0) {
+            summary.pressure_per_10k = 100'000U;
+        }
+
+        std::int64_t output_target = 0;
+        if (settlement_required_food > 0 && summary.accessible_food_capacity_per_day > 0) {
+            const auto buffer_days = settlement_stored_food / std::max<std::int64_t>(1, settlement_required_food);
+            if (buffer_days >= 60) {
+                output_target = settlement_required_food / 2;
+            } else if (buffer_days >= 30) {
+                output_target = settlement_required_food;
+            } else if (buffer_days >= 7) {
+                output_target = settlement_required_food + (settlement_required_food / 4);
+            } else {
+                output_target = settlement_required_food + (settlement_required_food / 2);
+            }
+            output_target = std::min(output_target, summary.accessible_food_capacity_per_day);
+        }
+
+        std::int64_t cultivation_opportunity = 0;
+        std::int64_t gathering_opportunity = 0;
+        if (region != nullptr && settlement.active) {
+            cultivation_opportunity =
+                (region->productive_capacity_per_day * static_cast<std::int64_t>(settlement.access_share_points)) / 10'000;
+            gathering_opportunity =
+                (std::min(region->wild_food_stock, region->wild_food_harvest_limit_per_day) * static_cast<std::int64_t>(settlement.access_share_points)) / 10'000;
+        }
+
+        const auto total_opportunity = cultivation_opportunity + gathering_opportunity;
+        if (total_opportunity > 0 && output_target > 0) {
+            summary.labour_demand = output_target;
+            const auto cultivation_demand = (output_target * cultivation_opportunity) / total_opportunity;
+            const auto gathering_demand = output_target - cultivation_demand;
+
+            summary.cultivation_labour_allocated = std::min(summary.cultivation_labour_available, std::max<std::int64_t>(0, cultivation_demand));
+            summary.gathering_labour_allocated = std::min(summary.gathering_labour_available, std::max<std::int64_t>(0, gathering_demand));
+        }
+
+        summary.labour_allocated = summary.cultivation_labour_allocated + summary.gathering_labour_allocated;
+        summary.labour_shortfall = std::max<std::int64_t>(0, summary.labour_demand - summary.labour_allocated);
 
         summaries.push_back(summary);
     }

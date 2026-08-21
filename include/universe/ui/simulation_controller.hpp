@@ -35,8 +35,19 @@ struct SimulationSummary {
 
     std::int64_t total_labour_capacity{};
     std::int64_t total_labour_demand{};
+    std::int64_t total_labour_allocated{};
+    std::int64_t labour_shortfall{};
     std::uint64_t zero_capable_worker_households{};
     std::uint64_t labour_constrained_households{};
+    std::uint64_t eligible_workers{};
+    std::uint64_t active_workers{};
+    std::uint64_t unallocated_workers{};
+    std::uint64_t cultivators{};
+    std::uint64_t gatherers{};
+    std::int64_t cultivation_labour_available{};
+    std::int64_t cultivation_labour_allocated{};
+    std::int64_t gathering_labour_available{};
+    std::int64_t gathering_labour_allocated{};
     std::uint64_t child_population{};
     std::uint64_t working_age_population{};
     std::uint64_t elderly_population{};
@@ -64,6 +75,17 @@ struct SettlementSummaryView {
     std::uint64_t households{};
     std::int64_t labour_capacity{};
     std::int64_t labour_demand{};
+    std::int64_t labour_allocated{};
+    std::int64_t labour_shortfall{};
+    std::uint64_t eligible_workers{};
+    std::uint64_t active_workers{};
+    std::uint64_t unallocated_workers{};
+    std::uint64_t cultivators{};
+    std::uint64_t gatherers{};
+    std::int64_t cultivation_labour_available{};
+    std::int64_t cultivation_labour_allocated{};
+    std::int64_t gathering_labour_available{};
+    std::int64_t gathering_labour_allocated{};
     std::int64_t accessible_food_capacity_per_day{};
     std::uint32_t pressure_per_10k{};
     std::int64_t food_stored{};

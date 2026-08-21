@@ -108,6 +108,18 @@ struct UiState {
     return nullptr;
 }
 
+[[nodiscard]] const char* occupation_label(const universe::Occupation occupation) {
+    switch (occupation) {
+        case universe::Occupation::None:
+            return "None";
+        case universe::Occupation::SubsistenceCultivator:
+            return "SubsistenceCultivator";
+        case universe::Occupation::WildFoodGatherer:
+            return "WildFoodGatherer";
+    }
+    return "Unknown";
+}
+
 void apply_time_step(SimulationController& controller, const int run_step_index) {
     switch (run_step_index) {
         case 0:
@@ -372,6 +384,19 @@ int main(int argc, char** argv) {
             static_cast<long long>(summary.total_labour_demand),
             static_cast<unsigned long long>(summary.labour_constrained_households),
             static_cast<unsigned long long>(summary.zero_capable_worker_households));
+        ImGui::Text("Workers: eligible=%llu active=%llu unallocated=%llu cultivators=%llu gatherers=%llu",
+            static_cast<unsigned long long>(summary.eligible_workers),
+            static_cast<unsigned long long>(summary.active_workers),
+            static_cast<unsigned long long>(summary.unallocated_workers),
+            static_cast<unsigned long long>(summary.cultivators),
+            static_cast<unsigned long long>(summary.gatherers));
+        ImGui::Text("Specialized labour: alloc=%lld shortfall=%lld | cultivation %lld/%lld | gathering %lld/%lld",
+            static_cast<long long>(summary.total_labour_allocated),
+            static_cast<long long>(summary.labour_shortfall),
+            static_cast<long long>(summary.cultivation_labour_allocated),
+            static_cast<long long>(summary.cultivation_labour_available),
+            static_cast<long long>(summary.gathering_labour_allocated),
+            static_cast<long long>(summary.gathering_labour_available));
         ImGui::Text("Settlements: active=%llu extinct=%llu avg_pop=%llu largest=%llu high_pressure=%llu",
             static_cast<unsigned long long>(summary.active_settlements),
             static_cast<unsigned long long>(summary.extinct_settlements),
@@ -393,7 +418,7 @@ int main(int argc, char** argv) {
 
         ImGui::BeginChild("settlements", ImVec2(0, 180), true);
         ImGui::Text("Settlements");
-        if (ImGui::BeginTable("settlement_table", 9, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable)) {
+        if (ImGui::BeginTable("settlement_table", 11, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable)) {
             ImGui::TableSetupColumn("ID");
             ImGui::TableSetupColumn("Region");
             ImGui::TableSetupColumn("Status");
@@ -403,6 +428,8 @@ int main(int argc, char** argv) {
             ImGui::TableSetupColumn("Capacity");
             ImGui::TableSetupColumn("Pressure");
             ImGui::TableSetupColumn("FoodStored");
+            ImGui::TableSetupColumn("Workers");
+            ImGui::TableSetupColumn("Shortfall");
             ImGui::TableHeadersRow();
 
             for (const auto& settlement : settlement_summaries) {
@@ -428,6 +455,10 @@ int main(int argc, char** argv) {
                 ImGui::TextUnformatted(std::to_string(settlement.pressure_per_10k).c_str());
                 ImGui::TableSetColumnIndex(8);
                 ImGui::TextUnformatted(std::to_string(settlement.food_stored).c_str());
+                ImGui::TableSetColumnIndex(9);
+                ImGui::TextUnformatted(std::to_string(settlement.active_workers).c_str());
+                ImGui::TableSetColumnIndex(10);
+                ImGui::TextUnformatted(std::to_string(settlement.labour_shortfall).c_str());
             }
 
             ImGui::EndTable();
@@ -481,11 +512,37 @@ int main(int argc, char** argv) {
         ImGui::Text("Settlement Inspector");
         if (ui.selected_settlement.has_value()) {
             const auto* settlement = find_settlement(settlements, *ui.selected_settlement);
+            const SettlementSummaryView* settlement_view = nullptr;
+            for (const auto& candidate : settlement_summaries) {
+                if (candidate.id == *ui.selected_settlement) {
+                    settlement_view = &candidate;
+                    break;
+                }
+            }
             if (settlement != nullptr) {
                 ImGui::Text("ID: %llu", static_cast<unsigned long long>(settlement->id));
                 ImGui::Text("Region: %llu", static_cast<unsigned long long>(settlement->region_id));
                 ImGui::Text("Status: %s", settlement->active ? "active" : "extinct");
                 ImGui::Text("Access share: %u/10000", settlement->access_share_points);
+                if (settlement_view != nullptr) {
+                    ImGui::Text("Population: %llu", static_cast<unsigned long long>(settlement_view->alive_population));
+                    ImGui::Text("Workers: %llu eligible, %llu active, %llu unallocated",
+                        static_cast<unsigned long long>(settlement_view->eligible_workers),
+                        static_cast<unsigned long long>(settlement_view->active_workers),
+                        static_cast<unsigned long long>(settlement_view->unallocated_workers));
+                    ImGui::Text("Occupations: cultivators=%llu gatherers=%llu",
+                        static_cast<unsigned long long>(settlement_view->cultivators),
+                        static_cast<unsigned long long>(settlement_view->gatherers));
+                    ImGui::Text("Labour demand=%lld supplied=%lld shortfall=%lld",
+                        static_cast<long long>(settlement_view->labour_demand),
+                        static_cast<long long>(settlement_view->labour_allocated),
+                        static_cast<long long>(settlement_view->labour_shortfall));
+                    ImGui::Text("Cultivation labour %lld/%lld | Gathering labour %lld/%lld",
+                        static_cast<long long>(settlement_view->cultivation_labour_allocated),
+                        static_cast<long long>(settlement_view->cultivation_labour_available),
+                        static_cast<long long>(settlement_view->gathering_labour_allocated),
+                        static_cast<long long>(settlement_view->gathering_labour_available));
+                }
                 ImGui::Separator();
                 ImGui::TextUnformatted("Households");
                 for (const auto& household : households) {
@@ -536,6 +593,23 @@ int main(int argc, char** argv) {
                 ImGui::Text("Nutrition: %d", person->nutrition_points);
                 ImGui::Text("Health: %d", person->health_points);
                 ImGui::Text("Undernourished streak: %u", person->consecutive_undernourished_days);
+                const auto age = person_age_years(summary, *person);
+                const auto labour_capacity = universe::person_labour_capacity_units(
+                    person->alive,
+                    age,
+                    person->nutrition_points,
+                    person->health_points,
+                    universe::FoodModelParameters{},
+                    100U);
+                const bool occupation_eligible =
+                    person->alive &&
+                    age >= 18U &&
+                    person->nutrition_points >= 160 &&
+                    person->health_points >= 160 &&
+                    labour_capacity > 0;
+                ImGui::Text("Occupation: %s", occupation_label(person->occupation));
+                ImGui::Text("Current labour capacity: %lld", static_cast<long long>(labour_capacity));
+                ImGui::Text("Occupation eligible: %s", occupation_eligible ? "yes" : "no");
 
                 if (person->mother_id.has_value()) {
                     if (ImGui::SmallButton(("Go mother " + std::to_string(*person->mother_id)).c_str())) {

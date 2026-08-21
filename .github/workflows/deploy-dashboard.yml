@@ -1,12 +1,7 @@
 name: deploy-dashboard
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - dashboard/**
-      - .github/workflows/deploy-dashboard.yml
+  workflow_dispatch:
 
 permissions:
   contents: read

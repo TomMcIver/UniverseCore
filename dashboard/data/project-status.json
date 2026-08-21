@@ -1,9 +1,9 @@
 {
   "project": "UniverseCore",
   "as_of": "2026-08-21",
-  "current_phase": "Milestone 1E complete",
-  "current_task": "Milestone 1E deterministic settlements and local carrying capacity",
-  "next_task": "Milestone 1F: occupations and specialization",
+  "current_phase": "Milestone 1F complete",
+  "current_task": "Milestone 1F deterministic occupations and labour specialization",
+  "next_task": "Milestone 1 migration and demographic stability",
   "build": {
     "canonical_workflow": "podman scripts/container-test.sh",
     "last_verified": "2026-08-21",
@@ -11,8 +11,8 @@
     "notes": "Verified with canonical Podman workflow and clean UI-enabled Podman matrix (UNIVERSECORE_BUILD_UI=ON, fresh build directory)"
   },
   "progress": {
-    "simulation_foundation_percent": 97,
-    "bronze_age_simulator_percent": 29,
+    "simulation_foundation_percent": 98,
+    "bronze_age_simulator_percent": 31,
     "playable_vertical_slice_percent": 6,
     "full_game_vision_percent": 1,
     "note": "Percentages are approximate planning estimates, not objective measurements."
@@ -63,8 +63,8 @@
     {
       "id": "M1F",
       "name": "Occupations",
-      "status": "next",
-      "percent": 0
+      "status": "complete",
+      "percent": 100
     },
     {
       "id": "M2",
@@ -88,13 +88,14 @@
       "Milestone 1C deterministic land/environment resources",
       "Milestone 1D deterministic labour capacity and allocation",
       "Milestone 1E deterministic settlements and local carrying capacity",
-      "Snapshot schema v5 and validation",
+      "Milestone 1F deterministic occupations and labour specialization",
+      "Snapshot schema v6 and validation",
       "Canonical Podman build/test workflow",
       "Development dashboard + deployment workflow"
     ],
     "active": [],
     "planned": [
-      "Milestone 1F occupations and specialization"
+      "Milestone 1 migration and demographic stability"
     ]
   },
   "invariants": [

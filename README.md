@@ -27,11 +27,12 @@ The project deliberately starts without Unreal Engine. The initial objective is 
 - Deterministic regional environment resources (finite productive capacity + renewable wild stock)
 - Deterministic settlement layer between regions and households
 - Deterministic local carrying-capacity pressure and settlement-level resource access
+- Deterministic person occupations with settlement-driven labour specialization
 - Deterministic person-level nutrition/health affecting demographic outcomes
 - Optional SDL3 + Dear ImGui simulation inspector (`UNIVERSECORE_BUILD_UI=ON`)
 - UI command/query adapter over canonical simulation state
 - UI smoke test validating deterministic advance/save/load behavior
-- Snapshot schema v5 with deterministic settlement persistence/validation
+- Snapshot schema v6 with deterministic occupation + labour persistence/validation
 - Reproducibility tests
 - No engine dependency
 

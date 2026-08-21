@@ -207,6 +207,19 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
     payload.write_i64(simulation.state_.total_wild_food_stock);
     payload.write_i64(simulation.state_.total_wild_food_harvested);
     payload.write_i64(simulation.state_.total_wild_food_regenerated);
+    payload.write_u64(simulation.state_.eligible_workers);
+    payload.write_u64(simulation.state_.active_workers);
+    payload.write_u64(simulation.state_.unallocated_workers);
+    payload.write_u64(simulation.state_.cultivators);
+    payload.write_u64(simulation.state_.gatherers);
+    payload.write_i64(simulation.state_.total_labour_capacity);
+    payload.write_i64(simulation.state_.total_labour_demand);
+    payload.write_i64(simulation.state_.total_labour_allocated);
+    payload.write_i64(simulation.state_.cultivation_labour_available);
+    payload.write_i64(simulation.state_.cultivation_labour_allocated);
+    payload.write_i64(simulation.state_.gathering_labour_available);
+    payload.write_i64(simulation.state_.gathering_labour_allocated);
+    payload.write_i64(simulation.state_.labour_shortfall);
     payload.write_u64(simulation.next_person_id_);
     payload.write_u64(simulation.next_household_id_);
     payload.write_u64(simulation.next_region_id_);
@@ -253,6 +266,7 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
         payload.write_u32(static_cast<std::uint32_t>(person->nutrition_points));
         payload.write_u32(static_cast<std::uint32_t>(person->health_points));
         payload.write_u32(person->consecutive_undernourished_days);
+        payload.write_u8(static_cast<std::uint8_t>(person->occupation));
     }
 
     std::vector<const Household*> household_order;
@@ -442,6 +456,19 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         !payload_reader.read_i64(restored_state.total_wild_food_stock) ||
         !payload_reader.read_i64(restored_state.total_wild_food_harvested) ||
         !payload_reader.read_i64(restored_state.total_wild_food_regenerated) ||
+        !payload_reader.read_u64(restored_state.eligible_workers) ||
+        !payload_reader.read_u64(restored_state.active_workers) ||
+        !payload_reader.read_u64(restored_state.unallocated_workers) ||
+        !payload_reader.read_u64(restored_state.cultivators) ||
+        !payload_reader.read_u64(restored_state.gatherers) ||
+        !payload_reader.read_i64(restored_state.total_labour_capacity) ||
+        !payload_reader.read_i64(restored_state.total_labour_demand) ||
+        !payload_reader.read_i64(restored_state.total_labour_allocated) ||
+        !payload_reader.read_i64(restored_state.cultivation_labour_available) ||
+        !payload_reader.read_i64(restored_state.cultivation_labour_allocated) ||
+        !payload_reader.read_i64(restored_state.gathering_labour_available) ||
+        !payload_reader.read_i64(restored_state.gathering_labour_allocated) ||
+        !payload_reader.read_i64(restored_state.labour_shortfall) ||
         !payload_reader.read_u64(next_person_id) ||
         !payload_reader.read_u64(next_household_id) ||
         !payload_reader.read_u64(next_region_id) ||
@@ -468,7 +495,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         return load_error(SnapshotErrorCode::TruncatedData, "Snapshot people section is truncated");
     }
 
-    if (people_count > payload_reader.remaining() / 40U) {
+    if (people_count > payload_reader.remaining() / 41U) {
         return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot people section has invalid length");
     }
 
@@ -479,6 +506,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     for (std::uint64_t i = 0; i < people_count; ++i) {
         Person person{};
         std::uint8_t sex_raw = 0;
+        std::uint8_t occupation_raw = 0;
         bool has_mother = false;
         bool has_father = false;
         std::uint32_t nutrition_points = 0;
@@ -520,7 +548,8 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
 
         if (!payload_reader.read_u32(nutrition_points) ||
             !payload_reader.read_u32(health_points) ||
-            !payload_reader.read_u32(person.consecutive_undernourished_days)) {
+            !payload_reader.read_u32(person.consecutive_undernourished_days) ||
+            !payload_reader.read_u8(occupation_raw)) {
             return load_error(SnapshotErrorCode::TruncatedData, "Snapshot person health fields are truncated");
         }
 
@@ -530,6 +559,11 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
 
         person.nutrition_points = static_cast<std::int32_t>(nutrition_points);
         person.health_points = static_cast<std::int32_t>(health_points);
+
+        if (occupation_raw > static_cast<std::uint8_t>(Occupation::WildFoodGatherer)) {
+            return load_error(SnapshotErrorCode::InvalidEnum, "Snapshot person occupation enum is invalid");
+        }
+        person.occupation = static_cast<Occupation>(occupation_raw);
 
         if (!is_valid_person_id(person.id)) {
             return load_error(SnapshotErrorCode::InvalidState, "Snapshot person id must be non-zero");
@@ -840,10 +874,112 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         return load_error(SnapshotErrorCode::InvalidState, "Snapshot productive effort scale is out of range");
     }
 
+    if (restored_state.total_labour_capacity < 0 ||
+        restored_state.total_labour_demand < 0 ||
+        restored_state.total_labour_allocated < 0 ||
+        restored_state.cultivation_labour_available < 0 ||
+        restored_state.cultivation_labour_allocated < 0 ||
+        restored_state.gathering_labour_available < 0 ||
+        restored_state.gathering_labour_allocated < 0 ||
+        restored_state.labour_shortfall < 0) {
+        return load_error(SnapshotErrorCode::InvalidState, "Snapshot labour fields must be non-negative");
+    }
+
+    if (restored_state.active_workers != (restored_state.cultivators + restored_state.gatherers)) {
+        return load_error(SnapshotErrorCode::InvalidState, "Snapshot active worker count must equal occupation worker counts");
+    }
+
+    if (restored_state.eligible_workers != (restored_state.active_workers + restored_state.unallocated_workers)) {
+        return load_error(SnapshotErrorCode::InvalidState, "Snapshot eligible worker count must match active+unallocated");
+    }
+
+    if (restored_state.total_labour_allocated !=
+            (restored_state.cultivation_labour_allocated + restored_state.gathering_labour_allocated) ||
+        restored_state.total_labour_allocated > restored_state.total_labour_capacity ||
+        restored_state.cultivation_labour_allocated > restored_state.cultivation_labour_available ||
+        restored_state.gathering_labour_allocated > restored_state.gathering_labour_available) {
+        return load_error(SnapshotErrorCode::InvalidState, "Snapshot allocated labour fields are inconsistent");
+    }
+
+    if (restored_state.total_labour_demand < restored_state.total_labour_allocated) {
+        return load_error(SnapshotErrorCode::InvalidState, "Snapshot labour demand cannot be below allocated labour");
+    }
+
+    const auto expected_shortfall = restored_state.total_labour_demand - restored_state.total_labour_allocated;
+    if (restored_state.labour_shortfall != expected_shortfall) {
+        return load_error(SnapshotErrorCode::InvalidState, "Snapshot labour shortfall must equal demand minus allocated labour");
+    }
+
     std::unordered_map<PersonId, const Person*> person_by_id;
     person_by_id.reserve(restored_state.people.size());
     for (const auto& person : restored_state.people) {
         person_by_id.emplace(person.id, &person);
+    }
+
+    std::uint64_t recomputed_eligible_workers = 0;
+    std::uint64_t recomputed_active_workers = 0;
+    std::uint64_t recomputed_unallocated_workers = 0;
+    std::uint64_t recomputed_cultivators = 0;
+    std::uint64_t recomputed_gatherers = 0;
+    std::int64_t recomputed_total_capacity = 0;
+    std::int64_t recomputed_cultivation_available = 0;
+    std::int64_t recomputed_gathering_available = 0;
+
+    const auto capacity_parameters = FoodModelParameters{};
+    for (const auto& person : restored_state.people) {
+        const auto current_year = (restored_state.year > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+            ? std::numeric_limits<std::int64_t>::max()
+            : static_cast<std::int64_t>(restored_state.year);
+        const auto age = (current_year > person.birth_year)
+            ? static_cast<std::uint32_t>(current_year - person.birth_year)
+            : 0U;
+        const auto labour_capacity = person_labour_capacity_units(
+            person.alive,
+            age,
+            person.nutrition_points,
+            person.health_points,
+            capacity_parameters,
+            restored_config.productive_effort_scale_percent);
+
+        const bool hard_ineligible = !person.alive || age < 18U;
+        const bool eligible = !hard_ineligible &&
+            person.nutrition_points >= 160 &&
+            person.health_points >= 160 &&
+            labour_capacity > 0;
+
+        if (hard_ineligible && person.occupation != Occupation::None) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot dead/child person must not hold productive occupation");
+        }
+
+        if (!eligible) {
+            continue;
+        }
+
+        ++recomputed_eligible_workers;
+        recomputed_total_capacity += labour_capacity;
+
+        if (person.occupation == Occupation::SubsistenceCultivator) {
+            ++recomputed_active_workers;
+            ++recomputed_cultivators;
+            recomputed_cultivation_available += labour_capacity;
+        } else if (person.occupation == Occupation::WildFoodGatherer) {
+            ++recomputed_active_workers;
+            ++recomputed_gatherers;
+            recomputed_gathering_available += labour_capacity;
+        } else {
+            ++recomputed_unallocated_workers;
+        }
+    }
+
+    if (restored_state.eligible_workers != recomputed_eligible_workers ||
+        restored_state.active_workers != recomputed_active_workers ||
+        restored_state.unallocated_workers != recomputed_unallocated_workers ||
+        restored_state.cultivators != recomputed_cultivators ||
+        restored_state.gatherers != recomputed_gatherers ||
+        restored_state.total_labour_capacity != recomputed_total_capacity ||
+        restored_state.cultivation_labour_available != recomputed_cultivation_available ||
+        restored_state.gathering_labour_available != recomputed_gathering_available) {
+        return load_error(SnapshotErrorCode::InvalidState, "Snapshot occupation/labour aggregates are inconsistent");
     }
 
     std::unordered_map<HouseholdId, const Household*> household_by_id;

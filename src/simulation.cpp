@@ -12,6 +12,8 @@ namespace universe {
 
 namespace {
 constexpr std::uint32_t kAdultAgeYears = 18;
+constexpr std::int32_t kOccupationMinimumNutritionPoints = 160;
+constexpr std::int32_t kOccupationMinimumHealthPoints = 160;
 constexpr std::int64_t kMinRegionAreaUnits = 10;
 constexpr std::int64_t kMaxRegionAreaUnits = 10'000;
 constexpr std::uint32_t kSettlementShareScale = 10'000;
@@ -24,6 +26,55 @@ constexpr std::uint64_t kFoundingMinimumNewHouseholds = 2;
 constexpr std::uint64_t kFoundingMinimumRemainingHouseholds = 1;
 constexpr std::uint64_t kTargetHouseholdsPerSettlement = 8;
 constexpr std::uint64_t kMaxInitialSettlementsPerRegion = 6;
+
+struct LabourDemandProfile {
+    std::int64_t cultivation_labour_demand{};
+    std::int64_t gathering_labour_demand{};
+
+    [[nodiscard]] std::int64_t total() const noexcept {
+        return cultivation_labour_demand + gathering_labour_demand;
+    }
+};
+
+[[nodiscard]] std::int64_t compute_daily_food_output_target(
+    const std::int64_t daily_food_required,
+    const std::int64_t stored_food,
+    const std::int64_t output_opportunity) noexcept {
+    if (daily_food_required <= 0 || output_opportunity <= 0) {
+        return 0;
+    }
+
+    const auto buffer_days = stored_food / std::max<std::int64_t>(1, daily_food_required);
+    std::int64_t target = 0;
+    if (buffer_days >= 60) {
+        target = daily_food_required / 2;
+    } else if (buffer_days >= 30) {
+        target = daily_food_required;
+    } else if (buffer_days >= 7) {
+        target = daily_food_required + (daily_food_required / 4);
+    } else {
+        target = daily_food_required + (daily_food_required / 2);
+    }
+
+    return std::min(output_opportunity, std::max<std::int64_t>(target, 0));
+}
+
+[[nodiscard]] LabourDemandProfile split_demand_by_opportunity(
+    const std::int64_t target_output,
+    const std::int64_t cultivation_opportunity,
+    const std::int64_t gathering_opportunity) noexcept {
+    LabourDemandProfile demand{};
+    const auto cultivation = std::max<std::int64_t>(0, cultivation_opportunity);
+    const auto gathering = std::max<std::int64_t>(0, gathering_opportunity);
+    const auto total_opportunity = cultivation + gathering;
+    if (target_output <= 0 || total_opportunity <= 0) {
+        return demand;
+    }
+
+    demand.cultivation_labour_demand = (target_output * cultivation) / total_opportunity;
+    demand.gathering_labour_demand = target_output - demand.cultivation_labour_demand;
+    return demand;
+}
 
 std::uint32_t bounded_u32(const std::uint64_t value) {
     return static_cast<std::uint32_t>(std::min(value, static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max())));
@@ -95,9 +146,11 @@ Simulation::Simulation(SimulationConfig config)
     initialize_regions();
     assign_households_to_regions();
     initialize_settlements();
+    process_occupation_reassignment(0);
     refresh_population_count();
     refresh_food_aggregates();
     refresh_environment_aggregates();
+    refresh_labour_aggregates();
 }
 
 const WorldState& Simulation::state() const noexcept {
@@ -186,7 +239,10 @@ void Simulation::process_food_period(const std::uint64_t food_period) {
         std::vector<Person*> alive_members{};
         std::vector<std::int64_t> per_person_required{};
         std::int64_t required_food{};
-        std::int64_t productive_effort{};
+        std::int64_t cultivation_labour_available{};
+        std::int64_t gathering_labour_available{};
+        std::int64_t cultivation_labour_allocated{};
+        std::int64_t gathering_labour_allocated{};
         std::int64_t produced_food{};
     };
 
@@ -213,11 +269,29 @@ void Simulation::process_food_period(const std::uint64_t food_period) {
         household_state.per_person_required.reserve(household_state.alive_members.size());
         for (const auto* person : household_state.alive_members) {
             const auto person_required = food_requirement_for_person(*person);
-            const auto person_effort = productive_effort_for_person(*person);
-            if (!checked_add_i64(household_state.required_food, person_required, household_state.required_food) ||
-                !checked_add_i64(household_state.productive_effort, person_effort, household_state.productive_effort)) {
+            if (!checked_add_i64(household_state.required_food, person_required, household_state.required_food)) {
                 throw std::overflow_error("Food accounting overflow");
             }
+
+            if (occupation_eligible_for_productive_work(*person)) {
+                const auto person_capacity = productive_effort_for_person(*person);
+                if (person->occupation == Occupation::SubsistenceCultivator) {
+                    if (!checked_add_i64(
+                            household_state.cultivation_labour_available,
+                            person_capacity,
+                            household_state.cultivation_labour_available)) {
+                        throw std::overflow_error("Cultivation labour accounting overflow");
+                    }
+                } else if (person->occupation == Occupation::WildFoodGatherer) {
+                    if (!checked_add_i64(
+                            household_state.gathering_labour_available,
+                            person_capacity,
+                            household_state.gathering_labour_available)) {
+                        throw std::overflow_error("Gathering labour accounting overflow");
+                    }
+                }
+            }
+
             household_state.per_person_required.push_back(person_required);
         }
 
@@ -227,6 +301,48 @@ void Simulation::process_food_period(const std::uint64_t food_period) {
     std::sort(household_states.begin(), household_states.end(), [](const HouseholdDayState& lhs, const HouseholdDayState& rhs) {
         return lhs.household->id < rhs.household->id;
     });
+
+    state_.eligible_workers = 0;
+    state_.active_workers = 0;
+    state_.unallocated_workers = 0;
+    state_.cultivators = 0;
+    state_.gatherers = 0;
+    state_.total_labour_capacity = 0;
+    state_.total_labour_demand = 0;
+    state_.total_labour_allocated = 0;
+    state_.cultivation_labour_available = 0;
+    state_.cultivation_labour_allocated = 0;
+    state_.gathering_labour_available = 0;
+    state_.gathering_labour_allocated = 0;
+    state_.labour_shortfall = 0;
+
+    for (const auto& person : state_.people) {
+        if (!occupation_eligible_for_productive_work(person)) {
+            continue;
+        }
+
+        const auto capacity = productive_effort_for_person(person);
+        ++state_.eligible_workers;
+        if (!checked_add_i64(state_.total_labour_capacity, capacity, state_.total_labour_capacity)) {
+            throw std::overflow_error("Total labour capacity overflow");
+        }
+
+        if (person.occupation == Occupation::SubsistenceCultivator) {
+            ++state_.active_workers;
+            ++state_.cultivators;
+            if (!checked_add_i64(state_.cultivation_labour_available, capacity, state_.cultivation_labour_available)) {
+                throw std::overflow_error("Cultivation available labour overflow");
+            }
+        } else if (person.occupation == Occupation::WildFoodGatherer) {
+            ++state_.active_workers;
+            ++state_.gatherers;
+            if (!checked_add_i64(state_.gathering_labour_available, capacity, state_.gathering_labour_available)) {
+                throw std::overflow_error("Gathering available labour overflow");
+            }
+        } else {
+            ++state_.unallocated_workers;
+        }
+    }
 
     for (auto& region : state_.regions) {
         std::vector<SettlementId> active_settlement_ids;
@@ -258,18 +374,31 @@ void Simulation::process_food_period(const std::uint64_t food_period) {
             }
 
             std::vector<HouseholdDayState*> settlement_households;
-            std::int64_t settlement_effort = 0;
+            std::int64_t settlement_required_food = 0;
+            std::int64_t settlement_stored_food = 0;
+            std::int64_t settlement_cultivation_available = 0;
+            std::int64_t settlement_gathering_available = 0;
             for (auto& household_state : household_states) {
                 if (household_state.household->region_id != region.id || household_state.household->settlement_id != settlement_id) {
                     continue;
                 }
                 settlement_households.push_back(&household_state);
-                if (!checked_add_i64(settlement_effort, household_state.productive_effort, settlement_effort)) {
-                    throw std::overflow_error("Settlement effort overflow");
+
+                if (!checked_add_i64(settlement_required_food, household_state.required_food, settlement_required_food) ||
+                    !checked_add_i64(settlement_stored_food, household_state.household->resources.food_inventory.value, settlement_stored_food) ||
+                    !checked_add_i64(
+                        settlement_cultivation_available,
+                        household_state.cultivation_labour_available,
+                        settlement_cultivation_available) ||
+                    !checked_add_i64(
+                        settlement_gathering_available,
+                        household_state.gathering_labour_available,
+                        settlement_gathering_available)) {
+                    throw std::overflow_error("Settlement labour/demand aggregation overflow");
                 }
             }
 
-            if (settlement_households.empty() || settlement_effort <= 0) {
+            if (settlement_households.empty()) {
                 continue;
             }
 
@@ -280,24 +409,126 @@ void Simulation::process_food_period(const std::uint64_t food_period) {
                 (wild_harvest_available * static_cast<std::int64_t>(settlement->access_share_points)) /
                 static_cast<std::int64_t>(kSettlementShareScale);
 
-            std::int64_t distributed_productive = 0;
+            const auto output_target = compute_daily_food_output_target(
+                settlement_required_food,
+                settlement_stored_food,
+                settlement_productive_budget + settlement_wild_budget);
+            const auto labour_demand = split_demand_by_opportunity(
+                output_target,
+                settlement_productive_budget,
+                settlement_wild_budget);
+
+            if (!checked_add_i64(state_.total_labour_demand, labour_demand.total(), state_.total_labour_demand)) {
+                throw std::overflow_error("Total labour demand overflow");
+            }
+
+            const auto settlement_cultivation_allocated =
+                std::min(settlement_cultivation_available, std::max<std::int64_t>(0, labour_demand.cultivation_labour_demand));
+            const auto settlement_gathering_allocated =
+                std::min(settlement_gathering_available, std::max<std::int64_t>(0, labour_demand.gathering_labour_demand));
+
+            if (!checked_add_i64(
+                    state_.cultivation_labour_allocated,
+                    settlement_cultivation_allocated,
+                    state_.cultivation_labour_allocated) ||
+                !checked_add_i64(
+                    state_.gathering_labour_allocated,
+                    settlement_gathering_allocated,
+                    state_.gathering_labour_allocated)) {
+                throw std::overflow_error("Allocated labour aggregate overflow");
+            }
+
+            std::int64_t distributed_cultivation_allocation = 0;
             for (auto* household_state : settlement_households) {
-                if (household_state->productive_effort <= 0) {
+                if (settlement_cultivation_allocated <= 0 || settlement_cultivation_available <= 0 ||
+                    household_state->cultivation_labour_available <= 0) {
                     continue;
                 }
-                const auto produced = (settlement_productive_budget * household_state->productive_effort) / settlement_effort;
+                household_state->cultivation_labour_allocated =
+                    (settlement_cultivation_allocated * household_state->cultivation_labour_available) /
+                    settlement_cultivation_available;
+                if (!checked_add_i64(
+                        distributed_cultivation_allocation,
+                        household_state->cultivation_labour_allocated,
+                        distributed_cultivation_allocation)) {
+                    throw std::overflow_error("Cultivation allocation distribution overflow");
+                }
+            }
+
+            auto cultivation_remainder = settlement_cultivation_allocated - distributed_cultivation_allocation;
+            for (auto* household_state : settlement_households) {
+                if (cultivation_remainder <= 0) {
+                    break;
+                }
+                if (household_state->cultivation_labour_available <= 0) {
+                    continue;
+                }
+                ++household_state->cultivation_labour_allocated;
+                --cultivation_remainder;
+            }
+
+            std::int64_t distributed_gathering_allocation = 0;
+            for (auto* household_state : settlement_households) {
+                if (settlement_gathering_allocated <= 0 || settlement_gathering_available <= 0 ||
+                    household_state->gathering_labour_available <= 0) {
+                    continue;
+                }
+                household_state->gathering_labour_allocated =
+                    (settlement_gathering_allocated * household_state->gathering_labour_available) /
+                    settlement_gathering_available;
+                if (!checked_add_i64(
+                        distributed_gathering_allocation,
+                        household_state->gathering_labour_allocated,
+                        distributed_gathering_allocation)) {
+                    throw std::overflow_error("Gathering allocation distribution overflow");
+                }
+            }
+
+            auto gathering_remainder = settlement_gathering_allocated - distributed_gathering_allocation;
+            for (auto* household_state : settlement_households) {
+                if (gathering_remainder <= 0) {
+                    break;
+                }
+                if (household_state->gathering_labour_available <= 0) {
+                    continue;
+                }
+                ++household_state->gathering_labour_allocated;
+                --gathering_remainder;
+            }
+
+            std::int64_t settlement_cultivation_output = 0;
+            std::int64_t settlement_gathering_output = 0;
+            if (!checked_add_i64(
+                    settlement_cultivation_output,
+                    std::min(settlement_productive_budget, settlement_cultivation_allocated),
+                    settlement_cultivation_output) ||
+                !checked_add_i64(
+                    settlement_gathering_output,
+                    std::min(settlement_wild_budget, settlement_gathering_allocated),
+                    settlement_gathering_output)) {
+                throw std::overflow_error("Specialized output overflow");
+            }
+
+            std::int64_t distributed_productive = 0;
+            for (auto* household_state : settlement_households) {
+                if (settlement_cultivation_allocated <= 0 || household_state->cultivation_labour_allocated <= 0) {
+                    continue;
+                }
+                const auto produced =
+                    (settlement_cultivation_output * household_state->cultivation_labour_allocated) /
+                    settlement_cultivation_allocated;
                 household_state->produced_food += produced;
                 if (!checked_add_i64(distributed_productive, produced, distributed_productive)) {
                     throw std::overflow_error("Settlement productive distribution overflow");
                 }
             }
 
-            auto productive_remainder = settlement_productive_budget - distributed_productive;
+            auto productive_remainder = settlement_cultivation_output - distributed_productive;
             for (auto* household_state : settlement_households) {
                 if (productive_remainder <= 0) {
                     break;
                 }
-                if (household_state->productive_effort <= 0) {
+                if (household_state->cultivation_labour_allocated <= 0) {
                     continue;
                 }
                 ++household_state->produced_food;
@@ -306,22 +537,24 @@ void Simulation::process_food_period(const std::uint64_t food_period) {
 
             std::int64_t settlement_distributed_wild = 0;
             for (auto* household_state : settlement_households) {
-                if (household_state->productive_effort <= 0) {
+                if (settlement_gathering_allocated <= 0 || household_state->gathering_labour_allocated <= 0) {
                     continue;
                 }
-                const auto wild_for_household = (settlement_wild_budget * household_state->productive_effort) / settlement_effort;
+                const auto wild_for_household =
+                    (settlement_gathering_output * household_state->gathering_labour_allocated) /
+                    settlement_gathering_allocated;
                 household_state->produced_food += wild_for_household;
                 if (!checked_add_i64(settlement_distributed_wild, wild_for_household, settlement_distributed_wild)) {
                     throw std::overflow_error("Settlement wild distribution overflow");
                 }
             }
 
-            auto wild_remainder = settlement_wild_budget - settlement_distributed_wild;
+            auto wild_remainder = settlement_gathering_output - settlement_distributed_wild;
             for (auto* household_state : settlement_households) {
                 if (wild_remainder <= 0) {
                     break;
                 }
-                if (household_state->productive_effort <= 0) {
+                if (household_state->gathering_labour_allocated <= 0) {
                     continue;
                 }
                 ++household_state->produced_food;
@@ -348,6 +581,14 @@ void Simulation::process_food_period(const std::uint64_t food_period) {
             }
         }
     }
+
+    if (!checked_add_i64(
+            state_.cultivation_labour_allocated,
+            state_.gathering_labour_allocated,
+            state_.total_labour_allocated)) {
+        throw std::overflow_error("Total allocated labour overflow");
+    }
+    state_.labour_shortfall = std::max<std::int64_t>(0, state_.total_labour_demand - state_.total_labour_allocated);
 
     for (auto& household_state : household_states) {
         auto& household = *household_state.household;
@@ -422,8 +663,10 @@ void Simulation::process_demography_period(const std::uint64_t demographic_year)
     process_mortality(demographic_year);
     process_births(demographic_year);
     process_settlement_restructuring(demographic_year);
+    process_occupation_reassignment(demographic_year);
     refresh_population_count();
     refresh_food_aggregates();
+    refresh_labour_aggregates();
 }
 
 PersonId Simulation::next_person_id() noexcept {
@@ -598,6 +841,19 @@ std::int64_t Simulation::productive_effort_for_person(const Person& person) cons
         person.health_points,
         food_parameters_,
         config_.productive_effort_scale_percent);
+}
+
+bool Simulation::occupation_eligible_for_productive_work(const Person& person) const noexcept {
+    if (!person.alive) {
+        return false;
+    }
+    if (age_years(person) < kAdultAgeYears) {
+        return false;
+    }
+    if (person.nutrition_points < kOccupationMinimumNutritionPoints || person.health_points < kOccupationMinimumHealthPoints) {
+        return false;
+    }
+    return productive_effort_for_person(person) > 0;
 }
 
 std::uint32_t Simulation::effective_fertility_rate_per_10k(const Person& person) const noexcept {
@@ -1300,6 +1556,295 @@ void Simulation::process_settlement_restructuring(const std::uint64_t demographi
     process_settlement_extinction();
     process_settlement_founding(demographic_year);
     process_settlement_extinction();
+}
+
+void Simulation::clear_occupations_for_extinct_or_invalid_households() {
+    std::unordered_map<HouseholdId, SettlementId> household_settlement;
+    household_settlement.reserve(state_.households.size());
+    for (const auto& household : state_.households) {
+        household_settlement.emplace(household.id, household.settlement_id);
+    }
+
+    std::unordered_map<SettlementId, bool> settlement_active;
+    settlement_active.reserve(state_.settlements.size());
+    for (const auto& settlement : state_.settlements) {
+        settlement_active.emplace(settlement.id, settlement.active);
+    }
+
+    for (auto& person : state_.people) {
+        if (!occupation_eligible_for_productive_work(person)) {
+            person.occupation = Occupation::None;
+            continue;
+        }
+
+        const auto household_it = household_settlement.find(person.household_id);
+        if (household_it == household_settlement.end()) {
+            person.occupation = Occupation::None;
+            continue;
+        }
+
+        const auto settlement_it = settlement_active.find(household_it->second);
+        if (settlement_it == settlement_active.end() || !settlement_it->second) {
+            person.occupation = Occupation::None;
+        }
+    }
+}
+
+void Simulation::process_occupation_reassignment(const std::uint64_t demographic_year) {
+    (void)demographic_year;
+    clear_occupations_for_extinct_or_invalid_households();
+
+    std::unordered_map<PersonId, Person*> person_by_id;
+    person_by_id.reserve(state_.people.size());
+    for (auto& person : state_.people) {
+        person_by_id.emplace(person.id, &person);
+    }
+
+    std::vector<SettlementId> settlement_ids;
+    settlement_ids.reserve(state_.settlements.size());
+    for (const auto& settlement : state_.settlements) {
+        if (settlement.active) {
+            settlement_ids.push_back(settlement.id);
+        }
+    }
+    std::sort(settlement_ids.begin(), settlement_ids.end());
+
+    for (const auto settlement_id : settlement_ids) {
+        const auto* settlement = find_settlement(settlement_id);
+        if (settlement == nullptr || !settlement->active) {
+            continue;
+        }
+
+        const auto* region = find_region(settlement->region_id);
+        if (region == nullptr) {
+            continue;
+        }
+
+        std::int64_t settlement_required_food = 0;
+        std::int64_t settlement_stored_food = 0;
+
+        struct Candidate {
+            Person* person{};
+            std::int64_t labour_capacity{};
+            bool assigned{false};
+        };
+
+        std::vector<Candidate> candidates;
+        candidates.reserve(128);
+
+        for (const auto& household : state_.households) {
+            if (household.settlement_id != settlement_id) {
+                continue;
+            }
+
+            if (!checked_add_i64(
+                    settlement_stored_food,
+                    household.resources.food_inventory.value,
+                    settlement_stored_food)) {
+                throw std::overflow_error("Settlement stored food aggregation overflow");
+            }
+
+            for (const auto member_id : household.member_ids) {
+                const auto person_it = person_by_id.find(member_id);
+                if (person_it == person_by_id.end()) {
+                    continue;
+                }
+                Person* person = person_it->second;
+                if (!person->alive) {
+                    continue;
+                }
+
+                const auto required = food_requirement_for_person(*person);
+                if (!checked_add_i64(settlement_required_food, required, settlement_required_food)) {
+                    throw std::overflow_error("Settlement required food aggregation overflow");
+                }
+
+                if (!occupation_eligible_for_productive_work(*person)) {
+                    person->occupation = Occupation::None;
+                    continue;
+                }
+
+                candidates.push_back(Candidate{
+                    .person = person,
+                    .labour_capacity = productive_effort_for_person(*person),
+                    .assigned = false,
+                });
+            }
+        }
+
+        std::sort(candidates.begin(), candidates.end(), [](const Candidate& lhs, const Candidate& rhs) {
+            return lhs.person->id < rhs.person->id;
+        });
+
+        const auto cultivation_opportunity =
+            (region->productive_capacity_per_day * static_cast<std::int64_t>(settlement->access_share_points)) /
+            static_cast<std::int64_t>(kSettlementShareScale);
+        const auto gathering_opportunity =
+            (std::min(region->wild_food_stock, region->wild_food_harvest_limit_per_day) *
+             static_cast<std::int64_t>(settlement->access_share_points)) /
+            static_cast<std::int64_t>(kSettlementShareScale);
+
+        const auto output_target = compute_daily_food_output_target(
+            settlement_required_food,
+            settlement_stored_food,
+            cultivation_opportunity + gathering_opportunity);
+        const auto demand = split_demand_by_opportunity(output_target, cultivation_opportunity, gathering_opportunity);
+
+        std::int64_t cultivation_remaining = std::max<std::int64_t>(0, demand.cultivation_labour_demand);
+        std::int64_t gathering_remaining = std::max<std::int64_t>(0, demand.gathering_labour_demand);
+
+        for (auto& candidate : candidates) {
+            if (candidate.person->occupation != Occupation::SubsistenceCultivator || cultivation_remaining <= 0) {
+                continue;
+            }
+            candidate.assigned = true;
+            cultivation_remaining = std::max<std::int64_t>(0, cultivation_remaining - candidate.labour_capacity);
+        }
+
+        for (auto& candidate : candidates) {
+            if (candidate.assigned || candidate.person->occupation != Occupation::WildFoodGatherer || gathering_remaining <= 0) {
+                continue;
+            }
+            candidate.assigned = true;
+            gathering_remaining = std::max<std::int64_t>(0, gathering_remaining - candidate.labour_capacity);
+        }
+
+        for (auto& candidate : candidates) {
+            if (candidate.assigned) {
+                continue;
+            }
+
+            if (cultivation_remaining <= 0 && gathering_remaining <= 0) {
+                break;
+            }
+
+            if (cultivation_remaining >= gathering_remaining && cultivation_remaining > 0) {
+                candidate.person->occupation = Occupation::SubsistenceCultivator;
+                candidate.assigned = true;
+                cultivation_remaining = std::max<std::int64_t>(0, cultivation_remaining - candidate.labour_capacity);
+            } else if (gathering_remaining > 0) {
+                candidate.person->occupation = Occupation::WildFoodGatherer;
+                candidate.assigned = true;
+                gathering_remaining = std::max<std::int64_t>(0, gathering_remaining - candidate.labour_capacity);
+            }
+        }
+
+        for (auto& candidate : candidates) {
+            if (!candidate.assigned) {
+                candidate.person->occupation = Occupation::None;
+            }
+        }
+    }
+
+    refresh_labour_aggregates();
+}
+
+void Simulation::refresh_labour_aggregates() {
+    state_.eligible_workers = 0;
+    state_.active_workers = 0;
+    state_.unallocated_workers = 0;
+    state_.cultivators = 0;
+    state_.gatherers = 0;
+    state_.total_labour_capacity = 0;
+    state_.total_labour_demand = 0;
+    state_.total_labour_allocated = 0;
+    state_.cultivation_labour_available = 0;
+    state_.cultivation_labour_allocated = 0;
+    state_.gathering_labour_available = 0;
+    state_.gathering_labour_allocated = 0;
+    state_.labour_shortfall = 0;
+
+    std::unordered_map<PersonId, const Person*> person_by_id;
+    person_by_id.reserve(state_.people.size());
+    for (const auto& person : state_.people) {
+        person_by_id.emplace(person.id, &person);
+        if (!occupation_eligible_for_productive_work(person)) {
+            continue;
+        }
+
+        const auto capacity = productive_effort_for_person(person);
+        ++state_.eligible_workers;
+        state_.total_labour_capacity += capacity;
+
+        if (person.occupation == Occupation::SubsistenceCultivator) {
+            ++state_.active_workers;
+            ++state_.cultivators;
+            state_.cultivation_labour_available += capacity;
+        } else if (person.occupation == Occupation::WildFoodGatherer) {
+            ++state_.active_workers;
+            ++state_.gatherers;
+            state_.gathering_labour_available += capacity;
+        } else {
+            ++state_.unallocated_workers;
+        }
+    }
+
+    for (const auto& settlement : state_.settlements) {
+        if (!settlement.active) {
+            continue;
+        }
+
+        const auto* region = find_region(settlement.region_id);
+        if (region == nullptr) {
+            continue;
+        }
+
+        std::int64_t required_food = 0;
+        std::int64_t stored_food = 0;
+        std::int64_t cultivation_available = 0;
+        std::int64_t gathering_available = 0;
+
+        for (const auto& household : state_.households) {
+            if (household.settlement_id != settlement.id) {
+                continue;
+            }
+
+            stored_food += household.resources.food_inventory.value;
+            for (const auto member_id : household.member_ids) {
+                const auto person_it = person_by_id.find(member_id);
+                if (person_it == person_by_id.end() || !person_it->second->alive) {
+                    continue;
+                }
+
+                const auto* person = person_it->second;
+                required_food += food_requirement_for_person(*person);
+                if (!occupation_eligible_for_productive_work(*person)) {
+                    continue;
+                }
+
+                const auto capacity = productive_effort_for_person(*person);
+                if (person->occupation == Occupation::SubsistenceCultivator) {
+                    cultivation_available += capacity;
+                } else if (person->occupation == Occupation::WildFoodGatherer) {
+                    gathering_available += capacity;
+                }
+            }
+        }
+
+        const auto cultivation_opportunity =
+            (region->productive_capacity_per_day * static_cast<std::int64_t>(settlement.access_share_points)) /
+            static_cast<std::int64_t>(kSettlementShareScale);
+        const auto gathering_opportunity =
+            (std::min(region->wild_food_stock, region->wild_food_harvest_limit_per_day) *
+             static_cast<std::int64_t>(settlement.access_share_points)) /
+            static_cast<std::int64_t>(kSettlementShareScale);
+
+        const auto output_target = compute_daily_food_output_target(
+            required_food,
+            stored_food,
+            cultivation_opportunity + gathering_opportunity);
+        const auto demand = split_demand_by_opportunity(output_target, cultivation_opportunity, gathering_opportunity);
+
+        state_.total_labour_demand += demand.total();
+
+        const auto cultivation_allocated = std::min(cultivation_available, std::max<std::int64_t>(0, demand.cultivation_labour_demand));
+        const auto gathering_allocated = std::min(gathering_available, std::max<std::int64_t>(0, demand.gathering_labour_demand));
+        state_.cultivation_labour_allocated += cultivation_allocated;
+        state_.gathering_labour_allocated += gathering_allocated;
+    }
+
+    state_.total_labour_allocated = state_.cultivation_labour_allocated + state_.gathering_labour_allocated;
+    state_.labour_shortfall = std::max<std::int64_t>(0, state_.total_labour_demand - state_.total_labour_allocated);
 }
 
 void Simulation::process_mortality(const std::uint64_t demographic_year) {
