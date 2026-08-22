@@ -108,7 +108,7 @@ std::uint32_t food_stress_mortality_penalty_per_10k(const std::int64_t nutrition
         return penalty;
     }
 
-    const auto adjusted = static_cast<std::uint64_t>(penalty) * 3U / 2U;
+    const auto adjusted = static_cast<std::uint64_t>(penalty) * 5U / 4U;
     return static_cast<std::uint32_t>(std::min<std::uint64_t>(adjusted, 10'000U));
 }
 
@@ -135,20 +135,20 @@ std::uint32_t nutrition_health_mortality_penalty_per_10k(
     std::uint32_t penalty = 0;
 
     if (nutrition_points < 80 || health_points < 120) {
-        penalty = 6'500;
+        penalty = 5'000;
     } else if (nutrition_points < 180 || health_points < 220) {
-        penalty = 3'000;
+        penalty = 2'200;
     } else if (nutrition_points < 320 || health_points < 350) {
-        penalty = 1'200;
+        penalty = 900;
     } else if (nutrition_points < 500 || health_points < 500) {
-        penalty = 350;
+        penalty = 250;
     }
 
     if (!is_child) {
         return penalty;
     }
 
-    const auto adjusted = static_cast<std::uint64_t>(penalty) * 3U / 2U;
+    const auto adjusted = static_cast<std::uint64_t>(penalty) * 5U / 4U;
     return static_cast<std::uint32_t>(std::min<std::uint64_t>(adjusted, 10'000U));
 }
 

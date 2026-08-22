@@ -102,7 +102,7 @@ struct SimulationConfig {
     std::uint32_t food_production_scale_percent{100};
     bool food_system_enabled{true};
     std::uint64_t initial_region_count{4};
-    std::int64_t base_region_area_units{100};
+    std::int64_t base_region_area_units{120};
     std::uint32_t productive_effort_scale_percent{100};
 };
 

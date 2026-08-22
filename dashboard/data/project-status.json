@@ -1,14 +1,14 @@
 {
   "project": "UniverseCore",
-  "as_of": "2026-08-21",
+  "as_of": "2026-08-22",
   "current_phase": "Milestone 1 robustness",
-  "current_task": "Characterize long-horizon population viability",
+  "current_task": "Milestone 1 demographic equilibrium calibration",
   "next_task": "Milestone 1 migration and demographic stability",
   "build": {
     "canonical_workflow": "podman scripts/container-test.sh",
-    "last_verified": "2026-08-21",
+    "last_verified": "2026-08-22",
     "status": "passing",
-    "notes": "Verified with canonical Podman workflow and clean UI-enabled Podman matrix (UNIVERSECORE_BUILD_UI=ON, fresh build directory)"
+    "notes": "Verified in universecore-dev container with configure/build/ctest and deterministic snapshot/UI continuation checks"
   },
   "progress": {
     "simulation_foundation_percent": 99,
@@ -94,7 +94,7 @@
       "Development dashboard + deployment workflow"
     ],
     "active": [
-      "Milestone 1 stabilization and calibration pass"
+      "Milestone 1 migration and demographic stability"
     ],
     "planned": [
       "Milestone 1 migration and demographic stability"

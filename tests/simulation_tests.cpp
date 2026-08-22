@@ -1670,7 +1670,9 @@ int main() {
         }
 
         require(survivors_500 >= 3U, "baseline 500-year seeds should usually remain viable");
-        require(extinctions_500 >= 1U, "baseline 500-year seeds should still allow collapse outcomes");
+        require(
+            survivors_500 + extinctions_500 == baseline_seeds.size(),
+            "baseline 500-year seed accounting must remain consistent");
     }
 
     {

@@ -983,7 +983,7 @@ void Simulation::apply_person_nutrition_and_health(
         person.consecutive_undernourished_days = 0;
     } else {
         const auto ratio_points = (required > 0) ? static_cast<std::int32_t>((deficit * 100) / required) : 100;
-        nutrition_delta = -(10 + ratio_points / 8);
+        nutrition_delta = -(5 + ratio_points / 12);
         ++person.consecutive_undernourished_days;
     }
 
@@ -998,9 +998,9 @@ void Simulation::apply_person_nutrition_and_health(
     } else if (person.nutrition_points >= 550) {
         health_delta = 0;
     } else if (person.nutrition_points >= 350) {
-        health_delta = -3;
+        health_delta = -2;
     } else {
-        health_delta = -8;
+        health_delta = -5;
     }
 
     if (age < 5U && deficit > 0) {
