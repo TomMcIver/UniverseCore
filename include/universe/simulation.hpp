@@ -61,10 +61,13 @@ struct Settlement {
     bool active{true};
     std::uint32_t access_share_points{};
     SettlementMaterialInventory materials{};
+    std::int64_t tool_wear_work_units{};
+    std::uint32_t last_tool_coverage_per_10k{};
     std::int64_t cumulative_wood_extracted{};
     std::int64_t cumulative_stone_extracted{};
     std::int64_t cumulative_timber_produced{};
     std::int64_t cumulative_basic_tool_produced{};
+    std::int64_t cumulative_basic_tool_broken{};
 };
 
 enum class EnvironmentClass : std::uint8_t {
@@ -174,6 +177,8 @@ struct WorldState {
     std::int64_t total_basic_tool_inventory{};
     std::int64_t total_timber_produced{};
     std::int64_t total_basic_tool_produced{};
+    std::int64_t total_basic_tool_broken{};
+    std::uint32_t average_tool_coverage_per_10k{};
     std::int64_t wood_labour_available{};
     std::int64_t wood_labour_allocated{};
     std::int64_t stone_labour_available{};

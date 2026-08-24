@@ -18,6 +18,7 @@ namespace {
 
 constexpr std::uint32_t kSnapshotMagic = 0x524F4355U;  // "UCOR" little-endian
 constexpr std::size_t kHeaderSize = 4U + 2U + 2U + 8U + 8U;
+constexpr std::int64_t kToolWearWorkUnitsPerBreak = 24;
 
 [[nodiscard]] std::uint64_t fnv1a64(std::span<const std::byte> data) noexcept {
     std::uint64_t hash = 14695981039346656037ULL;
@@ -236,6 +237,8 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
     payload.write_i64(simulation.state_.total_basic_tool_inventory);
     payload.write_i64(simulation.state_.total_timber_produced);
     payload.write_i64(simulation.state_.total_basic_tool_produced);
+    payload.write_i64(simulation.state_.total_basic_tool_broken);
+    payload.write_u32(simulation.state_.average_tool_coverage_per_10k);
     payload.write_i64(simulation.state_.wood_labour_available);
     payload.write_i64(simulation.state_.wood_labour_allocated);
     payload.write_i64(simulation.state_.stone_labour_available);
@@ -419,10 +422,13 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
         payload.write_i64(settlement->materials.stone.value);
         payload.write_i64(settlement->materials.timber.value);
         payload.write_i64(settlement->materials.basic_tool.value);
+        payload.write_i64(settlement->tool_wear_work_units);
+        payload.write_u32(settlement->last_tool_coverage_per_10k);
         payload.write_i64(settlement->cumulative_wood_extracted);
         payload.write_i64(settlement->cumulative_stone_extracted);
         payload.write_i64(settlement->cumulative_timber_produced);
         payload.write_i64(settlement->cumulative_basic_tool_produced);
+        payload.write_i64(settlement->cumulative_basic_tool_broken);
     }
 
     auto payload_bytes = payload.take();
@@ -543,6 +549,8 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         !payload_reader.read_i64(restored_state.total_basic_tool_inventory) ||
         !payload_reader.read_i64(restored_state.total_timber_produced) ||
         !payload_reader.read_i64(restored_state.total_basic_tool_produced) ||
+        !payload_reader.read_i64(restored_state.total_basic_tool_broken) ||
+        !payload_reader.read_u32(restored_state.average_tool_coverage_per_10k) ||
         !payload_reader.read_i64(restored_state.wood_labour_available) ||
         !payload_reader.read_i64(restored_state.wood_labour_allocated) ||
         !payload_reader.read_i64(restored_state.stone_labour_available) ||
@@ -996,20 +1004,26 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         std::int64_t stone = 0;
         std::int64_t timber = 0;
         std::int64_t basic_tool = 0;
+        std::int64_t tool_wear_work_units = 0;
+        std::uint32_t last_tool_coverage_per_10k = 0;
         std::int64_t cumulative_wood_extracted = 0;
         std::int64_t cumulative_stone_extracted = 0;
         std::int64_t cumulative_timber_produced = 0;
         std::int64_t cumulative_basic_tool_produced = 0;
+        std::int64_t cumulative_basic_tool_broken = 0;
 
         if (!payload_reader.read_u64(settlement_id) ||
             !payload_reader.read_i64(wood) ||
             !payload_reader.read_i64(stone) ||
             !payload_reader.read_i64(timber) ||
             !payload_reader.read_i64(basic_tool) ||
+            !payload_reader.read_i64(tool_wear_work_units) ||
+            !payload_reader.read_u32(last_tool_coverage_per_10k) ||
             !payload_reader.read_i64(cumulative_wood_extracted) ||
             !payload_reader.read_i64(cumulative_stone_extracted) ||
             !payload_reader.read_i64(cumulative_timber_produced) ||
-            !payload_reader.read_i64(cumulative_basic_tool_produced)) {
+            !payload_reader.read_i64(cumulative_basic_tool_produced) ||
+            !payload_reader.read_i64(cumulative_basic_tool_broken)) {
             return load_error(SnapshotErrorCode::TruncatedData, "Snapshot settlement material record is truncated");
         }
 
@@ -1023,9 +1037,18 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         }
 
         if (wood < 0 || stone < 0 || timber < 0 || basic_tool < 0 ||
+            tool_wear_work_units < 0 ||
+            last_tool_coverage_per_10k > 10'000U ||
             cumulative_wood_extracted < 0 || cumulative_stone_extracted < 0 ||
-            cumulative_timber_produced < 0 || cumulative_basic_tool_produced < 0) {
+            cumulative_timber_produced < 0 || cumulative_basic_tool_produced < 0 ||
+            cumulative_basic_tool_broken < 0) {
             return load_error(SnapshotErrorCode::InvalidState, "Snapshot settlement material values must be non-negative");
+        }
+        if (tool_wear_work_units >= kToolWearWorkUnitsPerBreak) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot tool wear remainder is out of canonical range");
+        }
+        if (cumulative_basic_tool_broken > cumulative_basic_tool_produced) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot broken tools cannot exceed cumulative production");
         }
 
         auto* settlement = settlement_it->second;
@@ -1033,10 +1056,13 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         settlement->materials.stone.value = stone;
         settlement->materials.timber.value = timber;
         settlement->materials.basic_tool.value = basic_tool;
+        settlement->tool_wear_work_units = tool_wear_work_units;
+        settlement->last_tool_coverage_per_10k = last_tool_coverage_per_10k;
         settlement->cumulative_wood_extracted = cumulative_wood_extracted;
         settlement->cumulative_stone_extracted = cumulative_stone_extracted;
         settlement->cumulative_timber_produced = cumulative_timber_produced;
         settlement->cumulative_basic_tool_produced = cumulative_basic_tool_produced;
+        settlement->cumulative_basic_tool_broken = cumulative_basic_tool_broken;
     }
 
     if (!payload_reader.fully_consumed()) {
@@ -1129,7 +1155,9 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         restored_state.total_timber_inventory < 0 ||
         restored_state.total_basic_tool_inventory < 0 ||
         restored_state.total_timber_produced < 0 ||
-        restored_state.total_basic_tool_produced < 0) {
+        restored_state.total_basic_tool_produced < 0 ||
+        restored_state.total_basic_tool_broken < 0 ||
+        restored_state.average_tool_coverage_per_10k > 10'000U) {
         return load_error(SnapshotErrorCode::InvalidState, "Snapshot labour fields must be non-negative");
     }
 
@@ -1516,6 +1544,9 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     std::int64_t total_basic_tool_inventory = 0;
     std::int64_t total_timber_produced = 0;
     std::int64_t total_basic_tool_produced = 0;
+    std::int64_t total_basic_tool_broken = 0;
+    std::uint64_t coverage_sum = 0;
+    std::uint64_t active_settlement_count = 0;
 
     for (const auto& settlement : restored_state.settlements) {
         total_wood_inventory += settlement.materials.wood.value;
@@ -1524,6 +1555,11 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         total_basic_tool_inventory += settlement.materials.basic_tool.value;
         total_timber_produced += settlement.cumulative_timber_produced;
         total_basic_tool_produced += settlement.cumulative_basic_tool_produced;
+        total_basic_tool_broken += settlement.cumulative_basic_tool_broken;
+        if (settlement.active) {
+            ++active_settlement_count;
+            coverage_sum += settlement.last_tool_coverage_per_10k;
+        }
     }
 
     restored_state.total_wood_inventory = total_wood_inventory;
@@ -1532,6 +1568,14 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     restored_state.total_basic_tool_inventory = total_basic_tool_inventory;
     restored_state.total_timber_produced = total_timber_produced;
     restored_state.total_basic_tool_produced = total_basic_tool_produced;
+    restored_state.total_basic_tool_broken = total_basic_tool_broken;
+    if (restored_state.total_basic_tool_broken > restored_state.total_basic_tool_produced) {
+        return load_error(SnapshotErrorCode::InvalidState, "Snapshot total broken tools cannot exceed cumulative production");
+    }
+    restored_state.average_tool_coverage_per_10k =
+        active_settlement_count > 0
+            ? static_cast<std::uint32_t>(coverage_sum / active_settlement_count)
+            : 0U;
 
     std::int64_t total_food_stored = 0;
     std::int64_t total_food_produced = 0;

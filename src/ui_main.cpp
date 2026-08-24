@@ -428,6 +428,9 @@ int main(int argc, char** argv) {
             static_cast<long long>(summary.timber_inventory),
             static_cast<long long>(summary.basic_tool_inventory),
             static_cast<long long>(summary.material_production_shortfall));
+        ImGui::Text("Tools durability: broken=%lld avg_coverage=%u/10000",
+            static_cast<long long>(summary.basic_tool_broken),
+            summary.average_tool_coverage_per_10k);
         ImGui::Text("Settlements: active=%llu extinct=%llu avg_pop=%llu largest=%llu high_pressure=%llu",
             static_cast<unsigned long long>(summary.active_settlements),
             static_cast<unsigned long long>(summary.extinct_settlements),
@@ -595,6 +598,9 @@ int main(int argc, char** argv) {
                         static_cast<long long>(settlement_view->stone_inventory),
                         static_cast<long long>(settlement_view->timber_inventory),
                         static_cast<long long>(settlement_view->basic_tool_inventory));
+                    ImGui::Text("Tools broken=%lld coverage=%u/10000",
+                        static_cast<long long>(settlement_view->cumulative_basic_tool_broken),
+                        settlement_view->tool_coverage_per_10k);
                     ImGui::Text("Material shortfall=%lld", static_cast<long long>(settlement_view->material_shortfall));
                 }
                 ImGui::Separator();

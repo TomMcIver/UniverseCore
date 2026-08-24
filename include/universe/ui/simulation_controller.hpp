@@ -69,6 +69,8 @@ struct SimulationSummary {
     std::int64_t stone_inventory{};
     std::int64_t timber_inventory{};
     std::int64_t basic_tool_inventory{};
+    std::int64_t basic_tool_broken{};
+    std::uint32_t average_tool_coverage_per_10k{};
     std::uint64_t child_population{};
     std::uint64_t working_age_population{};
     std::uint64_t elderly_population{};
@@ -120,6 +122,8 @@ struct SettlementSummaryView {
     std::int64_t stone_inventory{};
     std::int64_t timber_inventory{};
     std::int64_t basic_tool_inventory{};
+    std::int64_t cumulative_basic_tool_broken{};
+    std::uint32_t tool_coverage_per_10k{};
     std::int64_t material_shortfall{};
     std::int64_t accessible_food_capacity_per_day{};
     std::uint32_t pressure_per_10k{};

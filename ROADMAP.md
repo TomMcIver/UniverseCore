@@ -19,7 +19,7 @@ Exit criteria: same seed/config produces byte-identical canonical snapshot acros
 
 ## Milestone 1: 200-person settlement
 
-Status: **in progress**
+Status: **foundation complete (migration deferred)**
 
 - [x] person IDs
 - [x] age/sex
@@ -70,6 +70,17 @@ Current M2A modelling scope (intentional abstractions):
 - primitive generic `BasicTool` output abstraction
 - wood treated as renewable stock abstraction
 - stone treated as finite non-regenerating abstraction
+
+## Milestone 2B: Deterministic tools durability and productivity
+
+Status: **complete**
+
+- [x] deterministic settlement-level tool wear accumulation and breakage
+- [x] deterministic per-settlement tool coverage tracking (0..10,000)
+- [x] bounded productivity scaling from tool coverage in food/material output flows
+- [x] closed-loop replacement pressure via existing tool deficit/crafting path
+- [x] canonical durability/coverage world aggregates for diagnostics
+- [x] snapshot schema v8 for tool durability + coverage persistence/validation
 
 ## Milestone 2: Persistent history and knowledge
 

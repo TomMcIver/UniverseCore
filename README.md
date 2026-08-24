@@ -31,15 +31,17 @@ The project deliberately starts without Unreal Engine. The initial objective is 
 - Deterministic person-level nutrition/health affecting demographic outcomes
 - Deterministic material opportunity/extraction/inventory/crafting chain
 - Canonical material outputs: Timber and BasicTool
+- Deterministic tool durability loop: wear accumulation, breakage, replacement pressure
+- Deterministic tool coverage and bounded productivity effects on food/material output
 - Material-environment abstractions: renewable wood stock + finite stone stock
 - Optional SDL3 + Dear ImGui simulation inspector (`UNIVERSECORE_BUILD_UI=ON`)
 - UI command/query adapter over canonical simulation state
 - UI smoke test validating deterministic advance/save/load behavior
-- Snapshot schema v7 with deterministic material/environment/inventory persistence/validation
+- Snapshot schema v8 with deterministic material/environment/inventory/tool-durability persistence/validation
 - Reproducibility tests
 - No engine dependency
 
-Current M2A modelling limitations (intentional):
+Current M2A/M2B modelling limitations (intentional):
 
 - aggregate material quantities rather than item-instance objects
 - settlement-level inventories only

@@ -211,6 +211,8 @@ SimulationSummary SimulationController::summary() const noexcept {
         .stone_inventory = state.total_stone_inventory,
         .timber_inventory = state.total_timber_inventory,
         .basic_tool_inventory = state.total_basic_tool_inventory,
+        .basic_tool_broken = state.total_basic_tool_broken,
+        .average_tool_coverage_per_10k = state.average_tool_coverage_per_10k,
         .child_population = child_population,
         .working_age_population = working_age_population,
         .elderly_population = elderly_population,
@@ -357,6 +359,8 @@ std::vector<SettlementSummaryView> SimulationController::settlement_summaries() 
         summary.stone_inventory = settlement.materials.stone.value;
         summary.timber_inventory = settlement.materials.timber.value;
         summary.basic_tool_inventory = settlement.materials.basic_tool.value;
+        summary.cumulative_basic_tool_broken = settlement.cumulative_basic_tool_broken;
+        summary.tool_coverage_per_10k = settlement.last_tool_coverage_per_10k;
 
         if (summary.accessible_food_capacity_per_day > 0) {
             summary.pressure_per_10k = static_cast<std::uint32_t>(

@@ -496,6 +496,8 @@ int main(int argc, char** argv) {
                       << " stone_inventory=" << state.total_stone_inventory
                       << " timber_inventory=" << state.total_timber_inventory
                       << " basic_tool_inventory=" << state.total_basic_tool_inventory
+                      << " basic_tool_broken=" << state.total_basic_tool_broken
+                      << " avg_tool_coverage_per_10k=" << state.average_tool_coverage_per_10k
                       << " wild_stock=" << state.total_wild_food_stock
                       << " wild_capacity=" << state.total_wild_food_capacity
                       << " productive_capacity_per_day=" << state.total_productive_capacity_per_day

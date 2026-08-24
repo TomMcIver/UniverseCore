@@ -211,6 +211,9 @@ void verify_settlement_invariants(const universe::WorldState& state) {
         require(settlement_ids.insert(settlement.id).second, "settlement ids must be unique");
         require(settlement.region_id > 0, "settlement region id must be non-zero");
         require(settlement.access_share_points <= 10'000U, "settlement share points must be bounded");
+        require(settlement.tool_wear_work_units >= 0, "settlement tool wear work units must be non-negative");
+        require(settlement.last_tool_coverage_per_10k <= 10'000U, "settlement tool coverage must be bounded");
+        require(settlement.cumulative_basic_tool_broken >= 0, "settlement broken tools must be non-negative");
         if (!settlement.active) {
             require(settlement.access_share_points == 0U, "extinct settlement must not retain active share points");
         } else {
@@ -303,11 +306,19 @@ void verify_resource_invariants(const universe::WorldState& state, const std::in
     std::int64_t total_wild_food_harvested = 0;
     std::int64_t total_wild_food_regenerated = 0;
     std::int64_t total_inferred_initial_food = 0;
+    std::int64_t total_basic_tool_broken = 0;
+    std::uint64_t active_settlement_count = 0;
+    std::uint64_t coverage_sum = 0;
 
     std::unordered_set<universe::RegionId> region_ids;
     std::unordered_set<universe::SettlementId> settlement_ids;
     for (const auto& settlement : state.settlements) {
         settlement_ids.insert(settlement.id);
+        total_basic_tool_broken += settlement.cumulative_basic_tool_broken;
+        if (settlement.active) {
+            ++active_settlement_count;
+            coverage_sum += settlement.last_tool_coverage_per_10k;
+        }
     }
 
     for (const auto& region : state.regions) {
@@ -321,6 +332,9 @@ void verify_resource_invariants(const universe::WorldState& state, const std::in
         require(region.wild_food_harvest_limit_per_day >= 0, "region wild harvest limit must be non-negative");
         require(region.cumulative_wild_food_harvested >= 0, "region cumulative wild harvest must be non-negative");
         require(region.cumulative_wild_food_regenerated >= 0, "region cumulative wild regeneration must be non-negative");
+        require(
+            region.cumulative_wild_food_harvested <= region.wild_food_capacity + region.cumulative_wild_food_regenerated,
+            "region cumulative wild harvest must not exceed initial stock plus regeneration");
         require(region.wild_food_stock <= region.wild_food_capacity, "region wild stock must not exceed capacity");
 
         total_productive_capacity_per_day += region.productive_capacity_per_day;
@@ -426,6 +440,15 @@ void verify_resource_invariants(const universe::WorldState& state, const std::in
     require(state.total_stone_inventory >= 0, "total stone inventory must be non-negative");
     require(state.total_timber_inventory >= 0, "total timber inventory must be non-negative");
     require(state.total_basic_tool_inventory >= 0, "total basic tool inventory must be non-negative");
+    require(state.total_basic_tool_broken >= 0, "total basic tool broken must be non-negative");
+    require(state.average_tool_coverage_per_10k <= 10'000U, "average tool coverage must be bounded");
+    require(state.total_basic_tool_broken == total_basic_tool_broken, "total broken tools must match settlement totals");
+    const auto expected_average_coverage = active_settlement_count > 0U
+        ? static_cast<std::uint32_t>(coverage_sum / active_settlement_count)
+        : 0U;
+    require(
+        state.average_tool_coverage_per_10k == expected_average_coverage,
+        "average tool coverage must match settlement-level values");
     require(state.material_labour_demand >= 0, "material labour demand must be non-negative");
     require(state.material_labour_allocated >= 0, "material labour allocated must be non-negative");
     require(state.material_labour_shortfall >= 0, "material labour shortfall must be non-negative");
@@ -549,6 +572,8 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
     require(lhs.total_basic_tool_inventory == rhs.total_basic_tool_inventory, context);
     require(lhs.total_timber_produced == rhs.total_timber_produced, context);
     require(lhs.total_basic_tool_produced == rhs.total_basic_tool_produced, context);
+    require(lhs.total_basic_tool_broken == rhs.total_basic_tool_broken, context);
+    require(lhs.average_tool_coverage_per_10k == rhs.average_tool_coverage_per_10k, context);
     require(lhs.wood_labour_available == rhs.wood_labour_available, context);
     require(lhs.wood_labour_allocated == rhs.wood_labour_allocated, context);
     require(lhs.stone_labour_available == rhs.stone_labour_available, context);
@@ -636,10 +661,13 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
         require(a.materials.stone.value == b.materials.stone.value, context);
         require(a.materials.timber.value == b.materials.timber.value, context);
         require(a.materials.basic_tool.value == b.materials.basic_tool.value, context);
+        require(a.tool_wear_work_units == b.tool_wear_work_units, context);
+        require(a.last_tool_coverage_per_10k == b.last_tool_coverage_per_10k, context);
         require(a.cumulative_wood_extracted == b.cumulative_wood_extracted, context);
         require(a.cumulative_stone_extracted == b.cumulative_stone_extracted, context);
         require(a.cumulative_timber_produced == b.cumulative_timber_produced, context);
         require(a.cumulative_basic_tool_produced == b.cumulative_basic_tool_produced, context);
+        require(a.cumulative_basic_tool_broken == b.cumulative_basic_tool_broken, context);
     }
 
     for (std::size_t i = 0; i < lhs.event_log.size(); ++i) {
@@ -1519,6 +1547,68 @@ int main() {
     }
 
     {
+        auto durability_config = config;
+        durability_config.initial_population = 280;
+        durability_config.initial_region_count = 2;
+        durability_config.base_region_area_units = 160;
+        durability_config.food_production_scale_percent = 130;
+        durability_config.wood_resource_scale_percent = 220;
+        durability_config.stone_resource_scale_percent = 220;
+        durability_config.material_crafting_scale_percent = 220;
+
+        universe::Simulation durability_run_a{durability_config};
+        universe::Simulation durability_run_b{durability_config};
+        durability_run_a.run_years(30);
+        durability_run_b.run_years(30);
+
+        require_world_state_equal(
+            durability_run_a.state(),
+            durability_run_b.state(),
+            "tool durability loop must remain deterministic");
+
+        require(
+            durability_run_a.state().total_basic_tool_produced > 0,
+            "durability scenario should produce tools");
+        require(
+            durability_run_a.state().total_basic_tool_broken > 0,
+            "durability scenario should consume and break tools over time");
+        require(
+            durability_run_a.state().total_basic_tool_produced >= durability_run_a.state().total_basic_tool_broken,
+            "broken tools should never exceed total produced tools");
+        require(
+            durability_run_a.state().average_tool_coverage_per_10k <= 10'000U,
+            "tool coverage must remain bounded");
+    }
+
+    {
+        auto low_craft = config;
+        low_craft.initial_population = 260;
+        low_craft.initial_region_count = 2;
+        low_craft.base_region_area_units = 150;
+        low_craft.wood_resource_scale_percent = 200;
+        low_craft.stone_resource_scale_percent = 200;
+        low_craft.material_crafting_scale_percent = 0;
+
+        auto high_craft = low_craft;
+        high_craft.material_crafting_scale_percent = 260;
+
+        universe::Simulation low_run{low_craft};
+        universe::Simulation high_run{high_craft};
+        low_run.run_years(25);
+        high_run.run_years(25);
+
+        require(
+            high_run.state().total_basic_tool_produced >= low_run.state().total_basic_tool_produced,
+            "higher craft scale should not reduce cumulative tool production");
+        require(
+            high_run.state().total_basic_tool_broken >= low_run.state().total_basic_tool_broken,
+            "higher craft scale should not reduce cumulative tool wear/breakage");
+        require(
+            high_run.state().average_tool_coverage_per_10k >= low_run.state().average_tool_coverage_per_10k,
+            "higher craft scale should not reduce average tool coverage");
+    }
+
+    {
         universe::Simulation empty_household_regression{universe::SimulationConfig{
             .seed = 77,
             .initial_population = 1,
@@ -1564,7 +1654,7 @@ int main() {
         require_snapshot_load_fails(bad_magic, universe::SnapshotErrorCode::InvalidMagic, "bad magic must be rejected");
 
         auto bad_version = clone_bytes(valid);
-        bad_version[4] = std::byte{0x08};
+        bad_version[4] = std::byte{0x09};
         bad_version[5] = std::byte{0x00};
         require_snapshot_load_fails(
             bad_version,
@@ -1586,8 +1676,8 @@ int main() {
             "payload corruption must be rejected via checksum");
 
         constexpr std::size_t header_size = 24U;
-        constexpr std::size_t payload_people_count_offset = 570U;
-        constexpr std::size_t payload_first_person_offset = 578U;
+        constexpr std::size_t payload_people_count_offset = 582U;
+        constexpr std::size_t payload_first_person_offset = 590U;
         constexpr std::size_t payload_person_record_size = 41U;
         constexpr std::size_t person_sex_offset_in_record = 16U;
         constexpr std::size_t person_household_offset_in_record = 18U;
