@@ -29,12 +29,25 @@ The project deliberately starts without Unreal Engine. The initial objective is 
 - Deterministic local carrying-capacity pressure and settlement-level resource access
 - Deterministic person occupations with settlement-driven labour specialization
 - Deterministic person-level nutrition/health affecting demographic outcomes
+- Deterministic material opportunity/extraction/inventory/crafting chain
+- Canonical material outputs: Timber and BasicTool
+- Material-environment abstractions: renewable wood stock + finite stone stock
 - Optional SDL3 + Dear ImGui simulation inspector (`UNIVERSECORE_BUILD_UI=ON`)
 - UI command/query adapter over canonical simulation state
 - UI smoke test validating deterministic advance/save/load behavior
-- Snapshot schema v6 with deterministic occupation + labour persistence/validation
+- Snapshot schema v7 with deterministic material/environment/inventory persistence/validation
 - Reproducibility tests
 - No engine dependency
+
+Current M2A modelling limitations (intentional):
+
+- aggregate material quantities rather than item-instance objects
+- settlement-level inventories only
+- no private ownership or household wealth mechanics
+- no trade or market layer
+- no building/construction system
+- no technology gating for these material chains
+- generic `BasicTool` abstraction (non-specialized tooling taxonomy)
 
 ## Build
 

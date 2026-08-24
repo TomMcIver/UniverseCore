@@ -48,6 +48,29 @@ Status: **in progress**
 - [x] deterministic regime regression scenarios (sustainable / famine / constrained)
 - [ ] extend long-horizon viability across broader baseline seed distributions
 
+## Milestone 2A: Material production chains
+
+Status: **complete**
+
+- [x] raw material opportunity integrated into regional environment state
+- [x] deterministic wood extraction and stone extraction
+- [x] settlement-level material inventories
+- [x] deterministic material processing/crafting
+- [x] canonical Timber and BasicTool outputs
+- [x] snapshot schema v7 for canonical material state persistence/validation
+
+Current M2A modelling scope (intentional abstractions):
+
+- aggregate material quantities, not per-item object simulation
+- settlement-level inventory ownership only
+- no private ownership/wealth accounting
+- no trade or market mechanics
+- no building/materialized construction system
+- no technology gating of production chains
+- primitive generic `BasicTool` output abstraction
+- wood treated as renewable stock abstraction
+- stone treated as finite non-regenerating abstraction
+
 ## Milestone 2: Persistent history and knowledge
 
 - [ ] event journal

@@ -247,6 +247,27 @@ Invariants:
 - resource outcomes depend on scoped seeds + stable household identity + canonical period identifier
 - equivalent canonical time advancement schedules must produce identical food outcomes and snapshots
 
+Current implementation status (Milestone 2A):
+
+- deterministic raw material opportunity represented in canonical region environment state
+- deterministic settlement-specialized labour paths for wood extraction, stone extraction, and crafting
+- deterministic settlement-level material inventories
+- deterministic processing chain:
+        - raw wood/stone -> crafted outputs
+        - canonical outputs: `Timber`, `BasicTool`
+- canonical world aggregates for material labour, extraction, inventory, and shortfall signals
+
+Current M2A modelling limits (intentional abstractions):
+
+- material quantities are aggregate integers, not per-item physical objects
+- inventories are settlement-level, not person/household/private-wealth ledgers
+- no ownership/market/trade exchange layer
+- no building or construction consumption system yet
+- no technology gating over the current extraction/crafting pipeline
+- `BasicTool` is currently a primitive generic output type
+- wood is modelled as renewable stock abstraction
+- stone is modelled as finite non-regenerating abstraction
+
 ### Phase C
 Cohort aggregation for distant populations.
 
@@ -316,6 +337,7 @@ Current implementation status:
 - fixed-width little-endian encoding for all persisted primitives
 - canonical collection ordering during serialization (people/households/events by stable ID, household members by person ID)
 - explicit load validation for malformed/truncated data, enum validity, ID uniqueness, references and scheduler invariants
+- snapshot schema v7 is the canonical material-chain persistence baseline introduced with Milestone 2A
 
 Snapshot invariants:
 

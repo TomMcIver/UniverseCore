@@ -1,19 +1,19 @@
 {
   "project": "UniverseCore",
-  "as_of": "2026-08-22",
-  "current_phase": "Milestone 1 robustness",
-  "current_task": "Milestone 1 demographic equilibrium calibration",
-  "next_task": "Milestone 1 migration and demographic stability",
+  "as_of": "2026-08-24",
+  "current_phase": "Milestone 1: 200-person settlement (in progress)",
+  "current_task": "Milestone 1 migration",
+  "next_task": "Milestone 1 stabilization pass: extend long-horizon viability across broader baseline seed distributions",
   "build": {
     "canonical_workflow": "podman scripts/container-test.sh",
-    "last_verified": "2026-08-22",
+    "last_verified": "2026-08-24",
     "status": "passing",
-    "notes": "Verified in universecore-dev container with configure/build/ctest and deterministic snapshot/UI continuation checks"
+    "notes": "Verified in universecore-dev container with canonical build/test plus clean UI-enabled build/test and direct universe_ui --smoke-test"
   },
   "progress": {
     "simulation_foundation_percent": 99,
-    "bronze_age_simulator_percent": 33,
-    "playable_vertical_slice_percent": 6,
+    "bronze_age_simulator_percent": 37,
+    "playable_vertical_slice_percent": 7,
     "full_game_vision_percent": 1,
     "note": "Percentages are approximate planning estimates, not objective measurements."
   },
@@ -67,6 +67,12 @@
       "percent": 100
     },
     {
+      "id": "M2A",
+      "name": "Material Production Chains",
+      "status": "complete",
+      "percent": 100
+    },
+    {
       "id": "M2",
       "name": "Civilization Systems",
       "status": "planned",
@@ -89,15 +95,18 @@
       "Milestone 1D deterministic labour capacity and allocation",
       "Milestone 1E deterministic settlements and local carrying capacity",
       "Milestone 1F deterministic occupations and labour specialization",
-      "Snapshot schema v6 and validation",
+      "Milestone 2A deterministic material production chains",
+      "Snapshot schema v7 and validation",
       "Canonical Podman build/test workflow",
       "Development dashboard + deployment workflow"
     ],
     "active": [
-      "Milestone 1 migration and demographic stability"
+      "Milestone 1 migration",
+      "Milestone 1 stabilization long-horizon viability extension"
     ],
     "planned": [
-      "Milestone 1 migration and demographic stability"
+      "Milestone 2 persistent history and knowledge systems",
+      "Milestone 3 economy and settlement growth"
     ]
   },
   "invariants": [
@@ -108,6 +117,12 @@
     "Snapshots serialize canonical deterministic state only."
   ],
   "recent_verified_commits": [
+    {
+      "hash": "5e0a758",
+      "date": "2026-08-24",
+      "summary": "Implement Milestone 2A material production chains",
+      "verified": true
+    },
     {
       "hash": "9a478a8",
       "date": "2026-08-21",

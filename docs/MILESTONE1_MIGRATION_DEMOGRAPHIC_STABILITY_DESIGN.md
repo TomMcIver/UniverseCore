@@ -6,7 +6,8 @@ Scope boundary (explicit):
 - Migration is not currently justified as the primary solution to world-level demographic extinction under present fertility semantics.
 - Father fallback remains world-global today.
 - Migration remains intended for later settlement realism, resource/demographic locality, and eventual geographically local reproduction semantics.
-- The v7 snapshot fields, cooldown mechanics, and HouseholdMigrated event shape below are provisional design targets until migration is actually scheduled for implementation.
+- The migration snapshot fields, cooldown mechanics, and HouseholdMigrated event shape below are provisional design targets until migration is actually scheduled for implementation.
+- Migration schema assignment rule: use the next available canonical snapshot schema version at implementation time (illustrative reference in this document: v8, provisional).
 
 Anchors:
 - Baseline behavior targeted: verified state around a648ded.
@@ -16,7 +17,7 @@ Anchors:
 Proposed architectural decisions (for future implementation scheduling):
 - migration unit = Household
 - scope = intra-region settlement-to-settlement
-- snapshot target = v7
+- snapshot target = next available schema version at implementation time (illustrative: v8, provisional)
 - canonical event = HouseholdMigrated
 
 ## 1) Critical fertility assumption (reconfirmed)
@@ -218,7 +219,7 @@ No scoped randomness required for ordering in Milestone 1.
 
 ## 10) Anti-thrashing cooldown semantics
 
-Canonical household field (v7):
+Canonical household field (migration snapshot version; illustrative v8, provisional):
 - next_migration_eligible_year: uint64
 
 Semantics:
@@ -229,7 +230,7 @@ Semantics:
 - overflow behavior: saturate at uint64 max
 
 Validation:
-- field must be present in v7 household records
+- field must be present in migration-version household records
 - value may be any uint64
 - no additional derived counters persisted
 
@@ -352,10 +353,11 @@ To avoid phantom active empty settlements after migration, settlement extinction
 
 This keeps downstream occupation and aggregates consistent in that year.
 
-## 18) Snapshot v7 specification (exact additions)
+## 18) Snapshot migration specification (provisional reference: v8)
 
 Schema:
-- bump kSchemaVersion from 6 to 7
+- migration snapshot version = next available canonical schema version at implementation time
+- illustrative document reference: v8 (provisional; may change if another canonical schema change lands first)
 
 SimulationConfig additions (canonical, persisted):
 - migration_enabled: bool
@@ -377,7 +379,7 @@ Event subject adjustment for compatibility:
 
 Serialization ordering:
 - preserve existing deterministic id-sorted record ordering
-- append new v7 fields in fixed order after existing v6 fields within each record type
+- append new migration-version fields in fixed deterministic order after existing prior-version fields within each record type
 
 Validation additions:
 - migration_enabled must be decoded and preserved
@@ -423,7 +425,7 @@ Behavior:
 - true: migration pass executes using this spec
 
 Snapshot implication:
-- persisted in v7 config block
+- persisted in migration-version config block
 - load must preserve value exactly
 
 ## 22) Benchmark acceptance and required comparisons
@@ -492,7 +494,7 @@ Implementation-time invariants:
 5. Destination resource collapse from accepted inflows.
 6. Household food/history accounting mistakes on relocation.
 7. Extinction ordering drift versus current behavior.
-8. Snapshot/event compatibility regressions in v7.
+8. Snapshot/event compatibility regressions in the migration schema version selected at implementation time.
 9. Integer arithmetic overflow in projected-pressure calculations.
 10. Event-log growth under long horizons.
 
@@ -501,7 +503,7 @@ Implementation-time invariants:
 1. Add canonical config/state declarations:
    - migration_enabled
    - household next_migration_eligible_year
-2. Implement v7 snapshot schema changes and validation extensions.
+2. Implement migration-version snapshot schema changes and validation extensions.
 3. Add event model extensions for HouseholdMigrated.
 4. Add shared move_household_to_settlement relocation primitive.
 5. Implement deterministic settlement/household demographic metric builders.
@@ -523,7 +525,7 @@ The primary unresolved issue is semantic, not implementation detail:
 
 This design intentionally does not redesign fertility in Milestone 1.
 Migration remains potentially useful for pressure/capacity balancing and settlement viability management, but it is not currently justified as the direct solution to world-level demographic extinction while father fallback is world-global.
-Migration implementation remains a later milestone for locality/realism goals and eventual geographic reproduction semantics, and the v7/cooldown/event details in this document remain provisional until that implementation is scheduled.
+Migration implementation remains a later milestone for locality/realism goals and eventual geographic reproduction semantics, and the migration-version/cooldown/event details in this document remain provisional until that implementation is scheduled.
 
 ---
 
