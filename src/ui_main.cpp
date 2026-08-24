@@ -116,6 +116,12 @@ struct UiState {
             return "SubsistenceCultivator";
         case universe::Occupation::WildFoodGatherer:
             return "WildFoodGatherer";
+        case universe::Occupation::WoodGatherer:
+            return "WoodGatherer";
+        case universe::Occupation::StoneExtractor:
+            return "StoneExtractor";
+        case universe::Occupation::CraftWorker:
+            return "CraftWorker";
     }
     return "Unknown";
 }
@@ -390,6 +396,10 @@ int main(int argc, char** argv) {
             static_cast<unsigned long long>(summary.unallocated_workers),
             static_cast<unsigned long long>(summary.cultivators),
             static_cast<unsigned long long>(summary.gatherers));
+        ImGui::Text("Material workers: wood=%llu stone=%llu craft=%llu",
+            static_cast<unsigned long long>(summary.wood_gatherers),
+            static_cast<unsigned long long>(summary.stone_extractors),
+            static_cast<unsigned long long>(summary.craft_workers));
         ImGui::Text("Specialized labour: alloc=%lld shortfall=%lld | cultivation %lld/%lld | gathering %lld/%lld",
             static_cast<long long>(summary.total_labour_allocated),
             static_cast<long long>(summary.labour_shortfall),
@@ -397,6 +407,27 @@ int main(int argc, char** argv) {
             static_cast<long long>(summary.cultivation_labour_available),
             static_cast<long long>(summary.gathering_labour_allocated),
             static_cast<long long>(summary.gathering_labour_available));
+        ImGui::Text("Materials labour: demand=%lld alloc=%lld shortfall=%lld | wood %lld/%lld stone %lld/%lld craft %lld/%lld",
+            static_cast<long long>(summary.material_labour_demand),
+            static_cast<long long>(summary.material_labour_allocated),
+            static_cast<long long>(summary.material_labour_shortfall),
+            static_cast<long long>(summary.wood_labour_allocated),
+            static_cast<long long>(summary.wood_labour_available),
+            static_cast<long long>(summary.stone_labour_allocated),
+            static_cast<long long>(summary.stone_labour_available),
+            static_cast<long long>(summary.craft_labour_allocated),
+            static_cast<long long>(summary.craft_labour_available));
+        ImGui::Text("Environment materials: wood=%lld/%lld stone=%lld/%lld",
+            static_cast<long long>(summary.wood_stock),
+            static_cast<long long>(summary.wood_capacity),
+            static_cast<long long>(summary.stone_remaining),
+            static_cast<long long>(summary.stone_capacity));
+        ImGui::Text("Inventory materials: wood=%lld stone=%lld timber=%lld tools=%lld shortfall=%lld",
+            static_cast<long long>(summary.wood_inventory),
+            static_cast<long long>(summary.stone_inventory),
+            static_cast<long long>(summary.timber_inventory),
+            static_cast<long long>(summary.basic_tool_inventory),
+            static_cast<long long>(summary.material_production_shortfall));
         ImGui::Text("Settlements: active=%llu extinct=%llu avg_pop=%llu largest=%llu high_pressure=%llu",
             static_cast<unsigned long long>(summary.active_settlements),
             static_cast<unsigned long long>(summary.extinct_settlements),
@@ -418,7 +449,7 @@ int main(int argc, char** argv) {
 
         ImGui::BeginChild("settlements", ImVec2(0, 180), true);
         ImGui::Text("Settlements");
-        if (ImGui::BeginTable("settlement_table", 11, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable)) {
+        if (ImGui::BeginTable("settlement_table", 12, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable)) {
             ImGui::TableSetupColumn("ID");
             ImGui::TableSetupColumn("Region");
             ImGui::TableSetupColumn("Status");
@@ -430,6 +461,7 @@ int main(int argc, char** argv) {
             ImGui::TableSetupColumn("FoodStored");
             ImGui::TableSetupColumn("Workers");
             ImGui::TableSetupColumn("Shortfall");
+            ImGui::TableSetupColumn("Materials");
             ImGui::TableHeadersRow();
 
             for (const auto& settlement : settlement_summaries) {
@@ -459,6 +491,12 @@ int main(int argc, char** argv) {
                 ImGui::TextUnformatted(std::to_string(settlement.active_workers).c_str());
                 ImGui::TableSetColumnIndex(10);
                 ImGui::TextUnformatted(std::to_string(settlement.labour_shortfall).c_str());
+                ImGui::TableSetColumnIndex(11);
+                ImGui::Text("W:%lld S:%lld T:%lld B:%lld",
+                    static_cast<long long>(settlement.wood_inventory),
+                    static_cast<long long>(settlement.stone_inventory),
+                    static_cast<long long>(settlement.timber_inventory),
+                    static_cast<long long>(settlement.basic_tool_inventory));
             }
 
             ImGui::EndTable();
@@ -530,9 +568,12 @@ int main(int argc, char** argv) {
                         static_cast<unsigned long long>(settlement_view->eligible_workers),
                         static_cast<unsigned long long>(settlement_view->active_workers),
                         static_cast<unsigned long long>(settlement_view->unallocated_workers));
-                    ImGui::Text("Occupations: cultivators=%llu gatherers=%llu",
+                    ImGui::Text("Occupations: cultivators=%llu gatherers=%llu wood=%llu stone=%llu craft=%llu",
                         static_cast<unsigned long long>(settlement_view->cultivators),
-                        static_cast<unsigned long long>(settlement_view->gatherers));
+                        static_cast<unsigned long long>(settlement_view->gatherers),
+                        static_cast<unsigned long long>(settlement_view->wood_gatherers),
+                        static_cast<unsigned long long>(settlement_view->stone_extractors),
+                        static_cast<unsigned long long>(settlement_view->craft_workers));
                     ImGui::Text("Labour demand=%lld supplied=%lld shortfall=%lld",
                         static_cast<long long>(settlement_view->labour_demand),
                         static_cast<long long>(settlement_view->labour_allocated),
@@ -542,6 +583,19 @@ int main(int argc, char** argv) {
                         static_cast<long long>(settlement_view->cultivation_labour_available),
                         static_cast<long long>(settlement_view->gathering_labour_allocated),
                         static_cast<long long>(settlement_view->gathering_labour_available));
+                    ImGui::Text("Material labour W %lld/%lld | S %lld/%lld | C %lld/%lld",
+                        static_cast<long long>(settlement_view->wood_labour_allocated),
+                        static_cast<long long>(settlement_view->wood_labour_available),
+                        static_cast<long long>(settlement_view->stone_labour_allocated),
+                        static_cast<long long>(settlement_view->stone_labour_available),
+                        static_cast<long long>(settlement_view->craft_labour_allocated),
+                        static_cast<long long>(settlement_view->craft_labour_available));
+                    ImGui::Text("Inventory wood=%lld stone=%lld timber=%lld tools=%lld",
+                        static_cast<long long>(settlement_view->wood_inventory),
+                        static_cast<long long>(settlement_view->stone_inventory),
+                        static_cast<long long>(settlement_view->timber_inventory),
+                        static_cast<long long>(settlement_view->basic_tool_inventory));
+                    ImGui::Text("Material shortfall=%lld", static_cast<long long>(settlement_view->material_shortfall));
                 }
                 ImGui::Separator();
                 ImGui::TextUnformatted("Households");

@@ -27,6 +27,7 @@ constexpr std::uint64_t kFoundingMinimumRemainingHouseholds = 1;
 constexpr std::uint64_t kTargetHouseholdsPerSettlement = 8;
 constexpr std::uint64_t kMaxInitialSettlementsPerRegion = 6;
 constexpr std::int64_t kAssignmentRequiredCoveragePercent = 115;
+constexpr std::int64_t kSettlementMaterialShareScale = 10'000;
 
 struct LabourDemandProfile {
     std::int64_t cultivation_labour_demand{};
@@ -36,6 +37,32 @@ struct LabourDemandProfile {
         return cultivation_labour_demand + gathering_labour_demand;
     }
 };
+
+struct MaterialTargetProfile {
+    std::int64_t wood_target{};
+    std::int64_t stone_target{};
+    std::int64_t timber_target{};
+    std::int64_t basic_tool_target{};
+};
+
+[[nodiscard]] MaterialTargetProfile material_targets_for_settlement(
+    const std::uint64_t alive_population,
+    const std::uint64_t eligible_workers) noexcept {
+    const auto worker_i64 = static_cast<std::int64_t>(eligible_workers);
+    const auto population_i64 = static_cast<std::int64_t>(alive_population);
+
+    const auto basic_tool_target = std::max<std::int64_t>(4, (worker_i64 + 2) / 3);
+    const auto timber_target = std::max<std::int64_t>(8, population_i64 / 2);
+    const auto wood_target = (timber_target * 2) + basic_tool_target + std::max<std::int64_t>(2, population_i64 / 4);
+    const auto stone_target = basic_tool_target + std::max<std::int64_t>(2, population_i64 / 5);
+
+    return MaterialTargetProfile{
+        .wood_target = wood_target,
+        .stone_target = stone_target,
+        .timber_target = timber_target,
+        .basic_tool_target = basic_tool_target,
+    };
+}
 
 [[nodiscard]] std::int64_t compute_daily_food_output_target(
     const std::int64_t daily_food_required,
@@ -137,6 +164,18 @@ Simulation::Simulation(SimulationConfig config)
     if (config_.productive_effort_scale_percent > 10'000U) {
         throw std::invalid_argument("Productive effort scale percent must be <= 10000");
     }
+    if (config_.wood_resource_scale_percent > 10'000U) {
+        throw std::invalid_argument("Wood resource scale percent must be <= 10000");
+    }
+    if (config_.stone_resource_scale_percent > 10'000U) {
+        throw std::invalid_argument("Stone resource scale percent must be <= 10000");
+    }
+    if (config_.wood_regeneration_scale_percent > 10'000U) {
+        throw std::invalid_argument("Wood regeneration scale percent must be <= 10000");
+    }
+    if (config_.material_crafting_scale_percent > 10'000U) {
+        throw std::invalid_argument("Material crafting scale percent must be <= 10000");
+    }
 
     if (!config_.food_system_enabled) {
         food_next_run_ = SimulationTime{std::numeric_limits<std::int64_t>::max()};
@@ -152,6 +191,7 @@ Simulation::Simulation(SimulationConfig config)
     refresh_food_aggregates();
     refresh_environment_aggregates();
     refresh_labour_aggregates();
+    refresh_material_aggregates();
 }
 
 const WorldState& Simulation::state() const noexcept {
@@ -308,6 +348,9 @@ void Simulation::process_food_period(const std::uint64_t food_period) {
     state_.unallocated_workers = 0;
     state_.cultivators = 0;
     state_.gatherers = 0;
+    state_.wood_gatherers = 0;
+    state_.stone_extractors = 0;
+    state_.craft_workers = 0;
     state_.total_labour_capacity = 0;
     state_.total_labour_demand = 0;
     state_.total_labour_allocated = 0;
@@ -316,6 +359,12 @@ void Simulation::process_food_period(const std::uint64_t food_period) {
     state_.gathering_labour_available = 0;
     state_.gathering_labour_allocated = 0;
     state_.labour_shortfall = 0;
+    state_.wood_labour_available = 0;
+    state_.stone_labour_available = 0;
+    state_.craft_labour_available = 0;
+    state_.wood_labour_available = 0;
+    state_.stone_labour_available = 0;
+    state_.craft_labour_available = 0;
 
     for (const auto& person : state_.people) {
         if (!occupation_eligible_for_productive_work(person)) {
@@ -339,6 +388,24 @@ void Simulation::process_food_period(const std::uint64_t food_period) {
             ++state_.gatherers;
             if (!checked_add_i64(state_.gathering_labour_available, capacity, state_.gathering_labour_available)) {
                 throw std::overflow_error("Gathering available labour overflow");
+            }
+        } else if (person.occupation == Occupation::WoodGatherer) {
+            ++state_.active_workers;
+            ++state_.wood_gatherers;
+            if (!checked_add_i64(state_.wood_labour_available, capacity, state_.wood_labour_available)) {
+                throw std::overflow_error("Wood available labour overflow");
+            }
+        } else if (person.occupation == Occupation::StoneExtractor) {
+            ++state_.active_workers;
+            ++state_.stone_extractors;
+            if (!checked_add_i64(state_.stone_labour_available, capacity, state_.stone_labour_available)) {
+                throw std::overflow_error("Stone available labour overflow");
+            }
+        } else if (person.occupation == Occupation::CraftWorker) {
+            ++state_.active_workers;
+            ++state_.craft_workers;
+            if (!checked_add_i64(state_.craft_labour_available, capacity, state_.craft_labour_available)) {
+                throw std::overflow_error("Craft available labour overflow");
             }
         } else {
             ++state_.unallocated_workers;
@@ -743,8 +810,313 @@ void Simulation::process_food_period(const std::uint64_t food_period) {
         }
     }
 
+    if (config_.materials_system_enabled) {
+        process_materials_period(food_period);
+    }
+
     refresh_food_aggregates();
     refresh_environment_aggregates();
+    refresh_material_aggregates();
+}
+
+void Simulation::process_materials_period(const std::uint64_t food_period) {
+    state_.wood_labour_available = 0;
+    state_.wood_labour_allocated = 0;
+    state_.stone_labour_available = 0;
+    state_.stone_labour_allocated = 0;
+    state_.craft_labour_available = 0;
+    state_.craft_labour_allocated = 0;
+    state_.material_labour_demand = 0;
+    state_.material_labour_allocated = 0;
+    state_.material_labour_shortfall = 0;
+    state_.material_production_shortfall = 0;
+
+    struct SettlementMaterialDayState {
+        Settlement* settlement{};
+        std::uint64_t alive_population{};
+        std::uint64_t eligible_workers{};
+        std::int64_t wood_labour_available{};
+        std::int64_t stone_labour_available{};
+        std::int64_t craft_labour_available{};
+        std::int64_t wood_quota{};
+        std::int64_t stone_quota{};
+    };
+
+    std::unordered_map<PersonId, const Person*> person_by_id;
+    person_by_id.reserve(state_.people.size());
+    for (const auto& person : state_.people) {
+        person_by_id.emplace(person.id, &person);
+    }
+
+    std::unordered_map<SettlementId, SettlementMaterialDayState> by_settlement;
+    by_settlement.reserve(state_.settlements.size());
+    for (auto& settlement : state_.settlements) {
+        if (!settlement.active) {
+            continue;
+        }
+
+        by_settlement.emplace(
+            settlement.id,
+            SettlementMaterialDayState{.settlement = &settlement});
+    }
+
+    for (const auto& household : state_.households) {
+        auto settlement_it = by_settlement.find(household.settlement_id);
+        if (settlement_it == by_settlement.end()) {
+            continue;
+        }
+
+        auto& settlement_state = settlement_it->second;
+        for (const auto member_id : household.member_ids) {
+            const auto person_it = person_by_id.find(member_id);
+            if (person_it == person_by_id.end() || !person_it->second->alive) {
+                continue;
+            }
+
+            ++settlement_state.alive_population;
+            const auto& person = *person_it->second;
+            if (!occupation_eligible_for_productive_work(person)) {
+                continue;
+            }
+
+            ++settlement_state.eligible_workers;
+            const auto capacity = productive_effort_for_person(person);
+            if (person.occupation == Occupation::WoodGatherer) {
+                if (!checked_add_i64(
+                        settlement_state.wood_labour_available,
+                        capacity,
+                        settlement_state.wood_labour_available)) {
+                    throw std::overflow_error("Wood labour availability overflow");
+                }
+            } else if (person.occupation == Occupation::StoneExtractor) {
+                if (!checked_add_i64(
+                        settlement_state.stone_labour_available,
+                        capacity,
+                        settlement_state.stone_labour_available)) {
+                    throw std::overflow_error("Stone labour availability overflow");
+                }
+            } else if (person.occupation == Occupation::CraftWorker) {
+                if (!checked_add_i64(
+                        settlement_state.craft_labour_available,
+                        capacity,
+                        settlement_state.craft_labour_available)) {
+                    throw std::overflow_error("Craft labour availability overflow");
+                }
+            }
+        }
+    }
+
+    std::vector<RegionId> region_ids;
+    region_ids.reserve(state_.regions.size());
+    for (const auto& region : state_.regions) {
+        region_ids.push_back(region.id);
+    }
+    std::sort(region_ids.begin(), region_ids.end());
+
+    for (const auto region_id : region_ids) {
+        auto* region = find_region_mutable(region_id);
+        if (region == nullptr) {
+            continue;
+        }
+
+        std::vector<SettlementMaterialDayState*> active_settlements;
+        active_settlements.reserve(by_settlement.size());
+        std::int64_t total_share = 0;
+        for (auto& [settlement_id, settlement_state] : by_settlement) {
+            (void)settlement_id;
+            if (settlement_state.settlement->region_id != region_id || !settlement_state.settlement->active ||
+                settlement_state.settlement->access_share_points == 0U) {
+                continue;
+            }
+
+            active_settlements.push_back(&settlement_state);
+            total_share += settlement_state.settlement->access_share_points;
+        }
+
+        std::sort(active_settlements.begin(), active_settlements.end(), [](const SettlementMaterialDayState* lhs, const SettlementMaterialDayState* rhs) {
+            return lhs->settlement->id < rhs->settlement->id;
+        });
+
+        if (active_settlements.empty() || total_share <= 0) {
+            continue;
+        }
+
+        auto wood_available = std::max<std::int64_t>(0, region->wood_stock);
+        auto stone_available = std::max<std::int64_t>(0, region->stone_remaining);
+
+        const auto wood_daily_seed = derive_seed(region_seed(region_id), SeedDomain::RegionWoodDailyVariation, food_period);
+        const auto stone_daily_seed = derive_seed(region_seed(region_id), SeedDomain::RegionStoneDailyVariation, food_period);
+        wood_available = apply_scaled_percent(
+            wood_available,
+            85U + static_cast<std::uint32_t>(seed_random_bounded(wood_daily_seed, 31U)));
+        stone_available = apply_scaled_percent(
+            stone_available,
+            85U + static_cast<std::uint32_t>(seed_random_bounded(stone_daily_seed, 31U)));
+        wood_available = std::min(wood_available, region->wood_stock);
+        stone_available = std::min(stone_available, region->stone_remaining);
+
+        std::int64_t distributed_wood_quota = 0;
+        std::int64_t distributed_stone_quota = 0;
+        for (auto* settlement_state : active_settlements) {
+            settlement_state->wood_quota =
+                (wood_available * static_cast<std::int64_t>(settlement_state->settlement->access_share_points)) /
+                static_cast<std::int64_t>(kSettlementMaterialShareScale);
+            settlement_state->stone_quota =
+                (stone_available * static_cast<std::int64_t>(settlement_state->settlement->access_share_points)) /
+                static_cast<std::int64_t>(kSettlementMaterialShareScale);
+            distributed_wood_quota += settlement_state->wood_quota;
+            distributed_stone_quota += settlement_state->stone_quota;
+        }
+
+        auto wood_quota_remainder = wood_available - distributed_wood_quota;
+        auto stone_quota_remainder = stone_available - distributed_stone_quota;
+        for (auto* settlement_state : active_settlements) {
+            if (wood_quota_remainder > 0) {
+                ++settlement_state->wood_quota;
+                --wood_quota_remainder;
+            }
+            if (stone_quota_remainder > 0) {
+                ++settlement_state->stone_quota;
+                --stone_quota_remainder;
+            }
+        }
+
+        std::int64_t extracted_wood_region = 0;
+        std::int64_t extracted_stone_region = 0;
+
+        for (auto* settlement_state : active_settlements) {
+            const auto targets = material_targets_for_settlement(
+                settlement_state->alive_population,
+                settlement_state->eligible_workers);
+
+            auto& inventory = settlement_state->settlement->materials;
+            const auto timber_deficit = std::max<std::int64_t>(0, targets.timber_target - inventory.timber.value);
+            const auto tool_deficit = std::max<std::int64_t>(0, targets.basic_tool_target - inventory.basic_tool.value);
+
+            const auto wood_recipe_need =
+                (timber_deficit * material_parameters_.wood_per_timber) +
+                (tool_deficit * material_parameters_.wood_per_basic_tool);
+            const auto stone_recipe_need = tool_deficit * material_parameters_.stone_per_basic_tool;
+
+            const auto wood_reserve_need = std::max<std::int64_t>(0, targets.wood_target - inventory.wood.value);
+            const auto stone_reserve_need = std::max<std::int64_t>(0, targets.stone_target - inventory.stone.value);
+            const auto wood_total_need = wood_recipe_need + wood_reserve_need;
+            const auto stone_total_need = stone_recipe_need + stone_reserve_need;
+
+            const auto extracted_wood = safe_min3_i64(
+                std::max<std::int64_t>(0, wood_total_need),
+                std::max<std::int64_t>(0, settlement_state->wood_quota),
+                std::max<std::int64_t>(0, settlement_state->wood_labour_available));
+            const auto extracted_stone = safe_min3_i64(
+                std::max<std::int64_t>(0, stone_total_need),
+                std::max<std::int64_t>(0, settlement_state->stone_quota),
+                std::max<std::int64_t>(0, settlement_state->stone_labour_available));
+
+            if (!checked_sub_nonnegative_i64(region->wood_stock, extracted_wood, region->wood_stock) ||
+                !checked_sub_nonnegative_i64(region->stone_remaining, extracted_stone, region->stone_remaining)) {
+                throw std::overflow_error("Material extraction exceeded region stock");
+            }
+
+            if (!checked_add_i64(region->cumulative_wood_harvested, extracted_wood, region->cumulative_wood_harvested) ||
+                !checked_add_i64(region->cumulative_stone_extracted, extracted_stone, region->cumulative_stone_extracted) ||
+                !checked_add_i64(inventory.wood.value, extracted_wood, inventory.wood.value) ||
+                !checked_add_i64(inventory.stone.value, extracted_stone, inventory.stone.value) ||
+                !checked_add_i64(
+                    settlement_state->settlement->cumulative_wood_extracted,
+                    extracted_wood,
+                    settlement_state->settlement->cumulative_wood_extracted) ||
+                !checked_add_i64(
+                    settlement_state->settlement->cumulative_stone_extracted,
+                    extracted_stone,
+                    settlement_state->settlement->cumulative_stone_extracted)) {
+                throw std::overflow_error("Material extraction accounting overflow");
+            }
+
+            extracted_wood_region += extracted_wood;
+            extracted_stone_region += extracted_stone;
+            state_.wood_labour_allocated += extracted_wood;
+            state_.stone_labour_allocated += extracted_stone;
+
+            auto craft_labour_remaining = apply_scaled_percent(
+                std::max<std::int64_t>(0, settlement_state->craft_labour_available),
+                config_.material_crafting_scale_percent);
+
+            const auto craft_demand_total = timber_deficit + tool_deficit;
+            state_.material_labour_demand += craft_demand_total + extracted_wood + extracted_stone;
+
+            const auto tools_possible = safe_min3_i64(
+                tool_deficit,
+                craft_labour_remaining / std::max<std::int64_t>(1, material_parameters_.craft_labour_per_basic_tool),
+                safe_min3_i64(
+                    inventory.wood.value / std::max<std::int64_t>(1, material_parameters_.wood_per_basic_tool),
+                    inventory.stone.value / std::max<std::int64_t>(1, material_parameters_.stone_per_basic_tool),
+                    std::numeric_limits<std::int64_t>::max()));
+
+            if (tools_possible > 0) {
+                inventory.wood.value -= tools_possible * material_parameters_.wood_per_basic_tool;
+                inventory.stone.value -= tools_possible * material_parameters_.stone_per_basic_tool;
+                inventory.basic_tool.value += tools_possible;
+                if (!checked_add_i64(
+                        settlement_state->settlement->cumulative_basic_tool_produced,
+                        tools_possible,
+                        settlement_state->settlement->cumulative_basic_tool_produced)) {
+                    throw std::overflow_error("Basic tool cumulative production overflow");
+                }
+                craft_labour_remaining -= tools_possible * material_parameters_.craft_labour_per_basic_tool;
+            }
+
+            const auto timber_possible = safe_min3_i64(
+                timber_deficit,
+                craft_labour_remaining / std::max<std::int64_t>(1, material_parameters_.craft_labour_per_timber),
+                inventory.wood.value / std::max<std::int64_t>(1, material_parameters_.wood_per_timber));
+
+            if (timber_possible > 0) {
+                inventory.wood.value -= timber_possible * material_parameters_.wood_per_timber;
+                inventory.timber.value += timber_possible;
+                if (!checked_add_i64(
+                        settlement_state->settlement->cumulative_timber_produced,
+                        timber_possible,
+                        settlement_state->settlement->cumulative_timber_produced)) {
+                    throw std::overflow_error("Timber cumulative production overflow");
+                }
+                craft_labour_remaining -= timber_possible * material_parameters_.craft_labour_per_timber;
+            }
+
+            const auto used_craft_labour =
+                (tools_possible * material_parameters_.craft_labour_per_basic_tool) +
+                (timber_possible * material_parameters_.craft_labour_per_timber);
+            state_.craft_labour_allocated += used_craft_labour;
+
+            const auto production_shortfall =
+                std::max<std::int64_t>(0, tool_deficit - tools_possible) +
+                std::max<std::int64_t>(0, timber_deficit - timber_possible);
+            state_.material_production_shortfall += production_shortfall;
+        }
+
+        if (region->wood_stock < region->wood_capacity) {
+            const auto deficit = region->wood_capacity - region->wood_stock;
+            const auto regeneration = std::min(deficit, std::max<std::int64_t>(0, region->wood_regeneration_per_day));
+            if (!checked_add_i64(region->wood_stock, regeneration, region->wood_stock) ||
+                !checked_add_i64(region->cumulative_wood_regenerated, regeneration, region->cumulative_wood_regenerated)) {
+                throw std::overflow_error("Wood regeneration overflow");
+            }
+        }
+
+        (void)extracted_wood_region;
+        (void)extracted_stone_region;
+    }
+
+    for (const auto& [settlement_id, settlement_state] : by_settlement) {
+        (void)settlement_id;
+        state_.wood_labour_available += settlement_state.wood_labour_available;
+        state_.stone_labour_available += settlement_state.stone_labour_available;
+        state_.craft_labour_available += settlement_state.craft_labour_available;
+    }
+
+    state_.material_labour_allocated =
+        state_.wood_labour_allocated + state_.stone_labour_allocated + state_.craft_labour_allocated;
+    state_.material_labour_shortfall =
+        std::max<std::int64_t>(0, state_.material_labour_demand - state_.material_labour_allocated);
 }
 
 void Simulation::process_demography_period(const std::uint64_t demographic_year) {
@@ -755,6 +1127,7 @@ void Simulation::process_demography_period(const std::uint64_t demographic_year)
     refresh_population_count();
     refresh_food_aggregates();
     refresh_labour_aggregates();
+    refresh_material_aggregates();
 }
 
 PersonId Simulation::next_person_id() noexcept {
@@ -1214,6 +1587,28 @@ RegionEnvironmentState Simulation::generate_region_state(const RegionId region_i
     const auto wild_food_regeneration_per_day = std::max<std::int64_t>(1, wild_food_capacity / 120);
     const auto wild_food_harvest_limit_per_day = std::max<std::int64_t>(1, wild_food_capacity / 20);
 
+    std::int64_t wood_capacity = 0;
+    if (!checked_mul_i64(land_area_units, 180, wood_capacity)) {
+        throw std::overflow_error("Region wood capacity overflow");
+    }
+    const auto wood_seed = derive_seed(seed, SeedDomain::RegionWoodCapacity, 1U);
+    const auto wood_jitter_percent = 85U + static_cast<std::uint32_t>(seed_random_bounded(wood_seed, 31U));
+    wood_capacity = apply_scaled_percent(wood_capacity, wood_jitter_percent);
+    wood_capacity = apply_scaled_percent(wood_capacity, config_.wood_resource_scale_percent);
+
+    std::int64_t stone_capacity = 0;
+    if (!checked_mul_i64(land_area_units, 90, stone_capacity)) {
+        throw std::overflow_error("Region stone capacity overflow");
+    }
+    const auto stone_seed = derive_seed(seed, SeedDomain::RegionStoneCapacity, 1U);
+    const auto stone_jitter_percent = 85U + static_cast<std::uint32_t>(seed_random_bounded(stone_seed, 31U));
+    stone_capacity = apply_scaled_percent(stone_capacity, stone_jitter_percent);
+    stone_capacity = apply_scaled_percent(stone_capacity, config_.stone_resource_scale_percent);
+
+    auto wood_regeneration_per_day = std::max<std::int64_t>(1, wood_capacity / 90);
+    wood_regeneration_per_day = apply_scaled_percent(wood_regeneration_per_day, config_.wood_regeneration_scale_percent);
+    wood_regeneration_per_day = std::max<std::int64_t>(wood_regeneration_per_day, 0);
+
     return RegionEnvironmentState{
         .id = region_id,
         .land_area_units = land_area_units,
@@ -1225,6 +1620,14 @@ RegionEnvironmentState Simulation::generate_region_state(const RegionId region_i
         .wild_food_harvest_limit_per_day = wild_food_harvest_limit_per_day,
         .cumulative_wild_food_harvested = 0,
         .cumulative_wild_food_regenerated = 0,
+        .wood_capacity = wood_capacity,
+        .wood_stock = wood_capacity,
+        .wood_regeneration_per_day = wood_regeneration_per_day,
+        .cumulative_wood_harvested = 0,
+        .cumulative_wood_regenerated = 0,
+        .stone_capacity = stone_capacity,
+        .stone_remaining = stone_capacity,
+        .cumulative_stone_extracted = 0,
     };
 }
 
@@ -1713,6 +2116,7 @@ void Simulation::process_occupation_reassignment(const std::uint64_t demographic
 
         std::int64_t settlement_required_food = 0;
         std::int64_t settlement_stored_food = 0;
+        std::uint64_t settlement_alive_population = 0;
 
         struct Candidate {
             Person* person{};
@@ -1744,6 +2148,8 @@ void Simulation::process_occupation_reassignment(const std::uint64_t demographic
                 if (!person->alive) {
                     continue;
                 }
+
+                ++settlement_alive_population;
 
                 const auto required = food_requirement_for_person(*person);
                 if (!checked_add_i64(settlement_required_food, required, settlement_required_food)) {
@@ -1826,6 +2232,48 @@ void Simulation::process_occupation_reassignment(const std::uint64_t demographic
             }
         }
 
+        auto* settlement_mutable = find_settlement_mutable(settlement_id);
+        if (settlement_mutable != nullptr) {
+            std::uint64_t eligible_workers = 0;
+            for (const auto& candidate : candidates) {
+                if (candidate.labour_capacity > 0) {
+                    ++eligible_workers;
+                }
+            }
+
+            const auto targets = material_targets_for_settlement(settlement_alive_population, eligible_workers);
+            const auto timber_deficit = std::max<std::int64_t>(0, targets.timber_target - settlement_mutable->materials.timber.value);
+            const auto tool_deficit = std::max<std::int64_t>(0, targets.basic_tool_target - settlement_mutable->materials.basic_tool.value);
+            auto wood_total_need =
+                std::max<std::int64_t>(0, targets.wood_target - settlement_mutable->materials.wood.value) +
+                (timber_deficit * material_parameters_.wood_per_timber) +
+                (tool_deficit * material_parameters_.wood_per_basic_tool);
+            auto stone_total_need =
+                std::max<std::int64_t>(0, targets.stone_target - settlement_mutable->materials.stone.value) +
+                (tool_deficit * material_parameters_.stone_per_basic_tool);
+            auto craft_need = timber_deficit + tool_deficit;
+
+            for (auto& candidate : candidates) {
+                if (candidate.assigned) {
+                    continue;
+                }
+
+                if (wood_total_need > 0 && wood_total_need >= stone_total_need && wood_total_need >= craft_need) {
+                    candidate.person->occupation = Occupation::WoodGatherer;
+                    candidate.assigned = true;
+                    wood_total_need = std::max<std::int64_t>(0, wood_total_need - candidate.labour_capacity);
+                } else if (stone_total_need > 0 && stone_total_need >= craft_need) {
+                    candidate.person->occupation = Occupation::StoneExtractor;
+                    candidate.assigned = true;
+                    stone_total_need = std::max<std::int64_t>(0, stone_total_need - candidate.labour_capacity);
+                } else if (craft_need > 0) {
+                    candidate.person->occupation = Occupation::CraftWorker;
+                    candidate.assigned = true;
+                    craft_need = std::max<std::int64_t>(0, craft_need - candidate.labour_capacity);
+                }
+            }
+        }
+
         for (auto& candidate : candidates) {
             if (!candidate.assigned) {
                 candidate.person->occupation = Occupation::None;
@@ -1842,6 +2290,9 @@ void Simulation::refresh_labour_aggregates() {
     state_.unallocated_workers = 0;
     state_.cultivators = 0;
     state_.gatherers = 0;
+    state_.wood_gatherers = 0;
+    state_.stone_extractors = 0;
+    state_.craft_workers = 0;
     state_.total_labour_capacity = 0;
     state_.total_labour_demand = 0;
     state_.total_labour_allocated = 0;
@@ -1850,6 +2301,13 @@ void Simulation::refresh_labour_aggregates() {
     state_.gathering_labour_available = 0;
     state_.gathering_labour_allocated = 0;
     state_.labour_shortfall = 0;
+    state_.wood_labour_available = 0;
+    state_.wood_labour_allocated = 0;
+    state_.stone_labour_available = 0;
+    state_.stone_labour_allocated = 0;
+    state_.craft_labour_available = 0;
+    state_.craft_labour_allocated = 0;
+    state_.material_labour_allocated = 0;
 
     std::unordered_map<PersonId, const Person*> person_by_id;
     person_by_id.reserve(state_.people.size());
@@ -1871,6 +2329,18 @@ void Simulation::refresh_labour_aggregates() {
             ++state_.active_workers;
             ++state_.gatherers;
             state_.gathering_labour_available += capacity;
+        } else if (person.occupation == Occupation::WoodGatherer) {
+            ++state_.active_workers;
+            ++state_.wood_gatherers;
+            state_.wood_labour_available += capacity;
+        } else if (person.occupation == Occupation::StoneExtractor) {
+            ++state_.active_workers;
+            ++state_.stone_extractors;
+            state_.stone_labour_available += capacity;
+        } else if (person.occupation == Occupation::CraftWorker) {
+            ++state_.active_workers;
+            ++state_.craft_workers;
+            state_.craft_labour_available += capacity;
         } else {
             ++state_.unallocated_workers;
         }
@@ -1942,6 +2412,10 @@ void Simulation::refresh_labour_aggregates() {
 
     state_.total_labour_allocated = state_.cultivation_labour_allocated + state_.gathering_labour_allocated;
     state_.labour_shortfall = std::max<std::int64_t>(0, state_.total_labour_demand - state_.total_labour_allocated);
+    state_.material_labour_allocated =
+        state_.wood_labour_allocated + state_.stone_labour_allocated + state_.craft_labour_allocated;
+    state_.material_labour_shortfall =
+        std::max<std::int64_t>(0, state_.material_labour_demand - state_.material_labour_allocated);
 }
 
 void Simulation::process_mortality(const std::uint64_t demographic_year) {
@@ -2121,6 +2595,13 @@ void Simulation::refresh_environment_aggregates() noexcept {
     state_.total_wild_food_stock = 0;
     state_.total_wild_food_harvested = 0;
     state_.total_wild_food_regenerated = 0;
+    state_.total_wood_capacity = 0;
+    state_.total_wood_stock = 0;
+    state_.total_stone_capacity = 0;
+    state_.total_stone_remaining = 0;
+    state_.total_wood_harvested = 0;
+    state_.total_wood_regenerated = 0;
+    state_.total_stone_extracted = 0;
 
     for (const auto& region : state_.regions) {
         state_.total_productive_capacity_per_day += region.productive_capacity_per_day;
@@ -2128,6 +2609,31 @@ void Simulation::refresh_environment_aggregates() noexcept {
         state_.total_wild_food_stock += region.wild_food_stock;
         state_.total_wild_food_harvested += region.cumulative_wild_food_harvested;
         state_.total_wild_food_regenerated += region.cumulative_wild_food_regenerated;
+        state_.total_wood_capacity += region.wood_capacity;
+        state_.total_wood_stock += region.wood_stock;
+        state_.total_stone_capacity += region.stone_capacity;
+        state_.total_stone_remaining += region.stone_remaining;
+        state_.total_wood_harvested += region.cumulative_wood_harvested;
+        state_.total_wood_regenerated += region.cumulative_wood_regenerated;
+        state_.total_stone_extracted += region.cumulative_stone_extracted;
+    }
+}
+
+void Simulation::refresh_material_aggregates() noexcept {
+    state_.total_wood_inventory = 0;
+    state_.total_stone_inventory = 0;
+    state_.total_timber_inventory = 0;
+    state_.total_basic_tool_inventory = 0;
+    state_.total_timber_produced = 0;
+    state_.total_basic_tool_produced = 0;
+
+    for (const auto& settlement : state_.settlements) {
+        state_.total_wood_inventory += settlement.materials.wood.value;
+        state_.total_stone_inventory += settlement.materials.stone.value;
+        state_.total_timber_inventory += settlement.materials.timber.value;
+        state_.total_basic_tool_inventory += settlement.materials.basic_tool.value;
+        state_.total_timber_produced += settlement.cumulative_timber_produced;
+        state_.total_basic_tool_produced += settlement.cumulative_basic_tool_produced;
     }
 }
 

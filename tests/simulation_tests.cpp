@@ -407,7 +407,7 @@ void verify_resource_invariants(const universe::WorldState& state, const std::in
         state.gathering_labour_allocated <= state.gathering_labour_available,
         "gathering allocated labour must not exceed available gathering labour");
     require(
-        state.active_workers == state.cultivators + state.gatherers,
+        state.active_workers == state.cultivators + state.gatherers + state.wood_gatherers + state.stone_extractors + state.craft_workers,
         "active workers must equal productive occupation totals");
     require(
         state.eligible_workers == state.active_workers + state.unallocated_workers,
@@ -415,6 +415,27 @@ void verify_resource_invariants(const universe::WorldState& state, const std::in
     require(
         state.labour_shortfall == std::max<std::int64_t>(0, state.total_labour_demand - state.total_labour_allocated),
         "labour shortfall must match demand minus allocated labour");
+
+    require(state.total_wood_capacity >= 0, "total wood capacity must be non-negative");
+    require(state.total_wood_stock >= 0, "total wood stock must be non-negative");
+    require(state.total_stone_capacity >= 0, "total stone capacity must be non-negative");
+    require(state.total_stone_remaining >= 0, "total stone remaining must be non-negative");
+    require(state.total_wood_stock <= state.total_wood_capacity, "total wood stock must not exceed capacity");
+    require(state.total_stone_remaining <= state.total_stone_capacity, "total stone remaining must not exceed capacity");
+    require(state.total_wood_inventory >= 0, "total wood inventory must be non-negative");
+    require(state.total_stone_inventory >= 0, "total stone inventory must be non-negative");
+    require(state.total_timber_inventory >= 0, "total timber inventory must be non-negative");
+    require(state.total_basic_tool_inventory >= 0, "total basic tool inventory must be non-negative");
+    require(state.material_labour_demand >= 0, "material labour demand must be non-negative");
+    require(state.material_labour_allocated >= 0, "material labour allocated must be non-negative");
+    require(state.material_labour_shortfall >= 0, "material labour shortfall must be non-negative");
+    require(
+        state.material_labour_allocated ==
+            state.wood_labour_allocated + state.stone_labour_allocated + state.craft_labour_allocated,
+        "material allocated labour must equal specialized allocations");
+    require(
+        state.material_labour_shortfall == std::max<std::int64_t>(0, state.material_labour_demand - state.material_labour_allocated),
+        "material labour shortfall must match demand minus allocated labour");
 
     verify_settlement_invariants(state);
 }
@@ -504,6 +525,9 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
     require(lhs.unallocated_workers == rhs.unallocated_workers, context);
     require(lhs.cultivators == rhs.cultivators, context);
     require(lhs.gatherers == rhs.gatherers, context);
+    require(lhs.wood_gatherers == rhs.wood_gatherers, context);
+    require(lhs.stone_extractors == rhs.stone_extractors, context);
+    require(lhs.craft_workers == rhs.craft_workers, context);
     require(lhs.total_labour_capacity == rhs.total_labour_capacity, context);
     require(lhs.total_labour_demand == rhs.total_labour_demand, context);
     require(lhs.total_labour_allocated == rhs.total_labour_allocated, context);
@@ -512,6 +536,29 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
     require(lhs.gathering_labour_available == rhs.gathering_labour_available, context);
     require(lhs.gathering_labour_allocated == rhs.gathering_labour_allocated, context);
     require(lhs.labour_shortfall == rhs.labour_shortfall, context);
+    require(lhs.total_wood_capacity == rhs.total_wood_capacity, context);
+    require(lhs.total_wood_stock == rhs.total_wood_stock, context);
+    require(lhs.total_stone_capacity == rhs.total_stone_capacity, context);
+    require(lhs.total_stone_remaining == rhs.total_stone_remaining, context);
+    require(lhs.total_wood_harvested == rhs.total_wood_harvested, context);
+    require(lhs.total_wood_regenerated == rhs.total_wood_regenerated, context);
+    require(lhs.total_stone_extracted == rhs.total_stone_extracted, context);
+    require(lhs.total_wood_inventory == rhs.total_wood_inventory, context);
+    require(lhs.total_stone_inventory == rhs.total_stone_inventory, context);
+    require(lhs.total_timber_inventory == rhs.total_timber_inventory, context);
+    require(lhs.total_basic_tool_inventory == rhs.total_basic_tool_inventory, context);
+    require(lhs.total_timber_produced == rhs.total_timber_produced, context);
+    require(lhs.total_basic_tool_produced == rhs.total_basic_tool_produced, context);
+    require(lhs.wood_labour_available == rhs.wood_labour_available, context);
+    require(lhs.wood_labour_allocated == rhs.wood_labour_allocated, context);
+    require(lhs.stone_labour_available == rhs.stone_labour_available, context);
+    require(lhs.stone_labour_allocated == rhs.stone_labour_allocated, context);
+    require(lhs.craft_labour_available == rhs.craft_labour_available, context);
+    require(lhs.craft_labour_allocated == rhs.craft_labour_allocated, context);
+    require(lhs.material_labour_demand == rhs.material_labour_demand, context);
+    require(lhs.material_labour_allocated == rhs.material_labour_allocated, context);
+    require(lhs.material_labour_shortfall == rhs.material_labour_shortfall, context);
+    require(lhs.material_production_shortfall == rhs.material_production_shortfall, context);
     require(lhs.people.size() == rhs.people.size(), context);
     require(lhs.households.size() == rhs.households.size(), context);
     require(lhs.regions.size() == rhs.regions.size(), context);
@@ -568,6 +615,14 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
         require(a.wild_food_harvest_limit_per_day == b.wild_food_harvest_limit_per_day, context);
         require(a.cumulative_wild_food_harvested == b.cumulative_wild_food_harvested, context);
         require(a.cumulative_wild_food_regenerated == b.cumulative_wild_food_regenerated, context);
+        require(a.wood_capacity == b.wood_capacity, context);
+        require(a.wood_stock == b.wood_stock, context);
+        require(a.wood_regeneration_per_day == b.wood_regeneration_per_day, context);
+        require(a.cumulative_wood_harvested == b.cumulative_wood_harvested, context);
+        require(a.cumulative_wood_regenerated == b.cumulative_wood_regenerated, context);
+        require(a.stone_capacity == b.stone_capacity, context);
+        require(a.stone_remaining == b.stone_remaining, context);
+        require(a.cumulative_stone_extracted == b.cumulative_stone_extracted, context);
     }
 
     for (std::size_t i = 0; i < lhs.settlements.size(); ++i) {
@@ -577,6 +632,14 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
         require(a.region_id == b.region_id, context);
         require(a.active == b.active, context);
         require(a.access_share_points == b.access_share_points, context);
+        require(a.materials.wood.value == b.materials.wood.value, context);
+        require(a.materials.stone.value == b.materials.stone.value, context);
+        require(a.materials.timber.value == b.materials.timber.value, context);
+        require(a.materials.basic_tool.value == b.materials.basic_tool.value, context);
+        require(a.cumulative_wood_extracted == b.cumulative_wood_extracted, context);
+        require(a.cumulative_stone_extracted == b.cumulative_stone_extracted, context);
+        require(a.cumulative_timber_produced == b.cumulative_timber_produced, context);
+        require(a.cumulative_basic_tool_produced == b.cumulative_basic_tool_produced, context);
     }
 
     for (std::size_t i = 0; i < lhs.event_log.size(); ++i) {
@@ -1501,7 +1564,7 @@ int main() {
         require_snapshot_load_fails(bad_magic, universe::SnapshotErrorCode::InvalidMagic, "bad magic must be rejected");
 
         auto bad_version = clone_bytes(valid);
-        bad_version[4] = std::byte{0x07};
+        bad_version[4] = std::byte{0x08};
         bad_version[5] = std::byte{0x00};
         require_snapshot_load_fails(
             bad_version,
@@ -1523,8 +1586,8 @@ int main() {
             "payload corruption must be rejected via checksum");
 
         constexpr std::size_t header_size = 24U;
-        constexpr std::size_t payload_people_count_offset = 362U;
-        constexpr std::size_t payload_first_person_offset = 370U;
+        constexpr std::size_t payload_people_count_offset = 570U;
+        constexpr std::size_t payload_first_person_offset = 578U;
         constexpr std::size_t payload_person_record_size = 41U;
         constexpr std::size_t person_sex_offset_in_record = 16U;
         constexpr std::size_t person_household_offset_in_record = 18U;
@@ -1539,7 +1602,7 @@ int main() {
             "invalid enum values must be rejected");
 
         auto invalid_occupation_enum = clone_bytes(valid);
-        invalid_occupation_enum[header_size + payload_first_person_offset + person_occupation_offset_in_record] = std::byte{4};
+        invalid_occupation_enum[header_size + payload_first_person_offset + person_occupation_offset_in_record] = std::byte{9};
         refresh_snapshot_payload_hash(invalid_occupation_enum);
         require_snapshot_load_fails(
             invalid_occupation_enum,

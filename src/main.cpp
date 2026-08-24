@@ -27,6 +27,8 @@ void print_usage(const char* executable) {
     std::cout << "Usage: " << executable
               << " [--seed N] [--years N] [--population N] [--dump-events N]"
               << " [--food-scale N] [--initial-food N] [--food-system 0|1]"
+              << " [--materials-system 0|1] [--wood-scale N] [--stone-scale N]"
+              << " [--wood-regen-scale N] [--craft-scale N]"
               << " [--effort-scale N] [--report-interval N]"
               << " [--save PATH] [--load PATH]\n";
 }
@@ -136,6 +138,33 @@ int main(int argc, char** argv) {
         } else if (arg == "--effort-scale") {
             if (!parse_number(value, config.productive_effort_scale_percent)) {
                 std::cerr << "Invalid effort-scale\n";
+                return 2;
+            }
+        } else if (arg == "--materials-system") {
+            std::uint32_t enabled = 0;
+            if (!parse_number(value, enabled) || enabled > 1U) {
+                std::cerr << "Invalid materials-system (expected 0 or 1)\n";
+                return 2;
+            }
+            config.materials_system_enabled = (enabled == 1U);
+        } else if (arg == "--wood-scale") {
+            if (!parse_number(value, config.wood_resource_scale_percent)) {
+                std::cerr << "Invalid wood-scale\n";
+                return 2;
+            }
+        } else if (arg == "--stone-scale") {
+            if (!parse_number(value, config.stone_resource_scale_percent)) {
+                std::cerr << "Invalid stone-scale\n";
+                return 2;
+            }
+        } else if (arg == "--wood-regen-scale") {
+            if (!parse_number(value, config.wood_regeneration_scale_percent)) {
+                std::cerr << "Invalid wood-regen-scale\n";
+                return 2;
+            }
+        } else if (arg == "--craft-scale") {
+            if (!parse_number(value, config.material_crafting_scale_percent)) {
+                std::cerr << "Invalid craft-scale\n";
                 return 2;
             }
         } else if (arg == "--report-interval") {
@@ -441,11 +470,32 @@ int main(int argc, char** argv) {
                       << " cultivation_allocated=" << state.cultivation_labour_allocated
                       << " gathering_available=" << state.gathering_labour_available
                       << " gathering_allocated=" << state.gathering_labour_allocated
+                      << " wood_workers=" << state.wood_gatherers
+                      << " stone_workers=" << state.stone_extractors
+                      << " craft_workers=" << state.craft_workers
+                      << " wood_labour_available=" << state.wood_labour_available
+                      << " wood_labour_allocated=" << state.wood_labour_allocated
+                      << " stone_labour_available=" << state.stone_labour_available
+                      << " stone_labour_allocated=" << state.stone_labour_allocated
+                      << " craft_labour_available=" << state.craft_labour_available
+                      << " craft_labour_allocated=" << state.craft_labour_allocated
+                      << " material_labour_demand=" << state.material_labour_demand
+                      << " material_labour_allocated=" << state.material_labour_allocated
+                      << " material_labour_shortfall=" << state.material_labour_shortfall
+                      << " material_shortfall=" << state.material_production_shortfall
                       << " events_total=" << state.event_log.size()
                       << " food_stored=" << state.total_food_stored
                       << " food_produced=" << state.total_food_produced
                       << " food_consumed=" << state.total_food_consumed
                       << " unmet_food=" << state.total_unmet_food
+                      << " wood_stock=" << state.total_wood_stock
+                      << " wood_capacity=" << state.total_wood_capacity
+                      << " stone_remaining=" << state.total_stone_remaining
+                      << " stone_capacity=" << state.total_stone_capacity
+                      << " wood_inventory=" << state.total_wood_inventory
+                      << " stone_inventory=" << state.total_stone_inventory
+                      << " timber_inventory=" << state.total_timber_inventory
+                      << " basic_tool_inventory=" << state.total_basic_tool_inventory
                       << " wild_stock=" << state.total_wild_food_stock
                       << " wild_capacity=" << state.total_wild_food_capacity
                       << " productive_capacity_per_day=" << state.total_productive_capacity_per_day

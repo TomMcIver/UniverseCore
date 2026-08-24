@@ -269,4 +269,17 @@ std::int64_t person_labour_capacity_units(
     return std::max<std::int64_t>(capacity, 1);
 }
 
+bool checked_sub_nonnegative_i64(const std::int64_t lhs, const std::int64_t rhs, std::int64_t& result) noexcept {
+    if (lhs < 0 || rhs < 0 || rhs > lhs) {
+        return false;
+    }
+
+    result = lhs - rhs;
+    return true;
+}
+
+std::int64_t safe_min3_i64(const std::int64_t a, const std::int64_t b, const std::int64_t c) noexcept {
+    return std::min(a, std::min(b, c));
+}
+
 }  // namespace universe

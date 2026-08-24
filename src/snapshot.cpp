@@ -212,6 +212,9 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
     payload.write_u64(simulation.state_.unallocated_workers);
     payload.write_u64(simulation.state_.cultivators);
     payload.write_u64(simulation.state_.gatherers);
+    payload.write_u64(simulation.state_.wood_gatherers);
+    payload.write_u64(simulation.state_.stone_extractors);
+    payload.write_u64(simulation.state_.craft_workers);
     payload.write_i64(simulation.state_.total_labour_capacity);
     payload.write_i64(simulation.state_.total_labour_demand);
     payload.write_i64(simulation.state_.total_labour_allocated);
@@ -220,6 +223,29 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
     payload.write_i64(simulation.state_.gathering_labour_available);
     payload.write_i64(simulation.state_.gathering_labour_allocated);
     payload.write_i64(simulation.state_.labour_shortfall);
+    payload.write_i64(simulation.state_.total_wood_capacity);
+    payload.write_i64(simulation.state_.total_wood_stock);
+    payload.write_i64(simulation.state_.total_stone_capacity);
+    payload.write_i64(simulation.state_.total_stone_remaining);
+    payload.write_i64(simulation.state_.total_wood_harvested);
+    payload.write_i64(simulation.state_.total_wood_regenerated);
+    payload.write_i64(simulation.state_.total_stone_extracted);
+    payload.write_i64(simulation.state_.total_wood_inventory);
+    payload.write_i64(simulation.state_.total_stone_inventory);
+    payload.write_i64(simulation.state_.total_timber_inventory);
+    payload.write_i64(simulation.state_.total_basic_tool_inventory);
+    payload.write_i64(simulation.state_.total_timber_produced);
+    payload.write_i64(simulation.state_.total_basic_tool_produced);
+    payload.write_i64(simulation.state_.wood_labour_available);
+    payload.write_i64(simulation.state_.wood_labour_allocated);
+    payload.write_i64(simulation.state_.stone_labour_available);
+    payload.write_i64(simulation.state_.stone_labour_allocated);
+    payload.write_i64(simulation.state_.craft_labour_available);
+    payload.write_i64(simulation.state_.craft_labour_allocated);
+    payload.write_i64(simulation.state_.material_labour_demand);
+    payload.write_i64(simulation.state_.material_labour_allocated);
+    payload.write_i64(simulation.state_.material_labour_shortfall);
+    payload.write_i64(simulation.state_.material_production_shortfall);
     payload.write_u64(simulation.next_person_id_);
     payload.write_u64(simulation.next_household_id_);
     payload.write_u64(simulation.next_region_id_);
@@ -367,6 +393,38 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
         }
     }
 
+    payload.write_bool(simulation.config_.materials_system_enabled);
+    payload.write_u32(simulation.config_.wood_resource_scale_percent);
+    payload.write_u32(simulation.config_.stone_resource_scale_percent);
+    payload.write_u32(simulation.config_.wood_regeneration_scale_percent);
+    payload.write_u32(simulation.config_.material_crafting_scale_percent);
+
+    payload.write_u64(static_cast<std::uint64_t>(region_order.size()));
+    for (const auto* region : region_order) {
+        payload.write_u64(region->id);
+        payload.write_i64(region->wood_capacity);
+        payload.write_i64(region->wood_stock);
+        payload.write_i64(region->wood_regeneration_per_day);
+        payload.write_i64(region->cumulative_wood_harvested);
+        payload.write_i64(region->cumulative_wood_regenerated);
+        payload.write_i64(region->stone_capacity);
+        payload.write_i64(region->stone_remaining);
+        payload.write_i64(region->cumulative_stone_extracted);
+    }
+
+    payload.write_u64(static_cast<std::uint64_t>(settlement_order.size()));
+    for (const auto* settlement : settlement_order) {
+        payload.write_u64(settlement->id);
+        payload.write_i64(settlement->materials.wood.value);
+        payload.write_i64(settlement->materials.stone.value);
+        payload.write_i64(settlement->materials.timber.value);
+        payload.write_i64(settlement->materials.basic_tool.value);
+        payload.write_i64(settlement->cumulative_wood_extracted);
+        payload.write_i64(settlement->cumulative_stone_extracted);
+        payload.write_i64(settlement->cumulative_timber_produced);
+        payload.write_i64(settlement->cumulative_basic_tool_produced);
+    }
+
     auto payload_bytes = payload.take();
     const auto payload_hash = fnv1a64(payload_bytes);
 
@@ -461,6 +519,9 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         !payload_reader.read_u64(restored_state.unallocated_workers) ||
         !payload_reader.read_u64(restored_state.cultivators) ||
         !payload_reader.read_u64(restored_state.gatherers) ||
+        !payload_reader.read_u64(restored_state.wood_gatherers) ||
+        !payload_reader.read_u64(restored_state.stone_extractors) ||
+        !payload_reader.read_u64(restored_state.craft_workers) ||
         !payload_reader.read_i64(restored_state.total_labour_capacity) ||
         !payload_reader.read_i64(restored_state.total_labour_demand) ||
         !payload_reader.read_i64(restored_state.total_labour_allocated) ||
@@ -469,6 +530,29 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         !payload_reader.read_i64(restored_state.gathering_labour_available) ||
         !payload_reader.read_i64(restored_state.gathering_labour_allocated) ||
         !payload_reader.read_i64(restored_state.labour_shortfall) ||
+        !payload_reader.read_i64(restored_state.total_wood_capacity) ||
+        !payload_reader.read_i64(restored_state.total_wood_stock) ||
+        !payload_reader.read_i64(restored_state.total_stone_capacity) ||
+        !payload_reader.read_i64(restored_state.total_stone_remaining) ||
+        !payload_reader.read_i64(restored_state.total_wood_harvested) ||
+        !payload_reader.read_i64(restored_state.total_wood_regenerated) ||
+        !payload_reader.read_i64(restored_state.total_stone_extracted) ||
+        !payload_reader.read_i64(restored_state.total_wood_inventory) ||
+        !payload_reader.read_i64(restored_state.total_stone_inventory) ||
+        !payload_reader.read_i64(restored_state.total_timber_inventory) ||
+        !payload_reader.read_i64(restored_state.total_basic_tool_inventory) ||
+        !payload_reader.read_i64(restored_state.total_timber_produced) ||
+        !payload_reader.read_i64(restored_state.total_basic_tool_produced) ||
+        !payload_reader.read_i64(restored_state.wood_labour_available) ||
+        !payload_reader.read_i64(restored_state.wood_labour_allocated) ||
+        !payload_reader.read_i64(restored_state.stone_labour_available) ||
+        !payload_reader.read_i64(restored_state.stone_labour_allocated) ||
+        !payload_reader.read_i64(restored_state.craft_labour_available) ||
+        !payload_reader.read_i64(restored_state.craft_labour_allocated) ||
+        !payload_reader.read_i64(restored_state.material_labour_demand) ||
+        !payload_reader.read_i64(restored_state.material_labour_allocated) ||
+        !payload_reader.read_i64(restored_state.material_labour_shortfall) ||
+        !payload_reader.read_i64(restored_state.material_production_shortfall) ||
         !payload_reader.read_u64(next_person_id) ||
         !payload_reader.read_u64(next_household_id) ||
         !payload_reader.read_u64(next_region_id) ||
@@ -560,7 +644,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         person.nutrition_points = static_cast<std::int32_t>(nutrition_points);
         person.health_points = static_cast<std::int32_t>(health_points);
 
-        if (occupation_raw > static_cast<std::uint8_t>(Occupation::WildFoodGatherer)) {
+        if (occupation_raw > static_cast<std::uint8_t>(Occupation::CraftWorker)) {
             return load_error(SnapshotErrorCode::InvalidEnum, "Snapshot person occupation enum is invalid");
         }
         person.occupation = static_cast<Occupation>(occupation_raw);
@@ -813,6 +897,148 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         restored_state.event_log.push_back(event);
     }
 
+    if (!payload_reader.read_bool(restored_config.materials_system_enabled) ||
+        !payload_reader.read_u32(restored_config.wood_resource_scale_percent) ||
+        !payload_reader.read_u32(restored_config.stone_resource_scale_percent) ||
+        !payload_reader.read_u32(restored_config.wood_regeneration_scale_percent) ||
+        !payload_reader.read_u32(restored_config.material_crafting_scale_percent)) {
+        return load_error(SnapshotErrorCode::TruncatedData, "Snapshot material config section is truncated");
+    }
+
+    std::uint64_t region_material_count = 0;
+    if (!payload_reader.read_u64(region_material_count)) {
+        return load_error(SnapshotErrorCode::TruncatedData, "Snapshot region material section is truncated");
+    }
+    if (region_material_count != restored_state.regions.size()) {
+        return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot region material section count mismatch");
+    }
+
+    std::unordered_map<RegionId, RegionEnvironmentState*> region_mutable_by_id;
+    region_mutable_by_id.reserve(restored_state.regions.size());
+    for (auto& region : restored_state.regions) {
+        region_mutable_by_id.emplace(region.id, &region);
+    }
+
+    std::unordered_set<RegionId> region_material_ids;
+    for (std::uint64_t i = 0; i < region_material_count; ++i) {
+        RegionId region_id = 0;
+        std::int64_t wood_capacity = 0;
+        std::int64_t wood_stock = 0;
+        std::int64_t wood_regeneration_per_day = 0;
+        std::int64_t cumulative_wood_harvested = 0;
+        std::int64_t cumulative_wood_regenerated = 0;
+        std::int64_t stone_capacity = 0;
+        std::int64_t stone_remaining = 0;
+        std::int64_t cumulative_stone_extracted = 0;
+
+        if (!payload_reader.read_u64(region_id) ||
+            !payload_reader.read_i64(wood_capacity) ||
+            !payload_reader.read_i64(wood_stock) ||
+            !payload_reader.read_i64(wood_regeneration_per_day) ||
+            !payload_reader.read_i64(cumulative_wood_harvested) ||
+            !payload_reader.read_i64(cumulative_wood_regenerated) ||
+            !payload_reader.read_i64(stone_capacity) ||
+            !payload_reader.read_i64(stone_remaining) ||
+            !payload_reader.read_i64(cumulative_stone_extracted)) {
+            return load_error(SnapshotErrorCode::TruncatedData, "Snapshot region material record is truncated");
+        }
+
+        if (!region_material_ids.insert(region_id).second) {
+            return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot region material section has duplicate region ids");
+        }
+
+        const auto region_it = region_mutable_by_id.find(region_id);
+        if (region_it == region_mutable_by_id.end()) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot region material section references unknown region");
+        }
+
+        if (wood_capacity < 0 || wood_stock < 0 || wood_regeneration_per_day < 0 ||
+            cumulative_wood_harvested < 0 || cumulative_wood_regenerated < 0 ||
+            stone_capacity < 0 || stone_remaining < 0 || cumulative_stone_extracted < 0) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot region material values must be non-negative");
+        }
+        if (wood_stock > wood_capacity) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot wood stock cannot exceed capacity");
+        }
+        if (stone_remaining > stone_capacity) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot stone remaining cannot exceed capacity");
+        }
+
+        auto* region = region_it->second;
+        region->wood_capacity = wood_capacity;
+        region->wood_stock = wood_stock;
+        region->wood_regeneration_per_day = wood_regeneration_per_day;
+        region->cumulative_wood_harvested = cumulative_wood_harvested;
+        region->cumulative_wood_regenerated = cumulative_wood_regenerated;
+        region->stone_capacity = stone_capacity;
+        region->stone_remaining = stone_remaining;
+        region->cumulative_stone_extracted = cumulative_stone_extracted;
+    }
+
+    std::uint64_t settlement_material_count = 0;
+    if (!payload_reader.read_u64(settlement_material_count)) {
+        return load_error(SnapshotErrorCode::TruncatedData, "Snapshot settlement material section is truncated");
+    }
+    if (settlement_material_count != restored_state.settlements.size()) {
+        return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot settlement material section count mismatch");
+    }
+
+    std::unordered_map<SettlementId, Settlement*> settlement_mutable_by_id;
+    settlement_mutable_by_id.reserve(restored_state.settlements.size());
+    for (auto& settlement : restored_state.settlements) {
+        settlement_mutable_by_id.emplace(settlement.id, &settlement);
+    }
+
+    std::unordered_set<SettlementId> settlement_material_ids;
+    for (std::uint64_t i = 0; i < settlement_material_count; ++i) {
+        SettlementId settlement_id = 0;
+        std::int64_t wood = 0;
+        std::int64_t stone = 0;
+        std::int64_t timber = 0;
+        std::int64_t basic_tool = 0;
+        std::int64_t cumulative_wood_extracted = 0;
+        std::int64_t cumulative_stone_extracted = 0;
+        std::int64_t cumulative_timber_produced = 0;
+        std::int64_t cumulative_basic_tool_produced = 0;
+
+        if (!payload_reader.read_u64(settlement_id) ||
+            !payload_reader.read_i64(wood) ||
+            !payload_reader.read_i64(stone) ||
+            !payload_reader.read_i64(timber) ||
+            !payload_reader.read_i64(basic_tool) ||
+            !payload_reader.read_i64(cumulative_wood_extracted) ||
+            !payload_reader.read_i64(cumulative_stone_extracted) ||
+            !payload_reader.read_i64(cumulative_timber_produced) ||
+            !payload_reader.read_i64(cumulative_basic_tool_produced)) {
+            return load_error(SnapshotErrorCode::TruncatedData, "Snapshot settlement material record is truncated");
+        }
+
+        if (!settlement_material_ids.insert(settlement_id).second) {
+            return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot settlement material section has duplicate settlement ids");
+        }
+
+        const auto settlement_it = settlement_mutable_by_id.find(settlement_id);
+        if (settlement_it == settlement_mutable_by_id.end()) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot settlement material section references unknown settlement");
+        }
+
+        if (wood < 0 || stone < 0 || timber < 0 || basic_tool < 0 ||
+            cumulative_wood_extracted < 0 || cumulative_stone_extracted < 0 ||
+            cumulative_timber_produced < 0 || cumulative_basic_tool_produced < 0) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot settlement material values must be non-negative");
+        }
+
+        auto* settlement = settlement_it->second;
+        settlement->materials.wood.value = wood;
+        settlement->materials.stone.value = stone;
+        settlement->materials.timber.value = timber;
+        settlement->materials.basic_tool.value = basic_tool;
+        settlement->cumulative_wood_extracted = cumulative_wood_extracted;
+        settlement->cumulative_stone_extracted = cumulative_stone_extracted;
+        settlement->cumulative_timber_produced = cumulative_timber_produced;
+        settlement->cumulative_basic_tool_produced = cumulative_basic_tool_produced;
+    }
+
     if (!payload_reader.fully_consumed()) {
         return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot payload has trailing undecoded bytes");
     }
@@ -873,6 +1099,12 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     if (restored_config.productive_effort_scale_percent > 10'000U) {
         return load_error(SnapshotErrorCode::InvalidState, "Snapshot productive effort scale is out of range");
     }
+    if (restored_config.wood_resource_scale_percent > 10'000U ||
+        restored_config.stone_resource_scale_percent > 10'000U ||
+        restored_config.wood_regeneration_scale_percent > 10'000U ||
+        restored_config.material_crafting_scale_percent > 10'000U) {
+        return load_error(SnapshotErrorCode::InvalidState, "Snapshot material scale configuration is out of range");
+    }
 
     if (restored_state.total_labour_capacity < 0 ||
         restored_state.total_labour_demand < 0 ||
@@ -881,12 +1113,24 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         restored_state.cultivation_labour_allocated < 0 ||
         restored_state.gathering_labour_available < 0 ||
         restored_state.gathering_labour_allocated < 0 ||
-        restored_state.labour_shortfall < 0) {
+        restored_state.labour_shortfall < 0 ||
+        restored_state.wood_labour_available < 0 ||
+        restored_state.wood_labour_allocated < 0 ||
+        restored_state.stone_labour_available < 0 ||
+        restored_state.stone_labour_allocated < 0 ||
+        restored_state.craft_labour_available < 0 ||
+        restored_state.craft_labour_allocated < 0 ||
+        restored_state.material_labour_demand < 0 ||
+        restored_state.material_labour_allocated < 0 ||
+        restored_state.material_labour_shortfall < 0 ||
+        restored_state.material_production_shortfall < 0 ||
+        restored_state.total_wood_inventory < 0 ||
+        restored_state.total_stone_inventory < 0 ||
+        restored_state.total_timber_inventory < 0 ||
+        restored_state.total_basic_tool_inventory < 0 ||
+        restored_state.total_timber_produced < 0 ||
+        restored_state.total_basic_tool_produced < 0) {
         return load_error(SnapshotErrorCode::InvalidState, "Snapshot labour fields must be non-negative");
-    }
-
-    if (restored_state.active_workers != (restored_state.cultivators + restored_state.gatherers)) {
-        return load_error(SnapshotErrorCode::InvalidState, "Snapshot active worker count must equal occupation worker counts");
     }
 
     if (restored_state.eligible_workers != (restored_state.active_workers + restored_state.unallocated_workers)) {
@@ -921,9 +1165,15 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     std::uint64_t recomputed_unallocated_workers = 0;
     std::uint64_t recomputed_cultivators = 0;
     std::uint64_t recomputed_gatherers = 0;
+    std::uint64_t recomputed_wood_gatherers = 0;
+    std::uint64_t recomputed_stone_extractors = 0;
+    std::uint64_t recomputed_craft_workers = 0;
     std::int64_t recomputed_total_capacity = 0;
     std::int64_t recomputed_cultivation_available = 0;
     std::int64_t recomputed_gathering_available = 0;
+    std::int64_t recomputed_wood_available = 0;
+    std::int64_t recomputed_stone_available = 0;
+    std::int64_t recomputed_craft_available = 0;
 
     const auto capacity_parameters = FoodModelParameters{};
     for (const auto& person : restored_state.people) {
@@ -966,6 +1216,18 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
             ++recomputed_active_workers;
             ++recomputed_gatherers;
             recomputed_gathering_available += labour_capacity;
+        } else if (person.occupation == Occupation::WoodGatherer) {
+            ++recomputed_active_workers;
+            ++recomputed_wood_gatherers;
+            recomputed_wood_available += labour_capacity;
+        } else if (person.occupation == Occupation::StoneExtractor) {
+            ++recomputed_active_workers;
+            ++recomputed_stone_extractors;
+            recomputed_stone_available += labour_capacity;
+        } else if (person.occupation == Occupation::CraftWorker) {
+            ++recomputed_active_workers;
+            ++recomputed_craft_workers;
+            recomputed_craft_available += labour_capacity;
         } else {
             ++recomputed_unallocated_workers;
         }
@@ -981,6 +1243,13 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         restored_state.gathering_labour_available != recomputed_gathering_available) {
         return load_error(SnapshotErrorCode::InvalidState, "Snapshot occupation/labour aggregates are inconsistent");
     }
+
+    restored_state.wood_gatherers = recomputed_wood_gatherers;
+    restored_state.stone_extractors = recomputed_stone_extractors;
+    restored_state.craft_workers = recomputed_craft_workers;
+    restored_state.wood_labour_available = recomputed_wood_available;
+    restored_state.stone_labour_available = recomputed_stone_available;
+    restored_state.craft_labour_available = recomputed_craft_available;
 
     std::unordered_map<HouseholdId, const Household*> household_by_id;
     household_by_id.reserve(restored_state.households.size());
@@ -1202,6 +1471,13 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     std::int64_t total_wild_food_stock = 0;
     std::int64_t total_wild_food_harvested = 0;
     std::int64_t total_wild_food_regenerated = 0;
+    std::int64_t total_wood_capacity = 0;
+    std::int64_t total_wood_stock = 0;
+    std::int64_t total_stone_capacity = 0;
+    std::int64_t total_stone_remaining = 0;
+    std::int64_t total_wood_harvested = 0;
+    std::int64_t total_wood_regenerated = 0;
+    std::int64_t total_stone_extracted = 0;
 
     for (const auto& region : restored_state.regions) {
         total_productive_capacity_per_day += region.productive_capacity_per_day;
@@ -1209,6 +1485,13 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         total_wild_food_stock += region.wild_food_stock;
         total_wild_food_harvested += region.cumulative_wild_food_harvested;
         total_wild_food_regenerated += region.cumulative_wild_food_regenerated;
+        total_wood_capacity += region.wood_capacity;
+        total_wood_stock += region.wood_stock;
+        total_stone_capacity += region.stone_capacity;
+        total_stone_remaining += region.stone_remaining;
+        total_wood_harvested += region.cumulative_wood_harvested;
+        total_wood_regenerated += region.cumulative_wood_regenerated;
+        total_stone_extracted += region.cumulative_stone_extracted;
     }
 
     if (restored_state.total_productive_capacity_per_day != total_productive_capacity_per_day ||
@@ -1218,6 +1501,37 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         restored_state.total_wild_food_regenerated != total_wild_food_regenerated) {
         return load_error(SnapshotErrorCode::InvalidState, "Snapshot environment aggregate totals are inconsistent");
     }
+
+    restored_state.total_wood_capacity = total_wood_capacity;
+    restored_state.total_wood_stock = total_wood_stock;
+    restored_state.total_stone_capacity = total_stone_capacity;
+    restored_state.total_stone_remaining = total_stone_remaining;
+    restored_state.total_wood_harvested = total_wood_harvested;
+    restored_state.total_wood_regenerated = total_wood_regenerated;
+    restored_state.total_stone_extracted = total_stone_extracted;
+
+    std::int64_t total_wood_inventory = 0;
+    std::int64_t total_stone_inventory = 0;
+    std::int64_t total_timber_inventory = 0;
+    std::int64_t total_basic_tool_inventory = 0;
+    std::int64_t total_timber_produced = 0;
+    std::int64_t total_basic_tool_produced = 0;
+
+    for (const auto& settlement : restored_state.settlements) {
+        total_wood_inventory += settlement.materials.wood.value;
+        total_stone_inventory += settlement.materials.stone.value;
+        total_timber_inventory += settlement.materials.timber.value;
+        total_basic_tool_inventory += settlement.materials.basic_tool.value;
+        total_timber_produced += settlement.cumulative_timber_produced;
+        total_basic_tool_produced += settlement.cumulative_basic_tool_produced;
+    }
+
+    restored_state.total_wood_inventory = total_wood_inventory;
+    restored_state.total_stone_inventory = total_stone_inventory;
+    restored_state.total_timber_inventory = total_timber_inventory;
+    restored_state.total_basic_tool_inventory = total_basic_tool_inventory;
+    restored_state.total_timber_produced = total_timber_produced;
+    restored_state.total_basic_tool_produced = total_basic_tool_produced;
 
     std::int64_t total_food_stored = 0;
     std::int64_t total_food_produced = 0;

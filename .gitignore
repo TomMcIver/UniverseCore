@@ -19,4 +19,5 @@ Thumbs.db
 # Generated simulation outputs
 *.simstate
 *.snapshot
+*.ucore
 *.log

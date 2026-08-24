@@ -28,6 +28,9 @@ enum class Occupation : std::uint8_t {
     None = 0,
     SubsistenceCultivator = 1,
     WildFoodGatherer = 2,
+    WoodGatherer = 3,
+    StoneExtractor = 4,
+    CraftWorker = 5,
 };
 
 struct Person {
@@ -57,6 +60,11 @@ struct Settlement {
     RegionId region_id{};
     bool active{true};
     std::uint32_t access_share_points{};
+    SettlementMaterialInventory materials{};
+    std::int64_t cumulative_wood_extracted{};
+    std::int64_t cumulative_stone_extracted{};
+    std::int64_t cumulative_timber_produced{};
+    std::int64_t cumulative_basic_tool_produced{};
 };
 
 enum class EnvironmentClass : std::uint8_t {
@@ -77,6 +85,14 @@ struct RegionEnvironmentState {
     std::int64_t wild_food_harvest_limit_per_day{};
     std::int64_t cumulative_wild_food_harvested{};
     std::int64_t cumulative_wild_food_regenerated{};
+    std::int64_t wood_capacity{};
+    std::int64_t wood_stock{};
+    std::int64_t wood_regeneration_per_day{};
+    std::int64_t cumulative_wood_harvested{};
+    std::int64_t cumulative_wood_regenerated{};
+    std::int64_t stone_capacity{};
+    std::int64_t stone_remaining{};
+    std::int64_t cumulative_stone_extracted{};
 };
 
 enum class EventType : std::uint8_t {
@@ -104,6 +120,11 @@ struct SimulationConfig {
     std::uint64_t initial_region_count{4};
     std::int64_t base_region_area_units{120};
     std::uint32_t productive_effort_scale_percent{100};
+    bool materials_system_enabled{true};
+    std::uint32_t wood_resource_scale_percent{100};
+    std::uint32_t stone_resource_scale_percent{100};
+    std::uint32_t wood_regeneration_scale_percent{100};
+    std::uint32_t material_crafting_scale_percent{100};
 };
 
 struct WorldState {
@@ -129,6 +150,9 @@ struct WorldState {
     std::uint64_t unallocated_workers{};
     std::uint64_t cultivators{};
     std::uint64_t gatherers{};
+    std::uint64_t wood_gatherers{};
+    std::uint64_t stone_extractors{};
+    std::uint64_t craft_workers{};
     std::int64_t total_labour_capacity{};
     std::int64_t total_labour_demand{};
     std::int64_t total_labour_allocated{};
@@ -137,6 +161,29 @@ struct WorldState {
     std::int64_t gathering_labour_available{};
     std::int64_t gathering_labour_allocated{};
     std::int64_t labour_shortfall{};
+    std::int64_t total_wood_capacity{};
+    std::int64_t total_wood_stock{};
+    std::int64_t total_stone_capacity{};
+    std::int64_t total_stone_remaining{};
+    std::int64_t total_wood_harvested{};
+    std::int64_t total_wood_regenerated{};
+    std::int64_t total_stone_extracted{};
+    std::int64_t total_wood_inventory{};
+    std::int64_t total_stone_inventory{};
+    std::int64_t total_timber_inventory{};
+    std::int64_t total_basic_tool_inventory{};
+    std::int64_t total_timber_produced{};
+    std::int64_t total_basic_tool_produced{};
+    std::int64_t wood_labour_available{};
+    std::int64_t wood_labour_allocated{};
+    std::int64_t stone_labour_available{};
+    std::int64_t stone_labour_allocated{};
+    std::int64_t craft_labour_available{};
+    std::int64_t craft_labour_allocated{};
+    std::int64_t material_labour_demand{};
+    std::int64_t material_labour_allocated{};
+    std::int64_t material_labour_shortfall{};
+    std::int64_t material_production_shortfall{};
     std::vector<Person> people{};
     std::vector<Household> households{};
     std::vector<RegionEnvironmentState> regions{};
@@ -188,6 +235,7 @@ private:
     void run_scheduled_systems_until(SimulationTime target_time);
     void process_demography_period(std::uint64_t demographic_year);
     void process_food_period(std::uint64_t food_period);
+    void process_materials_period(std::uint64_t food_period);
     void process_occupation_reassignment(std::uint64_t demographic_year);
     void clear_occupations_for_extinct_or_invalid_households();
     void refresh_labour_aggregates();
@@ -195,6 +243,7 @@ private:
     void remove_from_household(HouseholdId household_id, PersonId person_id);
     void refresh_food_aggregates() noexcept;
     void refresh_environment_aggregates() noexcept;
+    void refresh_material_aggregates() noexcept;
     void initialize_regions();
     void assign_households_to_regions();
     void initialize_settlements();
@@ -230,6 +279,7 @@ private:
     SimulationDuration food_interval_{days(1)};
     SimulationTime food_next_run_{days(1).ticks};
     FoodModelParameters food_parameters_{};
+    MaterialModelParameters material_parameters_{};
 
     friend class SnapshotCodec;
 };

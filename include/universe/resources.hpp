@@ -6,6 +6,10 @@ namespace universe {
 
 enum class ResourceType : std::uint8_t {
     Food = 0,
+    Wood = 1,
+    Stone = 2,
+    Timber = 3,
+    BasicTool = 4,
 };
 
 struct ResourceAmount {
@@ -32,6 +36,21 @@ struct FoodModelParameters {
     std::int32_t max_person_nutrition_points{1'000};
     std::int32_t min_person_health_points{0};
     std::int32_t max_person_health_points{1'000};
+};
+
+struct MaterialModelParameters {
+    std::int64_t wood_per_timber{2};
+    std::int64_t wood_per_basic_tool{1};
+    std::int64_t stone_per_basic_tool{1};
+    std::int64_t craft_labour_per_timber{1};
+    std::int64_t craft_labour_per_basic_tool{1};
+};
+
+struct SettlementMaterialInventory {
+    ResourceAmount wood{};
+    ResourceAmount stone{};
+    ResourceAmount timber{};
+    ResourceAmount basic_tool{};
 };
 
 [[nodiscard]] bool checked_add_i64(std::int64_t lhs, std::int64_t rhs, std::int64_t& result) noexcept;
@@ -76,5 +95,9 @@ struct FoodModelParameters {
     std::int32_t health_points,
     const FoodModelParameters& parameters,
     std::uint32_t labour_scale_percent) noexcept;
+
+[[nodiscard]] bool checked_sub_nonnegative_i64(std::int64_t lhs, std::int64_t rhs, std::int64_t& result) noexcept;
+
+[[nodiscard]] std::int64_t safe_min3_i64(std::int64_t a, std::int64_t b, std::int64_t c) noexcept;
 
 }  // namespace universe

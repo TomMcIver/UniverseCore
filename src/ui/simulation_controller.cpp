@@ -186,10 +186,31 @@ SimulationSummary SimulationController::summary() const noexcept {
         .unallocated_workers = state.unallocated_workers,
         .cultivators = state.cultivators,
         .gatherers = state.gatherers,
+        .wood_gatherers = state.wood_gatherers,
+        .stone_extractors = state.stone_extractors,
+        .craft_workers = state.craft_workers,
         .cultivation_labour_available = state.cultivation_labour_available,
         .cultivation_labour_allocated = state.cultivation_labour_allocated,
         .gathering_labour_available = state.gathering_labour_available,
         .gathering_labour_allocated = state.gathering_labour_allocated,
+        .wood_labour_available = state.wood_labour_available,
+        .wood_labour_allocated = state.wood_labour_allocated,
+        .stone_labour_available = state.stone_labour_available,
+        .stone_labour_allocated = state.stone_labour_allocated,
+        .craft_labour_available = state.craft_labour_available,
+        .craft_labour_allocated = state.craft_labour_allocated,
+        .material_labour_demand = state.material_labour_demand,
+        .material_labour_allocated = state.material_labour_allocated,
+        .material_labour_shortfall = state.material_labour_shortfall,
+        .material_production_shortfall = state.material_production_shortfall,
+        .wood_capacity = state.total_wood_capacity,
+        .wood_stock = state.total_wood_stock,
+        .stone_capacity = state.total_stone_capacity,
+        .stone_remaining = state.total_stone_remaining,
+        .wood_inventory = state.total_wood_inventory,
+        .stone_inventory = state.total_stone_inventory,
+        .timber_inventory = state.total_timber_inventory,
+        .basic_tool_inventory = state.total_basic_tool_inventory,
         .child_population = child_population,
         .working_age_population = working_age_population,
         .elderly_population = elderly_population,
@@ -314,11 +335,28 @@ std::vector<SettlementSummaryView> SimulationController::settlement_summaries() 
                     ++summary.active_workers;
                     ++summary.gatherers;
                     summary.gathering_labour_available += labour_capacity;
+                } else if (person->occupation == Occupation::WoodGatherer) {
+                    ++summary.active_workers;
+                    ++summary.wood_gatherers;
+                    summary.wood_labour_available += labour_capacity;
+                } else if (person->occupation == Occupation::StoneExtractor) {
+                    ++summary.active_workers;
+                    ++summary.stone_extractors;
+                    summary.stone_labour_available += labour_capacity;
+                } else if (person->occupation == Occupation::CraftWorker) {
+                    ++summary.active_workers;
+                    ++summary.craft_workers;
+                    summary.craft_labour_available += labour_capacity;
                 } else {
                     ++summary.unallocated_workers;
                 }
             }
         }
+
+        summary.wood_inventory = settlement.materials.wood.value;
+        summary.stone_inventory = settlement.materials.stone.value;
+        summary.timber_inventory = settlement.materials.timber.value;
+        summary.basic_tool_inventory = settlement.materials.basic_tool.value;
 
         if (summary.accessible_food_capacity_per_day > 0) {
             summary.pressure_per_10k = static_cast<std::uint32_t>(
@@ -362,6 +400,16 @@ std::vector<SettlementSummaryView> SimulationController::settlement_summaries() 
             summary.cultivation_labour_allocated = std::min(summary.cultivation_labour_available, std::max<std::int64_t>(0, cultivation_demand));
             summary.gathering_labour_allocated = std::min(summary.gathering_labour_available, std::max<std::int64_t>(0, gathering_demand));
         }
+
+        const auto timber_target = std::max<std::int64_t>(8, static_cast<std::int64_t>(summary.alive_population / 2));
+        const auto tool_target = std::max<std::int64_t>(4, static_cast<std::int64_t>((summary.eligible_workers + 2) / 3));
+        summary.material_shortfall =
+            std::max<std::int64_t>(0, timber_target - summary.timber_inventory) +
+            std::max<std::int64_t>(0, tool_target - summary.basic_tool_inventory);
+
+        summary.wood_labour_allocated = std::min(summary.wood_labour_available, std::max<std::int64_t>(0, summary.material_shortfall));
+        summary.stone_labour_allocated = std::min(summary.stone_labour_available, std::max<std::int64_t>(0, summary.material_shortfall));
+        summary.craft_labour_allocated = std::min(summary.craft_labour_available, std::max<std::int64_t>(0, summary.material_shortfall));
 
         summary.labour_allocated = summary.cultivation_labour_allocated + summary.gathering_labour_allocated;
         summary.labour_shortfall = std::max<std::int64_t>(0, summary.labour_demand - summary.labour_allocated);
