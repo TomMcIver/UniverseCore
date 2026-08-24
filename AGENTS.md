@@ -86,9 +86,12 @@ Do not prematurely introduce distributed systems, GPU kernels, databases, ECS fr
 - Runtime dependencies: none until justified.
 - Prefer value types and explicit ownership.
 - No global mutable state.
+- No mutable simulation-wide RNG; world-critical randomness must be scoped and deterministic.
 - Canonical simulation behaviour must not depend on mutable sequential RNG consumption order.
 - Derive scoped deterministic randomness from parent seed + explicit domain + stable identifier/time.
+- Canonical entities must keep stable IDs across deterministic continuation.
 - Represent canonical elapsed time with fixed-width integer simulation time types.
+- Equivalent canonical elapsed time advancement schedules must produce identical canonical world state.
 - Canonical simulation logic must not depend on wall-clock time or frame time.
 - Canonical state changes require evaluating snapshot schema impact and versioning.
 - Never serialize raw C++ object memory, pointers, padding, or ABI-dependent layouts.
@@ -97,11 +100,17 @@ Do not prematurely introduce distributed systems, GPU kernels, databases, ECS fr
 - Canonical resource quantities must use fixed-width integer units with explicitly documented semantics.
 - Every active household must belong to exactly one valid settlement within its region.
 - Settlement-level access allocation must conserve finite regional capacity (no duplication by additional settlements).
+- Productivity multipliers must never create finite environmental resources beyond available regional capacity.
 - Resource-system randomness must be scoped by stable identity + resource domain + canonical period identifier.
 - Simulation state changes should flow through explicit systems/events.
 - Every world-critical algorithm needs deterministic tests.
 - Every persisted schema will eventually require versioning and migrations.
+- Snapshot save/load continuation must preserve deterministic behavior.
 - Keep the headless executable working at all times.
+- UI/inspector state is non-canonical and must not become simulation source-of-truth.
+- Generated `*.ucore` artifacts are runtime outputs and must not be committed.
+- Do not force push shared branch history.
+- Mark milestones complete only after canonical Podman verification passes.
 - New major subsystems require tests and documentation.
 
 ## Container workflow

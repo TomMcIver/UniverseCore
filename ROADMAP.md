@@ -41,11 +41,14 @@ Exit criteria: 100-year runs remain internally valid and produce explainable dem
 
 ## Milestone 1 stabilization pass (post-1F integration)
 
-Status: **in progress**
+Status: **complete (foundation stabilized; migration implementation deferred)**
 
 - [x] deterministic diagnostics for yearly demographic/resource/labour signals
 - [x] integrated food-labour-health feedback calibration pass
 - [x] deterministic regime regression scenarios (sustainable / famine / constrained)
+
+Deferred follow-up (non-blocking for Milestone 2 start):
+
 - [ ] extend long-horizon viability across broader baseline seed distributions
 
 ## Milestone 2A: Material production chains
@@ -83,6 +86,8 @@ Status: **complete**
 - [x] snapshot schema v8 for tool durability + coverage persistence/validation
 
 ## Milestone 2: Persistent history and knowledge
+
+Status: **active**
 
 - [ ] event journal
 - [ ] agent memory

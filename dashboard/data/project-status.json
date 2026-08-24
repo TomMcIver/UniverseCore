@@ -2,7 +2,7 @@
   "project": "UniverseCore",
   "as_of": "2026-08-24",
   "current_phase": "Milestone 2: Civilization systems (active)",
-  "current_task": "Milestone 2B deterministic tools durability/productivity",
+  "current_task": "Milestone 2 persistent history and knowledge systems",
   "next_task": "Milestone 2 persistent history and knowledge systems",
   "build": {
     "canonical_workflow": "podman scripts/container-test.sh",
@@ -108,11 +108,11 @@
       "Development dashboard + deployment workflow"
     ],
     "active": [
-      "Milestone 1 migration (deferred)",
-      "Milestone 1 stabilization long-horizon viability extension",
       "Milestone 2 persistent history and knowledge systems"
     ],
     "planned": [
+      "Milestone 1 migration implementation (designed/deferred)",
+      "Milestone 1 long-horizon viability extension (deferred follow-up)",
       "Milestone 2 persistent history and knowledge systems",
       "Milestone 3 economy and settlement growth"
     ]
@@ -125,6 +125,24 @@
     "Snapshots serialize canonical deterministic state only."
   ],
   "recent_verified_commits": [
+    {
+      "hash": "1f05355",
+      "date": "2026-08-24",
+      "summary": "Verify Milestone 2B final conservation state",
+      "verified": true
+    },
+    {
+      "hash": "72d7c8c",
+      "date": "2026-08-24",
+      "summary": "Implement milestone 2B deterministic tool durability loop",
+      "verified": true
+    },
+    {
+      "hash": "85d3b78",
+      "date": "2026-08-24",
+      "summary": "Close out Milestone 2A documentation",
+      "verified": true
+    },
     {
       "hash": "5e0a758",
       "date": "2026-08-24",

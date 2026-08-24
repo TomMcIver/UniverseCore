@@ -7,7 +7,7 @@ Scope boundary (explicit):
 - Father fallback remains world-global today.
 - Migration remains intended for later settlement realism, resource/demographic locality, and eventual geographically local reproduction semantics.
 - The migration snapshot fields, cooldown mechanics, and HouseholdMigrated event shape below are provisional design targets until migration is actually scheduled for implementation.
-- Migration schema assignment rule: use the next available canonical snapshot schema version at implementation time (illustrative reference in this document: v8, provisional).
+- Migration schema assignment rule: use the next available canonical snapshot schema version at implementation time.
 
 Anchors:
 - Baseline behavior targeted: verified state around a648ded.
@@ -17,7 +17,7 @@ Anchors:
 Proposed architectural decisions (for future implementation scheduling):
 - migration unit = Household
 - scope = intra-region settlement-to-settlement
-- snapshot target = next available schema version at implementation time (illustrative: v8, provisional)
+- snapshot target = next available schema version at implementation time
 - canonical event = HouseholdMigrated
 
 ## 1) Critical fertility assumption (reconfirmed)
@@ -219,7 +219,7 @@ No scoped randomness required for ordering in Milestone 1.
 
 ## 10) Anti-thrashing cooldown semantics
 
-Canonical household field (migration snapshot version; illustrative v8, provisional):
+Canonical household field (migration snapshot version; assigned at implementation time):
 - next_migration_eligible_year: uint64
 
 Semantics:
@@ -353,11 +353,10 @@ To avoid phantom active empty settlements after migration, settlement extinction
 
 This keeps downstream occupation and aggregates consistent in that year.
 
-## 18) Snapshot migration specification (provisional reference: v8)
+## 18) Snapshot migration specification (implementation-time assignment)
 
 Schema:
 - migration snapshot version = next available canonical schema version at implementation time
-- illustrative document reference: v8 (provisional; may change if another canonical schema change lands first)
 
 SimulationConfig additions (canonical, persisted):
 - migration_enabled: bool
