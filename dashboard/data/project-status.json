@@ -1,12 +1,12 @@
 {
   "project": "UniverseCore",
-  "as_of": "2026-08-24",
+  "as_of": "2026-08-26",
   "current_phase": "Milestone 2: Civilization systems (active)",
   "current_task": "Milestone 2 agent memory foundation",
   "next_task": "Milestone 2 agent memory foundation",
   "build": {
     "canonical_workflow": "podman scripts/container-test.sh",
-    "last_verified": "2026-08-24",
+    "last_verified": "2026-08-26",
     "status": "passing",
     "notes": "Verified in universecore-dev container with canonical build/test plus clean UI-enabled build/test and direct universe_ui --smoke-test; re-verified after Milestone 2 event-journal foundation with schema v9"
   },
@@ -126,6 +126,12 @@
     "Snapshots serialize canonical deterministic state only."
   ],
   "recent_verified_commits": [
+    {
+      "hash": "052210b",
+      "date": "2026-08-26",
+      "summary": "Add deterministic event journal foundation",
+      "verified": true
+    },
     {
       "hash": "1f05355",
       "date": "2026-08-24",

@@ -76,7 +76,7 @@ Simulation acceleration represents abstraction or relinquished agency, not a mag
 
 ### 10. Measure before optimizing
 
-Do not prematurely introduce distributed systems, GPU kernels, databases,meworks, or cloud dependencies. Prototype the semantic model first, benchmark it, then replace bottlenecks.
+Do not prematurely introduce distributed systems, GPU kernels, databases, ECS frameworks, or cloud dependencies. Prototype the semantic model first, benchmark it, then replace bottlenecks.
 
 ## Current engineering rules
 
