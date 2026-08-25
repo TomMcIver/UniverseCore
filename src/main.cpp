@@ -11,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 namespace {
@@ -535,16 +536,35 @@ int main(int argc, char** argv) {
             std::cout << "event_id=" << event.id
                       << " time_ticks=" << event.timestamp.ticks
                       << " year=" << event_year
-                      << " type=" << (event.type == universe::EventType::Birth ? "Birth" : "Death")
-                      << " subject=" << event.subject_person_id;
-            if (event.mother_id.has_value()) {
-                std::cout << " mother=" << *event.mother_id;
-            }
-            if (event.father_id.has_value()) {
-                std::cout << " father=" << *event.father_id;
-            }
-            if (event.household_id.has_value()) {
-                std::cout << " household=" << *event.household_id;
+                      << " type=";
+
+            if (event.type == universe::EventType::Birth) {
+                const auto& payload = std::get<universe::BirthEventPayload>(event.payload);
+                std::cout << "Birth"
+                          << " child=" << payload.child_id
+                          << " mother=" << payload.mother_id;
+                if (payload.father_id.has_value()) {
+                    std::cout << " father=" << *payload.father_id;
+                }
+                std::cout << " household=" << payload.household_id;
+            } else if (event.type == universe::EventType::Death) {
+                const auto& payload = std::get<universe::DeathEventPayload>(event.payload);
+                std::cout << "Death"
+                          << " person=" << payload.person_id
+                          << " household=" << payload.household_id;
+            } else if (event.type == universe::EventType::SettlementFounded) {
+                const auto& payload = std::get<universe::SettlementFoundedEventPayload>(event.payload);
+                std::cout << "SettlementFounded"
+                          << " settlement=" << payload.settlement_id
+                          << " region=" << payload.region_id;
+                if (payload.source_settlement_id.has_value()) {
+                    std::cout << " source_settlement=" << *payload.source_settlement_id;
+                }
+            } else if (event.type == universe::EventType::SettlementExtinct) {
+                const auto& payload = std::get<universe::SettlementExtinctEventPayload>(event.payload);
+                std::cout << "SettlementExtinct"
+                          << " settlement=" << payload.settlement_id
+                          << " region=" << payload.region_id;
             }
             std::cout << '\n';
         }

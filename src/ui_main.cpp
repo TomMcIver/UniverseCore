@@ -15,6 +15,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <variant>
 #include <vector>
 
 namespace {
@@ -69,6 +70,8 @@ struct UiState {
 
     bool show_birth_events{true};
     bool show_death_events{true};
+    bool show_settlement_founded_events{true};
+    bool show_settlement_extinct_events{true};
 
     UiHistory history{};
 };
@@ -695,19 +698,32 @@ int main(int argc, char** argv) {
         ImGui::Checkbox("Birth", &ui.show_birth_events);
         ImGui::SameLine();
         ImGui::Checkbox("Death", &ui.show_death_events);
+        ImGui::SameLine();
+        ImGui::Checkbox("SettlementFounded", &ui.show_settlement_founded_events);
+        ImGui::SameLine();
+        ImGui::Checkbox("SettlementExtinct", &ui.show_settlement_extinct_events);
 
-        if (ImGui::BeginTable("event_table", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY, ImVec2(0, 140))) {
+        if (ImGui::BeginTable("event_table", 6, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY, ImVec2(0, 140))) {
             ImGui::TableSetupColumn("EventId");
             ImGui::TableSetupColumn("Year");
             ImGui::TableSetupColumn("Type");
-            ImGui::TableSetupColumn("Subject");
+            ImGui::TableSetupColumn("Entity");
             ImGui::TableSetupColumn("Household");
+            ImGui::TableSetupColumn("Context");
             ImGui::TableHeadersRow();
 
             for (auto it = events.rbegin(); it != events.rend(); ++it) {
                 const auto& event = *it;
-                const bool is_birth = event.type == universe::EventType::Birth;
-                if ((is_birth && !ui.show_birth_events) || (!is_birth && !ui.show_death_events)) {
+                if (event.type == universe::EventType::Birth && !ui.show_birth_events) {
+                    continue;
+                }
+                if (event.type == universe::EventType::Death && !ui.show_death_events) {
+                    continue;
+                }
+                if (event.type == universe::EventType::SettlementFounded && !ui.show_settlement_founded_events) {
+                    continue;
+                }
+                if (event.type == universe::EventType::SettlementExtinct && !ui.show_settlement_extinct_events) {
                     continue;
                 }
 
@@ -717,16 +733,68 @@ int main(int argc, char** argv) {
                 ImGui::TableSetColumnIndex(1);
                 ImGui::TextUnformatted(std::to_string(universe::DemographicCalendarAdapter::demographic_year(event.timestamp)).c_str());
                 ImGui::TableSetColumnIndex(2);
-                ImGui::TextUnformatted(is_birth ? "Birth" : "Death");
-                ImGui::TableSetColumnIndex(3);
-                if (ImGui::SmallButton(("Person " + std::to_string(event.subject_person_id) + "##evt" + std::to_string(event.id)).c_str())) {
-                    ui.selected_person = event.subject_person_id;
+                if (event.type == universe::EventType::Birth) {
+                    ImGui::TextUnformatted("Birth");
+                } else if (event.type == universe::EventType::Death) {
+                    ImGui::TextUnformatted("Death");
+                } else if (event.type == universe::EventType::SettlementFounded) {
+                    ImGui::TextUnformatted("SettlementFounded");
+                } else if (event.type == universe::EventType::SettlementExtinct) {
+                    ImGui::TextUnformatted("SettlementExtinct");
                 }
-                ImGui::TableSetColumnIndex(4);
-                if (event.household_id.has_value()) {
-                    if (ImGui::SmallButton(("H " + std::to_string(*event.household_id) + "##evt" + std::to_string(event.id)).c_str())) {
-                        ui.selected_household = *event.household_id;
+
+                ImGui::TableSetColumnIndex(3);
+                if (event.type == universe::EventType::Birth) {
+                    const auto& payload = std::get<universe::BirthEventPayload>(event.payload);
+                    if (ImGui::SmallButton(("Person " + std::to_string(payload.child_id) + "##evt" + std::to_string(event.id)).c_str())) {
+                        ui.selected_person = payload.child_id;
                     }
+                } else if (event.type == universe::EventType::Death) {
+                    const auto& payload = std::get<universe::DeathEventPayload>(event.payload);
+                    if (ImGui::SmallButton(("Person " + std::to_string(payload.person_id) + "##evt" + std::to_string(event.id)).c_str())) {
+                        ui.selected_person = payload.person_id;
+                    }
+                } else if (event.type == universe::EventType::SettlementFounded) {
+                    const auto& payload = std::get<universe::SettlementFoundedEventPayload>(event.payload);
+                    if (ImGui::SmallButton(("S " + std::to_string(payload.settlement_id) + "##evt" + std::to_string(event.id)).c_str())) {
+                        ui.selected_settlement = payload.settlement_id;
+                    }
+                } else if (event.type == universe::EventType::SettlementExtinct) {
+                    const auto& payload = std::get<universe::SettlementExtinctEventPayload>(event.payload);
+                    if (ImGui::SmallButton(("S " + std::to_string(payload.settlement_id) + "##evt" + std::to_string(event.id)).c_str())) {
+                        ui.selected_settlement = payload.settlement_id;
+                    }
+                }
+
+                ImGui::TableSetColumnIndex(4);
+                if (event.type == universe::EventType::Birth) {
+                    const auto& payload = std::get<universe::BirthEventPayload>(event.payload);
+                    if (ImGui::SmallButton(("H " + std::to_string(payload.household_id) + "##evt" + std::to_string(event.id)).c_str())) {
+                        ui.selected_household = payload.household_id;
+                    }
+                } else if (event.type == universe::EventType::Death) {
+                    const auto& payload = std::get<universe::DeathEventPayload>(event.payload);
+                    if (ImGui::SmallButton(("H " + std::to_string(payload.household_id) + "##evt" + std::to_string(event.id)).c_str())) {
+                        ui.selected_household = payload.household_id;
+                    }
+                }
+
+                ImGui::TableSetColumnIndex(5);
+                if (event.type == universe::EventType::Birth) {
+                    const auto& payload = std::get<universe::BirthEventPayload>(event.payload);
+                    if (payload.father_id.has_value()) {
+                        ImGui::TextUnformatted(("father=" + std::to_string(*payload.father_id)).c_str());
+                    }
+                } else if (event.type == universe::EventType::SettlementFounded) {
+                    const auto& payload = std::get<universe::SettlementFoundedEventPayload>(event.payload);
+                    std::string context = "region=" + std::to_string(payload.region_id);
+                    if (payload.source_settlement_id.has_value()) {
+                        context += " source=" + std::to_string(*payload.source_settlement_id);
+                    }
+                    ImGui::TextUnformatted(context.c_str());
+                } else if (event.type == universe::EventType::SettlementExtinct) {
+                    const auto& payload = std::get<universe::SettlementExtinctEventPayload>(event.payload);
+                    ImGui::TextUnformatted(("region=" + std::to_string(payload.region_id)).c_str());
                 }
             }
 

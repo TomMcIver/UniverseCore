@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <optional>
 #include <span>
+#include <variant>
 #include <vector>
 
 #include "universe/resources.hpp"
@@ -101,16 +102,52 @@ struct RegionEnvironmentState {
 enum class EventType : std::uint8_t {
     Birth = 0,
     Death = 1,
+    SettlementFounded = 2,
+    SettlementExtinct = 3,
 };
+
+struct BirthEventPayload {
+    PersonId child_id{};
+    PersonId mother_id{};
+    std::optional<PersonId> father_id{};
+    HouseholdId household_id{};
+
+    [[nodiscard]] bool operator==(const BirthEventPayload& other) const = default;
+};
+
+struct DeathEventPayload {
+    PersonId person_id{};
+    HouseholdId household_id{};
+
+    [[nodiscard]] bool operator==(const DeathEventPayload& other) const = default;
+};
+
+struct SettlementFoundedEventPayload {
+    SettlementId settlement_id{};
+    RegionId region_id{};
+    std::optional<SettlementId> source_settlement_id{};
+
+    [[nodiscard]] bool operator==(const SettlementFoundedEventPayload& other) const = default;
+};
+
+struct SettlementExtinctEventPayload {
+    SettlementId settlement_id{};
+    RegionId region_id{};
+
+    [[nodiscard]] bool operator==(const SettlementExtinctEventPayload& other) const = default;
+};
+
+using SimulationEventPayload = std::variant<
+    BirthEventPayload,
+    DeathEventPayload,
+    SettlementFoundedEventPayload,
+    SettlementExtinctEventPayload>;
 
 struct SimulationEvent {
     EventId id{};
     SimulationTime timestamp{};
     EventType type{EventType::Birth};
-    PersonId subject_person_id{};
-    std::optional<PersonId> mother_id{};
-    std::optional<PersonId> father_id{};
-    std::optional<HouseholdId> household_id{};
+    SimulationEventPayload payload{};
 };
 
 struct SimulationConfig {
@@ -269,6 +306,8 @@ private:
     void append_event(SimulationEvent event);
     void emit_death_event(PersonId person_id, HouseholdId household_id);
     void emit_birth_event(PersonId child_id, HouseholdId household_id, PersonId mother_id, std::optional<PersonId> father_id);
+    void emit_settlement_founded_event(SettlementId settlement_id, RegionId region_id, std::optional<SettlementId> source_settlement_id);
+    void emit_settlement_extinct_event(SettlementId settlement_id, RegionId region_id);
     void refresh_population_count() noexcept;
 
     SimulationConfig config_;

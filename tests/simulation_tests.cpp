@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
+#include <variant>
 #include <vector>
 
 namespace {
@@ -473,6 +474,8 @@ void verify_person_health_invariants(const universe::WorldState& state) {
 void verify_event_log_invariants(const universe::WorldState& state) {
     std::uint64_t birth_events = 0;
     std::uint64_t death_events = 0;
+    std::unordered_map<universe::SettlementId, std::uint64_t> founded_events_by_settlement;
+    std::unordered_map<universe::SettlementId, std::uint64_t> extinct_events_by_settlement;
     universe::EventId expected_event_id = 1;
     universe::SimulationTime last_timestamp{0};
     bool saw_event = false;
@@ -490,36 +493,68 @@ void verify_event_log_invariants(const universe::WorldState& state) {
         last_timestamp = event.timestamp;
         saw_event = true;
 
-        const auto* subject = find_person(state, event.subject_person_id);
-        require(subject != nullptr, "event subject id must reference an existing person");
-
-        if (event.household_id.has_value()) {
-            bool household_exists = false;
-            for (const auto& household : state.households) {
-                if (household.id == *event.household_id) {
-                    household_exists = true;
-                    break;
-                }
-            }
-            require(household_exists, "event household id must reference an existing household");
-        }
-
         if (event.type == universe::EventType::Birth) {
             ++birth_events;
-            require(event.mother_id.has_value(), "birth event must contain mother id");
-            require(event.father_id.has_value(), "birth event must contain father id");
+            require(std::holds_alternative<universe::BirthEventPayload>(event.payload), "birth event payload must match type");
+            const auto& payload = std::get<universe::BirthEventPayload>(event.payload);
 
-            const auto* mother = find_person(state, *event.mother_id);
-            const auto* father = find_person(state, *event.father_id);
+            require(payload.child_id > 0U, "birth event child id must be non-zero");
+            require(payload.mother_id > 0U, "birth event mother id must be non-zero");
+            require(payload.father_id.has_value(), "birth event must contain father id");
+            require(payload.household_id > 0U, "birth event household id must be non-zero");
+
+            const auto* child = find_person(state, payload.child_id);
+            const auto* mother = find_person(state, payload.mother_id);
+            const auto* father = find_person(state, *payload.father_id);
+            const auto* household = find_household(state, payload.household_id);
+
+            require(child != nullptr, "birth event child id must reference an existing person");
             require(mother != nullptr, "birth event mother id must reference an existing person");
             require(father != nullptr, "birth event father id must reference an existing person");
+            require(household != nullptr, "birth event household id must reference an existing household");
             require(mother->sex == universe::BiologicalSex::Female, "birth event mother must be female");
             require(father->sex == universe::BiologicalSex::Male, "birth event father must be male");
-        } else {
+        } else if (event.type == universe::EventType::Death) {
             ++death_events;
-            require(!event.mother_id.has_value(), "death event must not contain mother id");
-            require(!event.father_id.has_value(), "death event must not contain father id");
+            require(std::holds_alternative<universe::DeathEventPayload>(event.payload), "death event payload must match type");
+            const auto& payload = std::get<universe::DeathEventPayload>(event.payload);
+
+            require(payload.person_id > 0U, "death event person id must be non-zero");
+            require(payload.household_id > 0U, "death event household id must be non-zero");
+            require(find_person(state, payload.person_id) != nullptr, "death event person id must reference existing person");
+            require(find_household(state, payload.household_id) != nullptr, "death event household id must reference existing household");
+        } else if (event.type == universe::EventType::SettlementFounded) {
+            require(
+                std::holds_alternative<universe::SettlementFoundedEventPayload>(event.payload),
+                "settlement founded event payload must match type");
+            const auto& payload = std::get<universe::SettlementFoundedEventPayload>(event.payload);
+            require(payload.settlement_id > 0U, "settlement founded event settlement id must be non-zero");
+            require(payload.region_id > 0U, "settlement founded event region id must be non-zero");
+            require(
+                find_settlement(state, payload.settlement_id) != nullptr,
+                "settlement founded event settlement id must reference existing settlement");
+            founded_events_by_settlement[payload.settlement_id] += 1U;
+        } else if (event.type == universe::EventType::SettlementExtinct) {
+            require(
+                std::holds_alternative<universe::SettlementExtinctEventPayload>(event.payload),
+                "settlement extinct event payload must match type");
+            const auto& payload = std::get<universe::SettlementExtinctEventPayload>(event.payload);
+            require(payload.settlement_id > 0U, "settlement extinct event settlement id must be non-zero");
+            require(payload.region_id > 0U, "settlement extinct event region id must be non-zero");
+            require(
+                find_settlement(state, payload.settlement_id) != nullptr,
+                "settlement extinct event settlement id must reference existing settlement");
+            extinct_events_by_settlement[payload.settlement_id] += 1U;
         }
+    }
+
+    for (const auto& [settlement_id, founded_count] : founded_events_by_settlement) {
+        (void)settlement_id;
+        require(founded_count == 1U, "each settlement must have at most one founded event");
+    }
+    for (const auto& [settlement_id, extinct_count] : extinct_events_by_settlement) {
+        (void)settlement_id;
+        require(extinct_count == 1U, "each settlement must have at most one extinct event");
     }
 
     require(birth_events == state.total_births, "every generated birth must produce exactly one birth event");
@@ -676,10 +711,7 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
         require(a.id == b.id, context);
         require(a.timestamp == b.timestamp, context);
         require(a.type == b.type, context);
-        require(a.subject_person_id == b.subject_person_id, context);
-        require(a.mother_id == b.mother_id, context);
-        require(a.father_id == b.father_id, context);
-        require(a.household_id == b.household_id, context);
+        require(a.payload == b.payload, context);
     }
 }
 
@@ -723,6 +755,148 @@ void refresh_snapshot_payload_hash(std::vector<std::byte>& bytes) {
     const std::span<const std::byte> payload{bytes.data() + header_size, payload_size};
     const auto hash = universe::snapshot_hash64(payload);
     write_u64_le(bytes, payload_hash_offset, hash);
+}
+
+struct EventSectionInfo {
+    std::size_t event_count_offset{};
+    std::uint64_t event_count{};
+    std::vector<std::size_t> event_offsets{};
+    std::vector<std::size_t> event_type_offsets{};
+    std::vector<universe::EventType> event_types{};
+    std::vector<std::optional<std::size_t>> payload_discriminator_offsets{};
+};
+
+EventSectionInfo locate_event_section(const universe::WorldState& state) {
+    constexpr std::size_t header_size = 24U;
+    constexpr std::size_t payload_people_count_offset = 582U;
+
+    EventSectionInfo info{};
+    std::size_t cursor = header_size + payload_people_count_offset;
+
+    const auto person_record_base_size = std::size_t{41};
+    std::vector<const universe::Person*> people_order;
+    people_order.reserve(state.people.size());
+    for (const auto& person : state.people) {
+        people_order.push_back(&person);
+    }
+    std::sort(people_order.begin(), people_order.end(), [](const universe::Person* lhs, const universe::Person* rhs) {
+        return lhs->id < rhs->id;
+    });
+
+    cursor += 8U;
+    for (const auto* person : people_order) {
+        std::size_t record_size = person_record_base_size;
+        if (person->mother_id.has_value()) {
+            record_size += 8U;
+        }
+        if (person->father_id.has_value()) {
+            record_size += 8U;
+        }
+        cursor += record_size;
+    }
+
+    std::vector<const universe::Household*> household_order;
+    household_order.reserve(state.households.size());
+    for (const auto& household : state.households) {
+        household_order.push_back(&household);
+    }
+    std::sort(household_order.begin(), household_order.end(), [](const universe::Household* lhs, const universe::Household* rhs) {
+        return lhs->id < rhs->id;
+    });
+
+    cursor += 8U;
+    for (const auto* household : household_order) {
+        std::vector<universe::PersonId> member_ids = household->member_ids;
+        std::sort(member_ids.begin(), member_ids.end());
+        cursor += 76U;
+        cursor += member_ids.size() * 8U;
+    }
+
+    std::vector<const universe::RegionEnvironmentState*> region_order;
+    region_order.reserve(state.regions.size());
+    for (const auto& region : state.regions) {
+        region_order.push_back(&region);
+    }
+    std::sort(region_order.begin(), region_order.end(), [](const universe::RegionEnvironmentState* lhs, const universe::RegionEnvironmentState* rhs) {
+        return lhs->id < rhs->id;
+    });
+
+    cursor += 8U;
+    cursor += region_order.size() * 73U;
+
+    std::vector<const universe::Settlement*> settlement_order;
+    settlement_order.reserve(state.settlements.size());
+    for (const auto& settlement : state.settlements) {
+        settlement_order.push_back(&settlement);
+    }
+    std::sort(settlement_order.begin(), settlement_order.end(), [](const universe::Settlement* lhs, const universe::Settlement* rhs) {
+        return lhs->id < rhs->id;
+    });
+
+    cursor += 8U;
+    cursor += settlement_order.size() * 21U;
+
+    std::vector<const universe::SimulationEvent*> event_order;
+    event_order.reserve(state.event_log.size());
+    for (const auto& event : state.event_log) {
+        event_order.push_back(&event);
+    }
+    std::sort(event_order.begin(), event_order.end(), [](const universe::SimulationEvent* lhs, const universe::SimulationEvent* rhs) {
+        return lhs->id < rhs->id;
+    });
+
+    info.event_count_offset = cursor;
+    info.event_count = static_cast<std::uint64_t>(event_order.size());
+    cursor += 8U;
+    info.event_offsets.reserve(static_cast<std::size_t>(info.event_count));
+    info.event_type_offsets.reserve(static_cast<std::size_t>(info.event_count));
+    info.event_types.reserve(static_cast<std::size_t>(info.event_count));
+    info.payload_discriminator_offsets.reserve(static_cast<std::size_t>(info.event_count));
+
+    for (const auto* event : event_order) {
+        info.event_offsets.push_back(cursor);
+        cursor += 16U;
+
+        const auto type = event->type;
+        const auto type_offset = cursor;
+        cursor += 1U;
+        info.event_type_offsets.push_back(type_offset);
+        info.event_types.push_back(type);
+
+        std::optional<std::size_t> discriminator_offset = std::nullopt;
+        if (type == universe::EventType::Birth) {
+            const auto& payload = std::get<universe::BirthEventPayload>(event->payload);
+            cursor += 16U;
+            discriminator_offset = cursor;
+            cursor += 1U;
+            if (payload.father_id.has_value()) {
+                cursor += 8U;
+            }
+            cursor += 8U;
+        } else if (type == universe::EventType::Death) {
+            cursor += 16U;
+        } else if (type == universe::EventType::SettlementFounded) {
+            const auto& payload = std::get<universe::SettlementFoundedEventPayload>(event->payload);
+            cursor += 16U;
+            discriminator_offset = cursor;
+            cursor += 1U;
+            if (payload.source_settlement_id.has_value()) {
+                cursor += 8U;
+            }
+        } else if (type == universe::EventType::SettlementExtinct) {
+            cursor += 16U;
+        }
+
+        info.payload_discriminator_offsets.push_back(discriminator_offset);
+    }
+
+    return info;
+}
+
+void require_snapshot_load_fails_any(const std::vector<std::byte>& bytes, const char* context) {
+    universe::Simulation destination{universe::SimulationConfig{.seed = 999U, .initial_population = 10U}};
+    const auto result = universe::Simulation::load_snapshot(bytes, destination);
+    require(!result.ok, context);
 }
 
 void require_snapshot_load_fails(
@@ -1654,7 +1828,7 @@ int main() {
         require_snapshot_load_fails(bad_magic, universe::SnapshotErrorCode::InvalidMagic, "bad magic must be rejected");
 
         auto bad_version = clone_bytes(valid);
-        bad_version[4] = std::byte{0x09};
+        bad_version[4] = std::byte{0x08};
         bad_version[5] = std::byte{0x00};
         require_snapshot_load_fails(
             bad_version,
@@ -1731,6 +1905,86 @@ int main() {
             "malformed collection lengths must be rejected");
     }
 
+    {
+        universe::Simulation journal_source{config};
+        journal_source.run_years(120);
+        const auto valid = journal_source.save_snapshot();
+        const auto event_section = locate_event_section(journal_source.state());
+        require(event_section.event_count > 1U, "journal corruption tests require at least two events");
+
+        auto invalid_event_enum = clone_bytes(valid);
+        invalid_event_enum[event_section.event_type_offsets.front()] = std::byte{9};
+        refresh_snapshot_payload_hash(invalid_event_enum);
+        require_snapshot_load_fails(
+            invalid_event_enum,
+            universe::SnapshotErrorCode::InvalidEnum,
+            "invalid event enum values must be rejected");
+
+        auto invalid_reference = clone_bytes(valid);
+        const auto first_event_payload_offset = event_section.event_offsets.front() + 17U;
+        write_u64_le(invalid_reference, first_event_payload_offset, 9'999'999'999ULL);
+        refresh_snapshot_payload_hash(invalid_reference);
+        require_snapshot_load_fails(
+            invalid_reference,
+            universe::SnapshotErrorCode::InvalidReference,
+            "invalid event payload references must be rejected");
+
+        auto non_contiguous_ids = clone_bytes(valid);
+        const auto first_event_id = read_u64_le(non_contiguous_ids, event_section.event_offsets.front());
+        write_u64_le(non_contiguous_ids, event_section.event_offsets[1], first_event_id);
+        refresh_snapshot_payload_hash(non_contiguous_ids);
+        require_snapshot_load_fails(
+            non_contiguous_ids,
+            universe::SnapshotErrorCode::DuplicateId,
+            "non-contiguous event ids must be rejected");
+
+        auto future_timestamp = clone_bytes(valid);
+        write_u64_le(
+            future_timestamp,
+            event_section.event_offsets.front() + 8U,
+            static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()));
+        refresh_snapshot_payload_hash(future_timestamp);
+        require_snapshot_load_fails(
+            future_timestamp,
+            universe::SnapshotErrorCode::InvalidState,
+            "future event timestamps must be rejected");
+
+        auto timestamp_order_violation = clone_bytes(valid);
+        write_u64_le(timestamp_order_violation, event_section.event_offsets.front() + 8U, 10ULL);
+        write_u64_le(timestamp_order_violation, event_section.event_offsets[1] + 8U, 0ULL);
+        refresh_snapshot_payload_hash(timestamp_order_violation);
+        require_snapshot_load_fails(
+            timestamp_order_violation,
+            universe::SnapshotErrorCode::InvalidState,
+            "event timestamp ordering violations must be rejected");
+
+        auto incompatible_payload = clone_bytes(valid);
+        incompatible_payload[event_section.event_type_offsets.front()] =
+            static_cast<std::byte>(static_cast<std::uint8_t>(universe::EventType::SettlementExtinct));
+        refresh_snapshot_payload_hash(incompatible_payload);
+        require_snapshot_load_fails_any(
+            incompatible_payload,
+            "payload incompatible with event type must be rejected");
+
+        std::size_t discriminator_index = std::numeric_limits<std::size_t>::max();
+        for (std::size_t i = 0; i < event_section.payload_discriminator_offsets.size(); ++i) {
+            if (event_section.payload_discriminator_offsets[i].has_value()) {
+                discriminator_index = i;
+                break;
+            }
+        }
+        require(
+            discriminator_index != std::numeric_limits<std::size_t>::max(),
+            "journal corruption tests require at least one payload discriminator");
+
+        auto invalid_discriminator = clone_bytes(valid);
+        invalid_discriminator[*event_section.payload_discriminator_offsets[discriminator_index]] = std::byte{2};
+        refresh_snapshot_payload_hash(invalid_discriminator);
+        require_snapshot_load_fails_any(
+            invalid_discriminator,
+            "invalid payload discriminators must be rejected");
+    }
+
     universe::Simulation a{config};
     universe::Simulation b{config};
     a.run_years(100);
@@ -1757,6 +2011,85 @@ int main() {
     universe::Simulation with_probe{probe_config};
     with_probe.run_years(100);
     require_world_state_equal(a.state(), with_probe.state(), "unrelated scoped random probes must not alter canonical results");
+
+    {
+        universe::Simulation founding_run{universe::SimulationConfig{
+            .seed = 42,
+            .initial_population = 600,
+        }};
+
+        std::uint64_t initial_settlement_count = 0;
+        universe::SettlementId initial_max_settlement_id = 0;
+        for (const auto& settlement : founding_run.state().settlements) {
+            if (settlement.active) {
+                ++initial_settlement_count;
+            }
+            initial_max_settlement_id = std::max(initial_max_settlement_id, settlement.id);
+        }
+
+        founding_run.run_years(200);
+
+        std::unordered_map<universe::SettlementId, std::uint64_t> founded_counts;
+        std::uint64_t founded_total = 0;
+        for (const auto& event : founding_run.state().event_log) {
+            if (event.type != universe::EventType::SettlementFounded) {
+                continue;
+            }
+
+            ++founded_total;
+            require(
+                std::holds_alternative<universe::SettlementFoundedEventPayload>(event.payload),
+                "settlement founded event payload must match type");
+            const auto& payload = std::get<universe::SettlementFoundedEventPayload>(event.payload);
+            require(payload.settlement_id > initial_max_settlement_id, "dynamic founded settlement id must be above initial id range");
+            const auto* settlement = find_settlement(founding_run.state(), payload.settlement_id);
+            require(settlement != nullptr, "founded settlement id must reference a known settlement");
+            require(settlement->region_id == payload.region_id, "founded settlement region id must match canonical settlement state");
+            founded_counts[payload.settlement_id] += 1U;
+        }
+
+        require(initial_settlement_count > 0U, "founding scenario must start with active settlements");
+        require(founded_total > 0U, "founding scenario must produce at least one founded event");
+        for (const auto& [settlement_id, count] : founded_counts) {
+            (void)settlement_id;
+            require(count == 1U, "each founded settlement must emit exactly one founded event");
+        }
+    }
+
+    {
+        universe::Simulation extinction_run{universe::SimulationConfig{
+            .seed = 22,
+            .initial_population = 200,
+            .initial_household_food_units = 20,
+            .food_production_scale_percent = 35,
+        }};
+        extinction_run.run_years(250);
+
+        std::unordered_map<universe::SettlementId, std::uint64_t> extinction_counts;
+        std::uint64_t extinction_total = 0;
+        for (const auto& event : extinction_run.state().event_log) {
+            if (event.type != universe::EventType::SettlementExtinct) {
+                continue;
+            }
+
+            ++extinction_total;
+            require(
+                std::holds_alternative<universe::SettlementExtinctEventPayload>(event.payload),
+                "settlement extinct event payload must match type");
+            const auto& payload = std::get<universe::SettlementExtinctEventPayload>(event.payload);
+            const auto* settlement = find_settlement(extinction_run.state(), payload.settlement_id);
+            require(settlement != nullptr, "extinct settlement id must reference known settlement");
+            require(settlement->region_id == payload.region_id, "extinct settlement region id must match canonical settlement state");
+            require(!settlement->active, "settlement with extinction event must be inactive by scenario end");
+            extinction_counts[payload.settlement_id] += 1U;
+        }
+
+        require(extinction_total > 0U, "extinction scenario must produce at least one extinction event");
+        for (const auto& [settlement_id, count] : extinction_counts) {
+            (void)settlement_id;
+            require(count == 1U, "each settlement must emit at most one extinction event");
+        }
+    }
 
     {
         auto different_seed = config;

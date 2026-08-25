@@ -2,17 +2,17 @@
   "project": "UniverseCore",
   "as_of": "2026-08-24",
   "current_phase": "Milestone 2: Civilization systems (active)",
-  "current_task": "Milestone 2 persistent history and knowledge systems",
-  "next_task": "Milestone 2 persistent history and knowledge systems",
+  "current_task": "Milestone 2 agent memory foundation",
+  "next_task": "Milestone 2 agent memory foundation",
   "build": {
     "canonical_workflow": "podman scripts/container-test.sh",
     "last_verified": "2026-08-24",
     "status": "passing",
-    "notes": "Verified in universecore-dev container with canonical build/test plus clean UI-enabled build/test and direct universe_ui --smoke-test; independently re-verified post-conservation-fix for M2B capacity accounting in Podman"
+    "notes": "Verified in universecore-dev container with canonical build/test plus clean UI-enabled build/test and direct universe_ui --smoke-test; re-verified after Milestone 2 event-journal foundation with schema v9"
   },
   "progress": {
     "simulation_foundation_percent": 99,
-    "bronze_age_simulator_percent": 37,
+    "bronze_age_simulator_percent": 40,
     "playable_vertical_slice_percent": 7,
     "full_game_vision_percent": 1,
     "note": "Percentages are approximate planning estimates, not objective measurements."
@@ -82,7 +82,7 @@
       "id": "M2",
       "name": "Civilization Systems",
       "status": "in-progress",
-      "percent": 15
+      "percent": 25
     },
     {
       "id": "UE",
@@ -103,12 +103,13 @@
       "Milestone 1F deterministic occupations and labour specialization",
       "Milestone 2A deterministic material production chains",
       "Milestone 2B deterministic tools durability/productivity loop",
-      "Snapshot schema v8 and validation",
+      "Milestone 2 event journal foundation",
+      "Snapshot schema v9 and validation",
       "Canonical Podman build/test workflow",
       "Development dashboard + deployment workflow"
     ],
     "active": [
-      "Milestone 2 persistent history and knowledge systems"
+      "Milestone 2 agent memory foundation"
     ],
     "planned": [
       "Milestone 1 migration implementation (designed/deferred)",

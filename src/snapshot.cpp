@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -381,18 +382,45 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
         payload.write_u64(event->id);
         payload.write_i64(event->timestamp.ticks);
         payload.write_u8(static_cast<std::uint8_t>(event->type));
-        payload.write_u64(event->subject_person_id);
-        payload.write_bool(event->mother_id.has_value());
-        if (event->mother_id.has_value()) {
-            payload.write_u64(*event->mother_id);
-        }
-        payload.write_bool(event->father_id.has_value());
-        if (event->father_id.has_value()) {
-            payload.write_u64(*event->father_id);
-        }
-        payload.write_bool(event->household_id.has_value());
-        if (event->household_id.has_value()) {
-            payload.write_u64(*event->household_id);
+        if (event->type == EventType::Birth) {
+            const auto* payload_data = std::get_if<BirthEventPayload>(&event->payload);
+            if (payload_data == nullptr) {
+                throw std::invalid_argument("Birth event payload mismatch");
+            }
+            payload.write_u64(payload_data->child_id);
+            payload.write_u64(payload_data->mother_id);
+            payload.write_bool(payload_data->father_id.has_value());
+            if (payload_data->father_id.has_value()) {
+                payload.write_u64(*payload_data->father_id);
+            }
+            payload.write_u64(payload_data->household_id);
+        } else if (event->type == EventType::Death) {
+            const auto* payload_data = std::get_if<DeathEventPayload>(&event->payload);
+            if (payload_data == nullptr) {
+                throw std::invalid_argument("Death event payload mismatch");
+            }
+            payload.write_u64(payload_data->person_id);
+            payload.write_u64(payload_data->household_id);
+        } else if (event->type == EventType::SettlementFounded) {
+            const auto* payload_data = std::get_if<SettlementFoundedEventPayload>(&event->payload);
+            if (payload_data == nullptr) {
+                throw std::invalid_argument("SettlementFounded event payload mismatch");
+            }
+            payload.write_u64(payload_data->settlement_id);
+            payload.write_u64(payload_data->region_id);
+            payload.write_bool(payload_data->source_settlement_id.has_value());
+            if (payload_data->source_settlement_id.has_value()) {
+                payload.write_u64(*payload_data->source_settlement_id);
+            }
+        } else if (event->type == EventType::SettlementExtinct) {
+            const auto* payload_data = std::get_if<SettlementExtinctEventPayload>(&event->payload);
+            if (payload_data == nullptr) {
+                throw std::invalid_argument("SettlementExtinct event payload mismatch");
+            }
+            payload.write_u64(payload_data->settlement_id);
+            payload.write_u64(payload_data->region_id);
+        } else {
+            throw std::invalid_argument("Unknown event type");
         }
     }
 
@@ -836,7 +864,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         return load_error(SnapshotErrorCode::TruncatedData, "Snapshot event section is truncated");
     }
 
-    if (event_count > payload_reader.remaining() / 27U) {
+    if (event_count > payload_reader.remaining() / 26U) {
         return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot event section has invalid length");
     }
 
@@ -847,51 +875,67 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     for (std::uint64_t i = 0; i < event_count; ++i) {
         SimulationEvent event{};
         std::uint8_t type_raw = 0;
-        bool has_mother = false;
-        bool has_father = false;
-        bool has_household = false;
 
         if (!payload_reader.read_u64(event.id) ||
             !payload_reader.read_i64(event.timestamp.ticks) ||
-            !payload_reader.read_u8(type_raw) ||
-            !payload_reader.read_u64(event.subject_person_id) ||
-            !payload_reader.read_bool(has_mother)) {
+            !payload_reader.read_u8(type_raw)) {
             return load_error(SnapshotErrorCode::TruncatedData, "Snapshot event record is truncated");
         }
 
-        if (type_raw > 1U) {
+        if (type_raw > 3U) {
             return load_error(SnapshotErrorCode::InvalidEnum, "Snapshot event type is invalid");
         }
         event.type = static_cast<EventType>(type_raw);
 
-        if (has_mother) {
-            PersonId mother_id = 0;
-            if (!payload_reader.read_u64(mother_id)) {
-                return load_error(SnapshotErrorCode::TruncatedData, "Snapshot event mother id is truncated");
+        if (event.type == EventType::Birth) {
+            BirthEventPayload payload_data{};
+            bool has_father = false;
+            if (!payload_reader.read_u64(payload_data.child_id) ||
+                !payload_reader.read_u64(payload_data.mother_id) ||
+                !payload_reader.read_bool(has_father)) {
+                return load_error(SnapshotErrorCode::TruncatedData, "Snapshot birth event payload is truncated");
             }
-            event.mother_id = mother_id;
-        }
-
-        if (!payload_reader.read_bool(has_father)) {
-            return load_error(SnapshotErrorCode::TruncatedData, "Snapshot event father flag is truncated");
-        }
-        if (has_father) {
-            PersonId father_id = 0;
-            if (!payload_reader.read_u64(father_id)) {
-                return load_error(SnapshotErrorCode::TruncatedData, "Snapshot event father id is truncated");
+            if (has_father) {
+                PersonId father_id = 0;
+                if (!payload_reader.read_u64(father_id)) {
+                    return load_error(SnapshotErrorCode::TruncatedData, "Snapshot birth event father id is truncated");
+                }
+                payload_data.father_id = father_id;
             }
-            event.father_id = father_id;
-        }
-
-        if (!payload_reader.read_bool(has_household)) {
-            return load_error(SnapshotErrorCode::TruncatedData, "Snapshot event household flag is truncated");
-        }
-        if (has_household) {
-            HouseholdId household_id = 0;
-            if (!payload_reader.read_u64(household_id)) {
-                return load_error(SnapshotErrorCode::TruncatedData, "Snapshot event household id is truncated");
+            if (!payload_reader.read_u64(payload_data.household_id)) {
+                return load_error(SnapshotErrorCode::TruncatedData, "Snapshot birth event household id is truncated");
             }
-            event.household_id = household_id;
+            event.payload = payload_data;
+        } else if (event.type == EventType::Death) {
+            DeathEventPayload payload_data{};
+            if (!payload_reader.read_u64(payload_data.person_id) ||
+                !payload_reader.read_u64(payload_data.household_id)) {
+                return load_error(SnapshotErrorCode::TruncatedData, "Snapshot death event payload is truncated");
+            }
+            event.payload = payload_data;
+        } else if (event.type == EventType::SettlementFounded) {
+            SettlementFoundedEventPayload payload_data{};
+            bool has_source = false;
+            if (!payload_reader.read_u64(payload_data.settlement_id) ||
+                !payload_reader.read_u64(payload_data.region_id) ||
+                !payload_reader.read_bool(has_source)) {
+                return load_error(SnapshotErrorCode::TruncatedData, "Snapshot founded event payload is truncated");
+            }
+            if (has_source) {
+                SettlementId source_settlement_id = 0;
+                if (!payload_reader.read_u64(source_settlement_id)) {
+                    return load_error(SnapshotErrorCode::TruncatedData, "Snapshot founded event source id is truncated");
+                }
+                payload_data.source_settlement_id = source_settlement_id;
+            }
+            event.payload = payload_data;
+        } else if (event.type == EventType::SettlementExtinct) {
+            SettlementExtinctEventPayload payload_data{};
+            if (!payload_reader.read_u64(payload_data.settlement_id) ||
+                !payload_reader.read_u64(payload_data.region_id)) {
+                return load_error(SnapshotErrorCode::TruncatedData, "Snapshot extinct event payload is truncated");
+            }
+            event.payload = payload_data;
         }
 
         if (!is_valid_event_id(event.id)) {
@@ -1440,6 +1484,8 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     bool saw_event = false;
     std::uint64_t birth_event_count = 0;
     std::uint64_t death_event_count = 0;
+    std::unordered_map<SettlementId, EventId> founded_event_id_by_settlement;
+    std::unordered_map<SettlementId, EventId> extinct_event_id_by_settlement;
     for (const auto& event : restored_state.event_log) {
         if (event.id != expected_event_id) {
             return load_error(SnapshotErrorCode::InvalidState, "Snapshot event ids must be contiguous");
@@ -1456,32 +1502,114 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         previous_event_time = event.timestamp;
         saw_event = true;
 
-        if (!person_by_id.contains(event.subject_person_id)) {
-            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot event subject references unknown person");
-        }
-
-        if (event.household_id.has_value() && !household_by_id.contains(*event.household_id)) {
-            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot event household references unknown household");
-        }
-
         if (event.type == EventType::Birth) {
             ++birth_event_count;
-            if (!event.mother_id.has_value() || !event.father_id.has_value()) {
+            if (!std::holds_alternative<BirthEventPayload>(event.payload)) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot event payload does not match birth type");
+            }
+
+            const auto& payload_data = std::get<BirthEventPayload>(event.payload);
+            if (payload_data.child_id == 0U || payload_data.mother_id == 0U || payload_data.household_id == 0U) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot birth event must include canonical child/mother/household ids");
+            }
+            if (!payload_data.father_id.has_value()) {
                 return load_error(SnapshotErrorCode::InvalidState, "Snapshot birth event must include mother and father ids");
             }
-            const auto mother_it = person_by_id.find(*event.mother_id);
-            const auto father_it = person_by_id.find(*event.father_id);
-            if (mother_it == person_by_id.end() || father_it == person_by_id.end()) {
+
+            const auto child_it = person_by_id.find(payload_data.child_id);
+            const auto mother_it = person_by_id.find(payload_data.mother_id);
+            const auto father_it = person_by_id.find(*payload_data.father_id);
+            if (child_it == person_by_id.end() || mother_it == person_by_id.end() || father_it == person_by_id.end()) {
                 return load_error(SnapshotErrorCode::InvalidReference, "Snapshot birth event parent references are invalid");
             }
             if (mother_it->second->sex != BiologicalSex::Female || father_it->second->sex != BiologicalSex::Male) {
                 return load_error(SnapshotErrorCode::InvalidState, "Snapshot birth event parent sexes are invalid");
             }
-        } else {
-            ++death_event_count;
-            if (event.mother_id.has_value() || event.father_id.has_value()) {
-                return load_error(SnapshotErrorCode::InvalidState, "Snapshot death event must not include parent ids");
+            if (!household_by_id.contains(payload_data.household_id)) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot birth event household references unknown household");
             }
+        } else if (event.type == EventType::Death) {
+            ++death_event_count;
+            if (!std::holds_alternative<DeathEventPayload>(event.payload)) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot event payload does not match death type");
+            }
+
+            const auto& payload_data = std::get<DeathEventPayload>(event.payload);
+            if (payload_data.person_id == 0U || payload_data.household_id == 0U) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot death event must include canonical person/household ids");
+            }
+            if (!person_by_id.contains(payload_data.person_id)) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot death event person references unknown person");
+            }
+            if (!household_by_id.contains(payload_data.household_id)) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot death event household references unknown household");
+            }
+        } else if (event.type == EventType::SettlementFounded) {
+            if (!std::holds_alternative<SettlementFoundedEventPayload>(event.payload)) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot event payload does not match settlement founded type");
+            }
+
+            const auto& payload_data = std::get<SettlementFoundedEventPayload>(event.payload);
+            if (payload_data.settlement_id == 0U || payload_data.region_id == 0U) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot founded event must include settlement and region ids");
+            }
+            if (!settlement_by_id.contains(payload_data.settlement_id)) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot founded event references unknown settlement");
+            }
+            if (!region_by_id.contains(payload_data.region_id)) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot founded event references unknown region");
+            }
+            const auto* settlement = settlement_by_id.at(payload_data.settlement_id);
+            if (settlement->region_id != payload_data.region_id) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot founded event settlement/region mismatch");
+            }
+            if (payload_data.source_settlement_id.has_value() &&
+                !settlement_by_id.contains(*payload_data.source_settlement_id)) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot founded event source settlement is invalid");
+            }
+            if (payload_data.source_settlement_id.has_value()) {
+                const auto* source_settlement = settlement_by_id.at(*payload_data.source_settlement_id);
+                if (source_settlement->region_id != payload_data.region_id) {
+                    return load_error(SnapshotErrorCode::InvalidReference, "Snapshot founded event source settlement region mismatch");
+                }
+            }
+            if (founded_event_id_by_settlement.contains(payload_data.settlement_id)) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot settlement has duplicate founded events");
+            }
+            founded_event_id_by_settlement.emplace(payload_data.settlement_id, event.id);
+        } else if (event.type == EventType::SettlementExtinct) {
+            if (!std::holds_alternative<SettlementExtinctEventPayload>(event.payload)) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot event payload does not match settlement extinct type");
+            }
+
+            const auto& payload_data = std::get<SettlementExtinctEventPayload>(event.payload);
+            if (payload_data.settlement_id == 0U || payload_data.region_id == 0U) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot extinct event must include settlement and region ids");
+            }
+            if (!settlement_by_id.contains(payload_data.settlement_id)) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot extinct event references unknown settlement");
+            }
+            if (!region_by_id.contains(payload_data.region_id)) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot extinct event references unknown region");
+            }
+            const auto* settlement = settlement_by_id.at(payload_data.settlement_id);
+            if (settlement->region_id != payload_data.region_id) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot extinct event settlement/region mismatch");
+            }
+            if (extinct_event_id_by_settlement.contains(payload_data.settlement_id)) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot settlement has duplicate extinct events");
+            }
+            extinct_event_id_by_settlement.emplace(payload_data.settlement_id, event.id);
+        }
+    }
+
+    for (const auto& [settlement_id, extinct_event_id] : extinct_event_id_by_settlement) {
+        const auto founded_it = founded_event_id_by_settlement.find(settlement_id);
+        if (founded_it == founded_event_id_by_settlement.end()) {
+            continue;
+        }
+        if (founded_it->second > extinct_event_id) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot settlement founded/extinct event order is invalid");
         }
     }
 

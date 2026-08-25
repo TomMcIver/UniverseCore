@@ -115,8 +115,9 @@ Current implementation status:
 
 - append-only canonical `event_log` in `WorldState`
 - stable deterministic `EventId` assignment
-- `Birth` and `Death` event emission from simulation state transitions
-- event payload includes canonical simulation timestamp (`SimulationTime`) and affected entity IDs
+- strongly typed event payload model (no unstructured optional-field bag)
+- canonical event emission currently includes `Birth`, `Death`, `SettlementFounded`, and `SettlementExtinct`
+- canonical event metadata includes deterministic ID + canonical simulation timestamp (`SimulationTime`)
 - deterministic ordering derived from deterministic system update order
 
 ## Simulation LOD
@@ -337,7 +338,7 @@ Current implementation status:
 - fixed-width little-endian encoding for all persisted primitives
 - canonical collection ordering during serialization (people/households/events by stable ID, household members by person ID)
 - explicit load validation for malformed/truncated data, enum validity, ID uniqueness, references and scheduler invariants
-- snapshot schema v7 is the canonical material-chain persistence baseline introduced with Milestone 2A
+- snapshot schema v9 is the canonical persistence baseline for typed event journal + material/tool state
 
 Snapshot invariants:
 

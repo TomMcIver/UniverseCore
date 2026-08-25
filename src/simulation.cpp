@@ -178,6 +178,20 @@ std::int64_t environment_class_wild_capacity_units_per_area(const EnvironmentCla
     }
     return 0;
 }
+
+[[nodiscard]] bool event_payload_matches_type(const SimulationEvent& event) noexcept {
+    switch (event.type) {
+        case EventType::Birth:
+            return std::holds_alternative<BirthEventPayload>(event.payload);
+        case EventType::Death:
+            return std::holds_alternative<DeathEventPayload>(event.payload);
+        case EventType::SettlementFounded:
+            return std::holds_alternative<SettlementFoundedEventPayload>(event.payload);
+        case EventType::SettlementExtinct:
+            return std::holds_alternative<SettlementExtinctEventPayload>(event.payload);
+    }
+    return false;
+}
 }
 
 Simulation::Simulation(SimulationConfig config)
@@ -2044,6 +2058,7 @@ void Simulation::process_settlement_extinction() {
         if (alive_members == 0U) {
             settlement.active = false;
             settlement.access_share_points = 0U;
+            emit_settlement_extinct_event(settlement.id, settlement.region_id);
         }
     }
 }
@@ -2174,6 +2189,7 @@ void Simulation::process_settlement_founding(const std::uint64_t demographic_yea
             .active = true,
             .access_share_points = assigned_share,
         });
+        emit_settlement_founded_event(new_settlement_id, region_id, source->id);
 
         std::sort(source_alive_households.begin(), source_alive_households.end(), [&](const Household* lhs, const Household* rhs) {
             const auto lhs_seed = derive_seed(household_seed(lhs->id), SeedDomain::SettlementHouseholdSelection, demographic_year ^ new_settlement_id);
@@ -2663,6 +2679,9 @@ void Simulation::process_births(const std::uint64_t demographic_year) {
 }
 
 void Simulation::append_event(SimulationEvent event) {
+    if (!event_payload_matches_type(event)) {
+        throw std::invalid_argument("Event payload does not match event type");
+    }
     event.id = next_event_id_++;
     state_.event_log.push_back(event);
 }
@@ -2672,10 +2691,10 @@ void Simulation::emit_death_event(const PersonId person_id, const HouseholdId ho
         .id = 0,
         .timestamp = state_.time,
         .type = EventType::Death,
-        .subject_person_id = person_id,
-        .mother_id = std::nullopt,
-        .father_id = std::nullopt,
-        .household_id = household_id,
+        .payload = DeathEventPayload{
+            .person_id = person_id,
+            .household_id = household_id,
+        },
     });
 }
 
@@ -2688,10 +2707,40 @@ void Simulation::emit_birth_event(
         .id = 0,
         .timestamp = state_.time,
         .type = EventType::Birth,
-        .subject_person_id = child_id,
-        .mother_id = mother_id,
-        .father_id = father_id,
-        .household_id = household_id,
+        .payload = BirthEventPayload{
+            .child_id = child_id,
+            .mother_id = mother_id,
+            .father_id = father_id,
+            .household_id = household_id,
+        },
+    });
+}
+
+void Simulation::emit_settlement_founded_event(
+    const SettlementId settlement_id,
+    const RegionId region_id,
+    const std::optional<SettlementId> source_settlement_id) {
+    append_event(SimulationEvent{
+        .id = 0,
+        .timestamp = state_.time,
+        .type = EventType::SettlementFounded,
+        .payload = SettlementFoundedEventPayload{
+            .settlement_id = settlement_id,
+            .region_id = region_id,
+            .source_settlement_id = source_settlement_id,
+        },
+    });
+}
+
+void Simulation::emit_settlement_extinct_event(const SettlementId settlement_id, const RegionId region_id) {
+    append_event(SimulationEvent{
+        .id = 0,
+        .timestamp = state_.time,
+        .type = EventType::SettlementExtinct,
+        .payload = SettlementExtinctEventPayload{
+            .settlement_id = settlement_id,
+            .region_id = region_id,
+        },
     });
 }
 
