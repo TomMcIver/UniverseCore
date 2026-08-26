@@ -567,13 +567,23 @@ void verify_event_log_invariants(const universe::WorldState& state) {
     }
 
     std::unordered_map<universe::PersonId, std::unordered_set<universe::EventId>> direct_memories_by_owner;
+    std::unordered_map<universe::MemoryId, const universe::KnowledgeTransmission*> transmission_by_recipient_memory;
+    transmission_by_recipient_memory.reserve(state.knowledge_transmissions.size());
+    for (const auto& transmission : state.knowledge_transmissions) {
+        transmission_by_recipient_memory.emplace(transmission.recipient_memory_id, &transmission);
+    }
+
     universe::MemoryId expected_memory_id = 1;
     for (const auto& memory : state.agent_memories) {
         require(memory.id == expected_memory_id, "memory ids must be contiguous and deterministic");
         ++expected_memory_id;
         require(memory.owner_id > 0U, "memory owner id must be non-zero");
         require(memory.source_event_id > 0U, "memory event id must be non-zero");
-        require(memory.source == universe::MemorySource::DirectObservation, "M2 memory source must be direct observation");
+        require(
+            memory.source == universe::MemorySource::DirectObservation ||
+                memory.source == universe::MemorySource::Communication ||
+                memory.source == universe::MemorySource::Teaching,
+            "memory source must be recognized");
         require(memory.confidence_per_10k <= 10'000U, "memory confidence must remain bounded");
 
         const auto* owner = find_person(state, memory.owner_id);
@@ -582,15 +592,45 @@ void verify_event_log_invariants(const universe::WorldState& state) {
         const auto event_it = event_by_id.find(memory.source_event_id);
         require(event_it != event_by_id.end(), "memory source event must exist");
         const auto* source_event = event_it->second;
-        require(source_event->timestamp == memory.acquired_at, "direct memory acquisition timestamp must match source event");
+        if (memory.source == universe::MemorySource::DirectObservation) {
+            require(source_event->timestamp == memory.acquired_at, "direct memory acquisition timestamp must match source event");
+            require(
+                direct_memories_by_owner[memory.owner_id].insert(memory.source_event_id).second,
+                "owner/event direct memory must be unique");
+        }
 
-        require(
-            direct_memories_by_owner[memory.owner_id].insert(memory.source_event_id).second,
-            "owner/event direct memory must be unique");
+        if (memory.source == universe::MemorySource::Communication || memory.source == universe::MemorySource::Teaching) {
+            const auto transmission_it = transmission_by_recipient_memory.find(memory.id);
+            require(transmission_it != transmission_by_recipient_memory.end(), "communication memory must have transmission provenance");
+
+            const auto* transmission = transmission_it->second;
+            require(transmission->recipient_id == memory.owner_id, "transmission recipient must match memory owner");
+            require(transmission->transmitted_at == memory.acquired_at, "transmission time must match memory acquisition time");
+
+            const universe::AgentMemory* speaker_memory = nullptr;
+            const universe::Person* speaker = nullptr;
+            for (const auto& candidate : state.agent_memories) {
+                if (candidate.id == transmission->speaker_memory_id) {
+                    speaker_memory = &candidate;
+                    break;
+                }
+            }
+            speaker = find_person(state, transmission->speaker_id);
+            require(speaker_memory != nullptr, "transmission speaker memory must exist");
+            require(speaker != nullptr, "transmission speaker must exist");
+            require(speaker_memory->owner_id == speaker->id, "transmission speaker memory owner mismatch");
+            require(speaker_memory->source_event_id == memory.source_event_id, "transmission must preserve source event");
+
+            require(
+                transmission->speaker_settlement_id == transmission->recipient_settlement_id,
+                "transmission must stay within settlement locality");
+        }
 
         if (source_event->type == universe::EventType::Birth) {
             const auto& payload = std::get<universe::BirthEventPayload>(source_event->payload);
-            require(memory.owner_id != payload.child_id, "newborn must not remember own birth");
+            if (memory.source == universe::MemorySource::DirectObservation) {
+                require(memory.owner_id != payload.child_id, "newborn must not directly observe own birth");
+            }
         }
         if (source_event->type == universe::EventType::Death) {
             const auto& payload = std::get<universe::DeathEventPayload>(source_event->payload);
@@ -756,6 +796,7 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
     require(lhs.settlements.size() == rhs.settlements.size(), context);
     require(lhs.event_log.size() == rhs.event_log.size(), context);
     require(lhs.agent_memories.size() == rhs.agent_memories.size(), context);
+    require(lhs.knowledge_transmissions.size() == rhs.knowledge_transmissions.size(), context);
     require(lhs.agent_knowledge.size() == rhs.agent_knowledge.size(), context);
 
     for (std::size_t i = 0; i < lhs.people.size(); ++i) {
@@ -855,6 +896,23 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
         require(a.acquired_at == b.acquired_at, context);
         require(a.source == b.source, context);
         require(a.source_event_id == b.source_event_id, context);
+        require(a.confidence_per_10k == b.confidence_per_10k, context);
+    }
+
+    for (std::size_t i = 0; i < lhs.knowledge_transmissions.size(); ++i) {
+        const auto& a = lhs.knowledge_transmissions[i];
+        const auto& b = rhs.knowledge_transmissions[i];
+        require(a.id == b.id, context);
+        require(a.speaker_id == b.speaker_id, context);
+        require(a.recipient_id == b.recipient_id, context);
+        require(a.speaker_household_id == b.speaker_household_id, context);
+        require(a.recipient_household_id == b.recipient_household_id, context);
+        require(a.speaker_settlement_id == b.speaker_settlement_id, context);
+        require(a.recipient_settlement_id == b.recipient_settlement_id, context);
+        require(a.transmitted_at == b.transmitted_at, context);
+        require(a.method == b.method, context);
+        require(a.speaker_memory_id == b.speaker_memory_id, context);
+        require(a.recipient_memory_id == b.recipient_memory_id, context);
         require(a.confidence_per_10k == b.confidence_per_10k, context);
     }
 
@@ -2304,7 +2362,7 @@ int main() {
             "memory acquired_at beyond simulation time must be rejected");
 
         auto invalid_source_enum = clone_bytes(valid);
-        invalid_source_enum[memory_section.memory_offsets.front() + 24U] = std::byte{1};
+        invalid_source_enum[memory_section.memory_offsets.front() + 24U] = std::byte{3};
         refresh_snapshot_payload_hash(invalid_source_enum);
         require_snapshot_load_fails(
             invalid_source_enum,
@@ -2322,6 +2380,7 @@ int main() {
         auto duplicate_direct_memory = clone_bytes(valid);
         const auto first_owner_id = read_u64_le(duplicate_direct_memory, memory_section.memory_offsets.front() + 8U);
         const auto first_event_id = read_u64_le(duplicate_direct_memory, memory_section.memory_offsets.front() + 25U);
+        duplicate_direct_memory[memory_section.memory_offsets[1] + 24U] = std::byte{0};
         write_u64_le(duplicate_direct_memory, memory_section.memory_offsets[1] + 8U, first_owner_id);
         write_u64_le(duplicate_direct_memory, memory_section.memory_offsets[1] + 25U, first_event_id);
         refresh_snapshot_payload_hash(duplicate_direct_memory);

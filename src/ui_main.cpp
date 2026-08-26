@@ -27,6 +27,7 @@ using universe::HouseholdId;
 using universe::KnownLifeStatus;
 using universe::KnowledgeFact;
 using universe::KnowledgeFactKind;
+using universe::CommunicationMethod;
 using universe::MemorySource;
 using universe::MemoryId;
 using universe::Person;
@@ -147,6 +148,10 @@ struct UiState {
     switch (source) {
         case MemorySource::DirectObservation:
             return "Direct";
+        case MemorySource::Communication:
+            return "Communication";
+        case MemorySource::Teaching:
+            return "Teaching";
     }
     return "Unknown";
 }
@@ -833,12 +838,13 @@ int main(int argc, char** argv) {
                 ImGui::Separator();
                 ImGui::Text("Knowledge: %llu", static_cast<unsigned long long>(person_knowledge.size()));
 
-                if (ImGui::BeginTable("person_knowledge_table", 9, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY, ImVec2(0, 150))) {
+                if (ImGui::BeginTable("person_knowledge_table", 10, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY, ImVec2(0, 150))) {
                     ImGui::TableSetupColumn("KnowledgeId");
                     ImGui::TableSetupColumn("Kind");
                     ImGui::TableSetupColumn("Subject");
                     ImGui::TableSetupColumn("State");
                     ImGui::TableSetupColumn("Source");
+                    ImGui::TableSetupColumn("Provenance");
                     ImGui::TableSetupColumn("Memory");
                     ImGui::TableSetupColumn("Event");
                     ImGui::TableSetupColumn("Acquired");
@@ -852,6 +858,7 @@ int main(int argc, char** argv) {
                         const auto source_event_it =
                             source_memory == nullptr ? event_by_id.end() : event_by_id.find(source_memory->source_event_id);
                         const auto* source_event = source_event_it == event_by_id.end() ? nullptr : source_event_it->second;
+                        const auto transmission = controller.transmission_for_memory(knowledge.source_memory_id);
 
                         std::string subject;
                         std::string state_label;
@@ -878,18 +885,30 @@ int main(int argc, char** argv) {
                         ImGui::TableSetColumnIndex(4);
                         ImGui::Text("%s %u/10000", knowledge_source_label(knowledge.source), knowledge.confidence_per_10k);
                         ImGui::TableSetColumnIndex(5);
-                        ImGui::Text("#%llu", static_cast<unsigned long long>(knowledge.source_memory_id));
+                        if (!transmission.has_value()) {
+                            ImGui::TextUnformatted("DirectObservation");
+                        } else {
+                            const auto method_label = transmission->method == CommunicationMethod::Teaching
+                                ? "Taught"
+                                : "Told";
+                            ImGui::Text("%s by #%llu y%llu",
+                                method_label,
+                                static_cast<unsigned long long>(transmission->speaker_id),
+                                static_cast<unsigned long long>(universe::DemographicCalendarAdapter::demographic_year(transmission->transmitted_at)));
+                        }
                         ImGui::TableSetColumnIndex(6);
+                        ImGui::Text("#%llu", static_cast<unsigned long long>(knowledge.source_memory_id));
+                        ImGui::TableSetColumnIndex(7);
                         if (source_event == nullptr) {
                             ImGui::TextUnformatted("Unknown");
                         } else {
                             ImGui::Text("%s #%llu", event_type_label(source_event->type), static_cast<unsigned long long>(source_event->id));
                         }
-                        ImGui::TableSetColumnIndex(7);
+                        ImGui::TableSetColumnIndex(8);
                         ImGui::Text("y%llu t=%lld",
                             static_cast<unsigned long long>(universe::DemographicCalendarAdapter::demographic_year(knowledge.acquired_at)),
                             static_cast<long long>(knowledge.acquired_at.ticks));
-                        ImGui::TableSetColumnIndex(8);
+                        ImGui::TableSetColumnIndex(9);
                         ImGui::Text("y%llu t=%lld",
                             static_cast<unsigned long long>(universe::DemographicCalendarAdapter::demographic_year(knowledge.updated_at)),
                             static_cast<long long>(knowledge.updated_at.ticks));

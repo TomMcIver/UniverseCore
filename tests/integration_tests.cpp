@@ -97,25 +97,69 @@ void verify_resource_invariants(const universe::WorldState& state, const std::in
 void verify_memory_invariants(const universe::WorldState& state, const universe::Simulation& simulation) {
     std::unordered_set<universe::MemoryId> ids;
     std::unordered_map<universe::PersonId, std::unordered_set<universe::EventId>> direct_by_owner;
+    std::unordered_map<universe::MemoryId, const universe::KnowledgeTransmission*> transmission_by_recipient_memory;
+    transmission_by_recipient_memory.reserve(state.knowledge_transmissions.size());
+    for (const auto& transmission : state.knowledge_transmissions) {
+        transmission_by_recipient_memory.emplace(transmission.recipient_memory_id, &transmission);
+    }
 
     for (const auto& memory : state.agent_memories) {
         require(memory.id > 0U, "memory ids must be non-zero");
         require(memory.owner_id > 0U, "memory owner ids must be non-zero");
         require(memory.source_event_id > 0U, "memory source event ids must be non-zero");
-        require(memory.source == universe::MemorySource::DirectObservation, "M2 memory sources must be direct observation");
-        require(memory.confidence_per_10k <= 10'000U, "memory confidence must be bounded");
-        require(memory.confidence_per_10k == 10'000U, "direct observation confidence starts at full confidence");
-        require(ids.insert(memory.id).second, "memory ids must be unique");
         require(
-            direct_by_owner[memory.owner_id].insert(memory.source_event_id).second,
-            "owner+event direct memory must be unique");
+            memory.source == universe::MemorySource::DirectObservation ||
+                memory.source == universe::MemorySource::Communication ||
+                memory.source == universe::MemorySource::Teaching,
+            "memory source must be recognized");
+        require(memory.confidence_per_10k <= 10'000U, "memory confidence must be bounded");
+        require(ids.insert(memory.id).second, "memory ids must be unique");
+
+        if (memory.source == universe::MemorySource::DirectObservation) {
+            require(memory.confidence_per_10k == 10'000U, "direct observation confidence starts at full confidence");
+            require(
+                direct_by_owner[memory.owner_id].insert(memory.source_event_id).second,
+                "owner+event direct memory must be unique");
+        }
 
         const auto* owner = find_person(state, memory.owner_id);
         require(owner != nullptr, "memory owner must reference existing person");
 
         const auto* source_event = find_event(state, memory.source_event_id);
         require(source_event != nullptr, "memory source event must reference existing event");
-        require(source_event->timestamp == memory.acquired_at, "direct memory acquired_at must match source event timestamp");
+        if (memory.source == universe::MemorySource::DirectObservation) {
+            require(source_event->timestamp == memory.acquired_at, "direct memory acquired_at must match source event timestamp");
+        }
+
+        if (memory.source == universe::MemorySource::Communication || memory.source == universe::MemorySource::Teaching) {
+            const auto transmission_it = transmission_by_recipient_memory.find(memory.id);
+            require(transmission_it != transmission_by_recipient_memory.end(), "communication memory must have transmission");
+
+            const auto* transmission = transmission_it->second;
+            require(transmission->recipient_id == memory.owner_id, "transmission recipient must match memory owner");
+            require(transmission->transmitted_at == memory.acquired_at, "transmission time must match memory acquired_at");
+            require(transmission->confidence_per_10k == memory.confidence_per_10k, "transmission confidence must match memory confidence");
+
+            const universe::AgentMemory* speaker_memory = nullptr;
+            for (const auto& candidate : state.agent_memories) {
+                if (candidate.id == transmission->speaker_memory_id) {
+                    speaker_memory = &candidate;
+                    break;
+                }
+            }
+            require(speaker_memory != nullptr, "transmission speaker memory must exist");
+            require(speaker_memory->owner_id == transmission->speaker_id, "transmission speaker must own speaker memory");
+            require(speaker_memory->source_event_id == memory.source_event_id, "transmission chain must preserve event provenance");
+
+            const auto* speaker = find_person(state, transmission->speaker_id);
+            require(speaker != nullptr, "transmission speaker must exist");
+
+            require(transmission->speaker_settlement_id > 0U, "transmission speaker settlement id must be valid");
+            require(transmission->recipient_settlement_id > 0U, "transmission recipient settlement id must be valid");
+            require(
+                transmission->speaker_settlement_id == transmission->recipient_settlement_id,
+                "transmissions must be local to same settlement at send time");
+        }
 
         require(
             simulation.person_remembers_event(memory.owner_id, memory.source_event_id),
@@ -193,9 +237,16 @@ int main() {
                 require(
                     deterministic_a.person_remembers_event(payload.mother_id, event.id),
                     "mother must remember birth through direct observation");
-                require(
-                    !deterministic_a.person_remembers_event(payload.child_id, event.id),
-                    "newborn must not remember own birth");
+                bool child_has_direct_birth_memory = false;
+                for (const auto& memory : deterministic_a.state().agent_memories) {
+                    if (memory.owner_id == payload.child_id &&
+                        memory.source_event_id == event.id &&
+                        memory.source == universe::MemorySource::DirectObservation) {
+                        child_has_direct_birth_memory = true;
+                        break;
+                    }
+                }
+                require(!child_has_direct_birth_memory, "newborn must not directly observe own birth");
                 ++checked_births;
             } else if (event.type == universe::EventType::Death) {
                 const auto& payload = std::get<universe::DeathEventPayload>(event.payload);
@@ -206,7 +257,7 @@ int main() {
             } else if (event.type == universe::EventType::SettlementExtinct) {
                 std::uint64_t observer_count = 0;
                 for (const auto& memory : deterministic_a.state().agent_memories) {
-                    if (memory.source_event_id == event.id) {
+                    if (memory.source_event_id == event.id && memory.source == universe::MemorySource::DirectObservation) {
                         ++observer_count;
                     }
                 }
@@ -330,12 +381,16 @@ int main() {
                 require(observer_household.has_value(), "birth observer should know newborn household");
                 require(*observer_household == payload.household_id, "birth observer household knowledge must match birth household");
 
-                require(
-                    !knowledge_run.known_life_status(payload.child_id, payload.child_id).has_value(),
-                    "newborn must not automatically gain self life-status knowledge from own birth event");
-                require(
-                    !knowledge_run.known_household_for_person(payload.child_id, payload.child_id).has_value(),
-                    "newborn must not automatically gain self household knowledge from own birth event");
+                bool newborn_direct_birth_memory = false;
+                for (const auto& memory : state.agent_memories) {
+                    if (memory.owner_id == payload.child_id &&
+                        memory.source_event_id == event.id &&
+                        memory.source == universe::MemorySource::DirectObservation) {
+                        newborn_direct_birth_memory = true;
+                        break;
+                    }
+                }
+                require(!newborn_direct_birth_memory, "newborn must not directly observe own birth event");
                 require(
                     !knowledge_run.known_life_status(unrelated_id, payload.child_id).has_value(),
                     "unrelated non-observer must not gain birth life-status knowledge");
@@ -355,7 +410,8 @@ int main() {
 
                 universe::PersonId unrelated_id = 0;
                 for (const auto& person : state.people) {
-                    if (std::find(observers.begin(), observers.end(), person.id) == observers.end()) {
+                    if (std::find(observers.begin(), observers.end(), person.id) == observers.end() &&
+                        !knowledge_run.person_remembers_event(person.id, event.id)) {
                         unrelated_id = person.id;
                         break;
                     }
@@ -534,6 +590,86 @@ int main() {
             }
         }
         require(post_knowledge_id == pre_knowledge_id, "knowledge id must remain stable across load and later upsert update");
+    }
+
+    {
+        universe::Simulation communication_run{config};
+        communication_run.run_years(220);
+        const auto& state = communication_run.state();
+
+        std::uint64_t same_household_transmissions = 0;
+        std::uint64_t same_settlement_cross_household_transmissions = 0;
+        std::uint64_t cross_settlement_transmissions = 0;
+
+        for (const auto& transmission : state.knowledge_transmissions) {
+            if (transmission.speaker_settlement_id != transmission.recipient_settlement_id) {
+                ++cross_settlement_transmissions;
+                continue;
+            }
+
+            if (transmission.speaker_household_id == transmission.recipient_household_id) {
+                ++same_household_transmissions;
+            } else {
+                ++same_settlement_cross_household_transmissions;
+            }
+        }
+
+        require(cross_settlement_transmissions == 0U, "communication must never cross settlements");
+        require(same_household_transmissions > 0U, "communication run should include same-household transfer");
+        require(
+            same_settlement_cross_household_transmissions > 0U,
+            "communication run should include same-settlement cross-household transfer");
+
+        bool stale_propagation_verified = false;
+        std::unordered_map<universe::PersonId, const universe::SimulationEvent*> death_event_by_person;
+        for (const auto& event : state.event_log) {
+            if (event.type != universe::EventType::Death) {
+                continue;
+            }
+            const auto& payload = std::get<universe::DeathEventPayload>(event.payload);
+            death_event_by_person.emplace(payload.person_id, &event);
+        }
+
+        for (const auto& transmission : state.knowledge_transmissions) {
+            const auto* recipient_memory = find_memory(state, transmission.recipient_memory_id);
+            if (recipient_memory == nullptr) {
+                continue;
+            }
+
+            const auto* source_event = find_event(state, recipient_memory->source_event_id);
+            if (source_event == nullptr || source_event->type != universe::EventType::Birth) {
+                continue;
+            }
+
+            const auto& birth_payload = std::get<universe::BirthEventPayload>(source_event->payload);
+            const auto death_it = death_event_by_person.find(birth_payload.child_id);
+            if (death_it == death_event_by_person.end()) {
+                continue;
+            }
+            const auto* death_event = death_it->second;
+            if (death_event == nullptr || death_event->timestamp >= transmission.transmitted_at) {
+                continue;
+            }
+
+            if (communication_run.person_remembers_event(transmission.speaker_id, death_event->id)) {
+                continue;
+            }
+
+            const auto speaker_view = communication_run.known_life_status(transmission.speaker_id, birth_payload.child_id);
+            const auto recipient_view = communication_run.known_life_status(transmission.recipient_id, birth_payload.child_id);
+            if (!speaker_view.has_value() || !recipient_view.has_value()) {
+                continue;
+            }
+
+            if (*speaker_view == universe::KnownLifeStatus::Alive && *recipient_view == universe::KnownLifeStatus::Alive) {
+                const auto* world_person = find_person(state, birth_payload.child_id);
+                require(world_person != nullptr && !world_person->alive, "stale propagation scenario requires world-truth dead target");
+                stale_propagation_verified = true;
+                break;
+            }
+        }
+
+        require(stale_propagation_verified, "stale subjective knowledge must be able to propagate by communication");
     }
 
     {

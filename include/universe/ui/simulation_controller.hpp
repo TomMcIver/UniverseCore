@@ -146,7 +146,10 @@ public:
     [[nodiscard]] std::span<const RegionEnvironmentState> regions() const noexcept;
     [[nodiscard]] std::span<const SimulationEvent> events() const noexcept;
     [[nodiscard]] std::span<const AgentMemory> agent_memories() const noexcept;
+    [[nodiscard]] std::span<const KnowledgeTransmission> knowledge_transmissions() const noexcept;
     [[nodiscard]] std::vector<AgentMemory> memories_for_person(PersonId person_id) const;
+    [[nodiscard]] std::vector<KnowledgeTransmission> transmissions_for_recipient(PersonId person_id) const;
+    [[nodiscard]] std::optional<KnowledgeTransmission> transmission_for_memory(MemoryId recipient_memory_id) const;
     [[nodiscard]] bool person_remembers_event(PersonId person_id, EventId event_id) const noexcept;
     [[nodiscard]] std::uint64_t memory_count_for_person(PersonId person_id) const noexcept;
     [[nodiscard]] std::span<const AgentKnowledge> agent_knowledge() const noexcept;

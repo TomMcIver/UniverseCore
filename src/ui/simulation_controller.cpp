@@ -248,8 +248,20 @@ std::span<const AgentMemory> SimulationController::agent_memories() const noexce
     return simulation_.agent_memories();
 }
 
+std::span<const KnowledgeTransmission> SimulationController::knowledge_transmissions() const noexcept {
+    return simulation_.knowledge_transmissions();
+}
+
 std::vector<AgentMemory> SimulationController::memories_for_person(const PersonId person_id) const {
     return simulation_.memories_for_person(person_id);
+}
+
+std::vector<KnowledgeTransmission> SimulationController::transmissions_for_recipient(const PersonId person_id) const {
+    return simulation_.transmissions_for_recipient(person_id);
+}
+
+std::optional<KnowledgeTransmission> SimulationController::transmission_for_memory(const MemoryId recipient_memory_id) const {
+    return simulation_.transmission_for_memory(recipient_memory_id);
 }
 
 bool SimulationController::person_remembers_event(const PersonId person_id, const EventId event_id) const noexcept {

@@ -59,6 +59,17 @@ const universe::AgentMemory* find_memory_by_id(const universe::WorldState& state
     return nullptr;
 }
 
+const universe::KnowledgeTransmission* find_transmission_by_recipient_memory(
+    const universe::WorldState& state,
+    const universe::MemoryId memory_id) {
+    for (const auto& transmission : state.knowledge_transmissions) {
+        if (transmission.recipient_memory_id == memory_id) {
+            return &transmission;
+        }
+    }
+    return nullptr;
+}
+
 }  // namespace
 
 int main() {
@@ -156,21 +167,58 @@ int main() {
             require(memory.id > 0U, "memory id must be non-zero");
             require(memory.owner_id > 0U, "memory owner id must be non-zero");
             require(memory.source_event_id > 0U, "memory event id must be non-zero");
-            require(memory.source == universe::MemorySource::DirectObservation, "M2 memory source must be direct observation");
+            require(
+                memory.source == universe::MemorySource::DirectObservation ||
+                    memory.source == universe::MemorySource::Communication ||
+                    memory.source == universe::MemorySource::Teaching,
+                "memory source must be recognized");
             require(memory.confidence_per_10k <= 10'000U, "memory confidence must be bounded");
-            require(memory.confidence_per_10k == 10'000U, "direct observations start at full confidence");
             require(memory_ids.insert(memory.id).second, "memory ids must be unique");
 
-            require(
-                direct_pairs[memory.owner_id].insert(memory.source_event_id).second,
-                "direct observation memory must be unique per owner/event");
+            if (memory.source == universe::MemorySource::DirectObservation) {
+                require(memory.confidence_per_10k == 10'000U, "direct observations start at full confidence");
+                require(
+                    direct_pairs[memory.owner_id].insert(memory.source_event_id).second,
+                    "direct observation memory must be unique per owner/event");
+            }
 
             const auto* owner = find_person_by_id(state, memory.owner_id);
             require(owner != nullptr, "memory owner must reference existing person");
             const auto* event = find_event_by_id(state, memory.source_event_id);
             require(event != nullptr, "memory source event must reference existing event");
-            require(event->timestamp == memory.acquired_at, "direct memory must align with source event timestamp");
+            if (memory.source == universe::MemorySource::DirectObservation) {
+                require(event->timestamp == memory.acquired_at, "direct memory must align with source event timestamp");
+            }
+
+            if (memory.source == universe::MemorySource::Communication || memory.source == universe::MemorySource::Teaching) {
+                const auto* transmission = find_transmission_by_recipient_memory(state, memory.id);
+                require(transmission != nullptr, "communication memory must have provenance transmission");
+                require(transmission->recipient_id == memory.owner_id, "transmission recipient must match memory owner");
+                require(transmission->recipient_memory_id == memory.id, "transmission memory reference must match");
+                require(transmission->transmitted_at == memory.acquired_at, "transmission time must match memory acquisition");
+                require(transmission->confidence_per_10k == memory.confidence_per_10k, "transmission confidence must match memory confidence");
+
+                const auto* speaker_memory = find_memory_by_id(state, transmission->speaker_memory_id);
+                require(speaker_memory != nullptr, "transmission speaker memory must exist");
+                require(speaker_memory->owner_id == transmission->speaker_id, "transmission speaker must own speaker memory");
+                require(speaker_memory->source_event_id == memory.source_event_id, "transmission must preserve source event");
+            }
             require(memories.person_remembers_event(memory.owner_id, memory.source_event_id), "person_remembers_event must match stored memory");
+        }
+
+        for (const auto& transmission : state.knowledge_transmissions) {
+            require(transmission.id > 0U, "transmission id must be non-zero");
+            require(transmission.speaker_id > 0U, "transmission speaker id must be non-zero");
+            require(transmission.recipient_id > 0U, "transmission recipient id must be non-zero");
+            require(transmission.speaker_household_id > 0U, "transmission speaker household id must be non-zero");
+            require(transmission.recipient_household_id > 0U, "transmission recipient household id must be non-zero");
+            require(transmission.speaker_settlement_id > 0U, "transmission speaker settlement id must be non-zero");
+            require(transmission.recipient_settlement_id > 0U, "transmission recipient settlement id must be non-zero");
+            require(transmission.speaker_settlement_id == transmission.recipient_settlement_id, "transmission must stay within one settlement");
+            require(transmission.speaker_id != transmission.recipient_id, "transmission must involve distinct people");
+            require(transmission.speaker_memory_id > 0U, "transmission speaker memory id must be non-zero");
+            require(transmission.recipient_memory_id > 0U, "transmission recipient memory id must be non-zero");
+            require(transmission.confidence_per_10k <= 10'000U, "transmission confidence must be bounded");
         }
 
         for (const auto& person : state.people) {

@@ -5,6 +5,7 @@
 #include <optional>
 #include <span>
 #include <unordered_map>
+#include <unordered_set>
 #include <variant>
 #include <vector>
 
@@ -22,6 +23,7 @@ using SettlementId = std::uint64_t;
 using EventId = std::uint64_t;
 using MemoryId = std::uint64_t;
 using KnowledgeId = std::uint64_t;
+using CommunicationId = std::uint64_t;
 
 enum class BiologicalSex : std::uint8_t {
     Female = 0,
@@ -155,6 +157,8 @@ struct SimulationEvent {
 
 enum class MemorySource : std::uint8_t {
     DirectObservation = 0,
+    Communication = 1,
+    Teaching = 2,
 };
 
 struct AgentMemory {
@@ -166,6 +170,28 @@ struct AgentMemory {
     std::uint32_t confidence_per_10k{10'000};
 
     [[nodiscard]] bool operator==(const AgentMemory& other) const = default;
+};
+
+enum class CommunicationMethod : std::uint8_t {
+    Communication = 0,
+    Teaching = 1,
+};
+
+struct KnowledgeTransmission {
+    CommunicationId id{};
+    PersonId speaker_id{};
+    PersonId recipient_id{};
+    HouseholdId speaker_household_id{};
+    HouseholdId recipient_household_id{};
+    SettlementId speaker_settlement_id{};
+    SettlementId recipient_settlement_id{};
+    SimulationTime transmitted_at{};
+    CommunicationMethod method{CommunicationMethod::Communication};
+    MemoryId speaker_memory_id{};
+    MemoryId recipient_memory_id{};
+    std::uint32_t confidence_per_10k{10'000};
+
+    [[nodiscard]] bool operator==(const KnowledgeTransmission& other) const = default;
 };
 
 enum class KnownLifeStatus : std::uint8_t {
@@ -305,6 +331,7 @@ struct WorldState {
     std::vector<Settlement> settlements{};
     std::vector<SimulationEvent> event_log{};
     std::vector<AgentMemory> agent_memories{};
+    std::vector<KnowledgeTransmission> knowledge_transmissions{};
     std::vector<AgentKnowledge> agent_knowledge{};
 };
 
@@ -316,6 +343,9 @@ public:
     [[nodiscard]] SimulationTime time() const noexcept;
     [[nodiscard]] std::span<const AgentMemory> agent_memories() const noexcept;
     [[nodiscard]] std::vector<AgentMemory> memories_for_person(PersonId person_id) const;
+    [[nodiscard]] std::span<const KnowledgeTransmission> knowledge_transmissions() const noexcept;
+    [[nodiscard]] std::vector<KnowledgeTransmission> transmissions_for_recipient(PersonId person_id) const;
+    [[nodiscard]] std::optional<KnowledgeTransmission> transmission_for_memory(MemoryId recipient_memory_id) const;
     [[nodiscard]] bool person_remembers_event(PersonId person_id, EventId event_id) const noexcept;
     [[nodiscard]] std::uint64_t memory_count_for_person(PersonId person_id) const noexcept;
     [[nodiscard]] std::span<const AgentKnowledge> agent_knowledge() const noexcept;
@@ -337,6 +367,7 @@ private:
     [[nodiscard]] SettlementId next_settlement_id() noexcept;
     [[nodiscard]] MemoryId next_memory_id() noexcept;
     [[nodiscard]] KnowledgeId next_knowledge_id() noexcept;
+    [[nodiscard]] CommunicationId next_communication_id() noexcept;
     [[nodiscard]] SimulationSeed root_seed() const noexcept;
     [[nodiscard]] SimulationSeed person_seed(PersonId person_id) const noexcept;
     [[nodiscard]] SimulationSeed household_seed(HouseholdId household_id) const noexcept;
@@ -363,6 +394,7 @@ private:
     [[nodiscard]] std::uint64_t current_food_period() const noexcept;
     void run_scheduled_systems_until(SimulationTime target_time);
     void process_demography_period(std::uint64_t demographic_year);
+    void process_communication_teaching(std::uint64_t demographic_year);
     void process_food_period(std::uint64_t food_period);
     void process_materials_period(std::uint64_t food_period);
     void process_occupation_reassignment(std::uint64_t demographic_year);
@@ -395,7 +427,8 @@ private:
     EventId emit_birth_event(PersonId child_id, HouseholdId household_id, PersonId mother_id, std::optional<PersonId> father_id);
     EventId emit_settlement_founded_event(SettlementId settlement_id, RegionId region_id, std::optional<SettlementId> source_settlement_id);
     EventId emit_settlement_extinct_event(SettlementId settlement_id, RegionId region_id);
-    void append_memory(AgentMemory memory);
+    [[nodiscard]] MemoryId append_memory(AgentMemory memory);
+    void append_knowledge_transmission(KnowledgeTransmission transmission);
     void append_direct_observation_memories(EventId source_event_id, std::span<const PersonId> observer_ids, SimulationTime acquired_at);
     void derive_knowledge_from_memory(const AgentMemory& memory);
     void upsert_knowledge(
@@ -408,6 +441,7 @@ private:
         std::uint64_t primary_subject_id,
         std::uint64_t secondary_subject_id);
     void rebuild_knowledge_indexes();
+    void rebuild_communication_indexes();
     void refresh_population_count() noexcept;
 
     struct KnowledgeSemanticKey {
@@ -446,6 +480,7 @@ private:
     EventId next_event_id_{1};
     MemoryId next_memory_id_{1};
     KnowledgeId next_knowledge_id_{1};
+    CommunicationId next_communication_id_{1};
     SimulationDuration demography_interval_{DemographicCalendarAdapter::year_duration()};
     SimulationTime demography_next_run_{DemographicCalendarAdapter::year_duration().ticks};
     SimulationDuration food_interval_{days(1)};
@@ -454,6 +489,27 @@ private:
     MaterialModelParameters material_parameters_{};
     std::unordered_map<PersonId, std::vector<std::size_t>> knowledge_indices_by_owner_{};
     std::unordered_map<KnowledgeSemanticKey, std::size_t, KnowledgeSemanticKeyHash> knowledge_index_by_semantic_key_{};
+
+    struct TransmissionSemanticKey {
+        PersonId recipient_id{};
+        MemoryId speaker_memory_id{};
+
+        [[nodiscard]] bool operator==(const TransmissionSemanticKey& other) const noexcept {
+            return recipient_id == other.recipient_id && speaker_memory_id == other.speaker_memory_id;
+        }
+    };
+
+    struct TransmissionSemanticKeyHash {
+        [[nodiscard]] std::size_t operator()(const TransmissionSemanticKey& key) const noexcept {
+            const auto mixed =
+                (key.recipient_id * 0x9E3779B97F4A7C15ULL) ^
+                (key.speaker_memory_id * 0xD6E8FEB86659FD93ULL);
+            return static_cast<std::size_t>(mixed);
+        }
+    };
+
+    std::unordered_map<MemoryId, std::size_t> communication_index_by_recipient_memory_{};
+    std::unordered_set<TransmissionSemanticKey, TransmissionSemanticKeyHash> transmission_semantic_keys_{};
 
     friend class SnapshotCodec;
 };

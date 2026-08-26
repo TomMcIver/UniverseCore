@@ -192,6 +192,10 @@ private:
     return id > 0U;
 }
 
+[[nodiscard]] bool is_valid_communication_id(const CommunicationId id) noexcept {
+    return id > 0U;
+}
+
 struct DirectMemoryKey {
     PersonId owner_id{};
     EventId event_id{};
@@ -568,6 +572,32 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
         payload.write_i64(settlement->cumulative_basic_tool_broken);
     }
 
+    std::vector<const KnowledgeTransmission*> transmission_order;
+    transmission_order.reserve(simulation.state_.knowledge_transmissions.size());
+    for (const auto& transmission : simulation.state_.knowledge_transmissions) {
+        transmission_order.push_back(&transmission);
+    }
+    std::sort(transmission_order.begin(), transmission_order.end(), [](const KnowledgeTransmission* lhs, const KnowledgeTransmission* rhs) {
+        return lhs->id < rhs->id;
+    });
+
+    payload.write_u64(static_cast<std::uint64_t>(transmission_order.size()));
+    for (const auto* transmission : transmission_order) {
+        payload.write_u64(transmission->id);
+        payload.write_u64(transmission->speaker_id);
+        payload.write_u64(transmission->recipient_id);
+        payload.write_u64(transmission->speaker_household_id);
+        payload.write_u64(transmission->recipient_household_id);
+        payload.write_u64(transmission->speaker_settlement_id);
+        payload.write_u64(transmission->recipient_settlement_id);
+        payload.write_i64(transmission->transmitted_at.ticks);
+        payload.write_u8(static_cast<std::uint8_t>(transmission->method));
+        payload.write_u64(transmission->speaker_memory_id);
+        payload.write_u64(transmission->recipient_memory_id);
+        payload.write_u32(transmission->confidence_per_10k);
+    }
+    payload.write_u64(simulation.next_communication_id_);
+
     auto payload_bytes = payload.take();
     const auto payload_hash = fnv1a64(payload_bytes);
 
@@ -637,6 +667,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     std::uint64_t next_event_id = 0;
     std::uint64_t next_memory_id = 0;
     std::uint64_t next_knowledge_id = 0;
+    std::uint64_t next_communication_id = 0;
     std::int64_t demography_interval_ticks = 0;
     std::int64_t demography_next_run_ticks = 0;
     std::int64_t food_interval_ticks = 0;
@@ -1097,7 +1128,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         if (!is_valid_event_id(memory.source_event_id)) {
             return load_error(SnapshotErrorCode::InvalidReference, "Snapshot memory source event id must be non-zero");
         }
-        if (source_raw > static_cast<std::uint8_t>(MemorySource::DirectObservation)) {
+        if (source_raw > static_cast<std::uint8_t>(MemorySource::Teaching)) {
             return load_error(SnapshotErrorCode::InvalidEnum, "Snapshot memory source enum is invalid");
         }
         memory.source = static_cast<MemorySource>(source_raw);
@@ -1371,6 +1402,79 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         settlement->cumulative_timber_produced = cumulative_timber_produced;
         settlement->cumulative_basic_tool_produced = cumulative_basic_tool_produced;
         settlement->cumulative_basic_tool_broken = cumulative_basic_tool_broken;
+    }
+
+    std::uint64_t transmission_count = 0;
+    if (!payload_reader.read_u64(transmission_count)) {
+        return load_error(SnapshotErrorCode::TruncatedData, "Snapshot transmission section is truncated");
+    }
+    if (transmission_count > payload_reader.remaining() / 85U) {
+        return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot transmission section has invalid length");
+    }
+
+    restored_state.knowledge_transmissions.clear();
+    restored_state.knowledge_transmissions.reserve(static_cast<std::size_t>(transmission_count));
+    std::unordered_set<CommunicationId> transmission_ids;
+    std::unordered_set<MemoryId> recipient_memory_ids;
+
+    for (std::uint64_t i = 0; i < transmission_count; ++i) {
+        KnowledgeTransmission transmission{};
+        std::uint8_t method_raw = 0;
+
+        if (!payload_reader.read_u64(transmission.id) ||
+            !payload_reader.read_u64(transmission.speaker_id) ||
+            !payload_reader.read_u64(transmission.recipient_id) ||
+            !payload_reader.read_u64(transmission.speaker_household_id) ||
+            !payload_reader.read_u64(transmission.recipient_household_id) ||
+            !payload_reader.read_u64(transmission.speaker_settlement_id) ||
+            !payload_reader.read_u64(transmission.recipient_settlement_id) ||
+            !payload_reader.read_i64(transmission.transmitted_at.ticks) ||
+            !payload_reader.read_u8(method_raw) ||
+            !payload_reader.read_u64(transmission.speaker_memory_id) ||
+            !payload_reader.read_u64(transmission.recipient_memory_id) ||
+            !payload_reader.read_u32(transmission.confidence_per_10k)) {
+            return load_error(SnapshotErrorCode::TruncatedData, "Snapshot transmission record is truncated");
+        }
+
+        if (!is_valid_communication_id(transmission.id) ||
+            !is_valid_person_id(transmission.speaker_id) ||
+            !is_valid_person_id(transmission.recipient_id) ||
+            !is_valid_household_id(transmission.speaker_household_id) ||
+            !is_valid_household_id(transmission.recipient_household_id) ||
+            !is_valid_settlement_id(transmission.speaker_settlement_id) ||
+            !is_valid_settlement_id(transmission.recipient_settlement_id) ||
+            !is_valid_memory_id(transmission.speaker_memory_id) ||
+            !is_valid_memory_id(transmission.recipient_memory_id)) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot transmission record contains invalid references");
+        }
+        if (transmission.speaker_id == transmission.recipient_id) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot transmission speaker and recipient must differ");
+        }
+        if (transmission.speaker_settlement_id != transmission.recipient_settlement_id) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot transmission must remain within one settlement");
+        }
+        if (method_raw > static_cast<std::uint8_t>(CommunicationMethod::Teaching)) {
+            return load_error(SnapshotErrorCode::InvalidEnum, "Snapshot transmission method enum is invalid");
+        }
+        transmission.method = static_cast<CommunicationMethod>(method_raw);
+        if (transmission.transmitted_at.ticks < 0 || transmission.transmitted_at.ticks > restored_state.time.ticks) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot transmission time is out of range");
+        }
+        if (transmission.confidence_per_10k > 10'000U) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot transmission confidence must be <= 10000");
+        }
+        if (!transmission_ids.insert(transmission.id).second) {
+            return load_error(SnapshotErrorCode::DuplicateId, "Snapshot contains duplicate transmission ids");
+        }
+        if (!recipient_memory_ids.insert(transmission.recipient_memory_id).second) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot transmission recipient memory must be unique");
+        }
+
+        restored_state.knowledge_transmissions.push_back(transmission);
+    }
+
+    if (!payload_reader.read_u64(next_communication_id)) {
+        return load_error(SnapshotErrorCode::TruncatedData, "Snapshot next communication id is truncated");
     }
 
     if (!payload_reader.fully_consumed()) {
@@ -1936,6 +2040,69 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         return load_error(SnapshotErrorCode::InvalidState, "Snapshot next memory id is inconsistent");
     }
 
+    CommunicationId expected_communication_id = 1;
+    std::unordered_set<Simulation::TransmissionSemanticKey, Simulation::TransmissionSemanticKeyHash> transmission_semantic_keys;
+    for (const auto& transmission : restored_state.knowledge_transmissions) {
+        if (transmission.id != expected_communication_id) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot communication ids must be contiguous");
+        }
+        ++expected_communication_id;
+
+        if (!person_by_id.contains(transmission.speaker_id) || !person_by_id.contains(transmission.recipient_id)) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot transmission references unknown person");
+        }
+        if (!household_by_id.contains(transmission.speaker_household_id) ||
+            !household_by_id.contains(transmission.recipient_household_id)) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot transmission references unknown household");
+        }
+        if (!settlement_by_id.contains(transmission.speaker_settlement_id) ||
+            !settlement_by_id.contains(transmission.recipient_settlement_id)) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot transmission references unknown settlement");
+        }
+
+        const auto speaker_memory_it = memory_by_id.find(transmission.speaker_memory_id);
+        const auto recipient_memory_it = memory_by_id.find(transmission.recipient_memory_id);
+        if (speaker_memory_it == memory_by_id.end() || recipient_memory_it == memory_by_id.end()) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot transmission references unknown memory");
+        }
+
+        const auto* speaker_memory = speaker_memory_it->second;
+        const auto* recipient_memory = recipient_memory_it->second;
+        if (speaker_memory->owner_id != transmission.speaker_id || recipient_memory->owner_id != transmission.recipient_id) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot transmission memory owner mismatch");
+        }
+        if (recipient_memory->source != MemorySource::Communication && recipient_memory->source != MemorySource::Teaching) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot transmission recipient memory must be communication-derived");
+        }
+        if (recipient_memory->source_event_id != speaker_memory->source_event_id) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot transmission source event mismatch");
+        }
+        if (recipient_memory->source == MemorySource::Communication && transmission.method != CommunicationMethod::Communication) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot communication memory must match transmission method");
+        }
+        if (recipient_memory->source == MemorySource::Teaching && transmission.method != CommunicationMethod::Teaching) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot teaching memory must match transmission method");
+        }
+        if (transmission.transmitted_at != recipient_memory->acquired_at) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot transmission time must match recipient memory time");
+        }
+        if (transmission.confidence_per_10k != recipient_memory->confidence_per_10k) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot transmission confidence must match recipient memory confidence");
+        }
+
+        const auto inserted = transmission_semantic_keys.insert(Simulation::TransmissionSemanticKey{
+            .recipient_id = transmission.recipient_id,
+            .speaker_memory_id = transmission.speaker_memory_id,
+        });
+        if (!inserted.second) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot duplicate transmission semantic key");
+        }
+    }
+
+    if (next_communication_id != expected_communication_id) {
+        return load_error(SnapshotErrorCode::InvalidState, "Snapshot next communication id is inconsistent");
+    }
+
     std::unordered_set<KnowledgeSemanticKey, KnowledgeSemanticKeyHash> knowledge_semantic_keys;
     KnowledgeId expected_knowledge_id = 1;
     for (const auto& knowledge : restored_state.agent_knowledge) {
@@ -2223,6 +2390,9 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     std::sort(restored_state.agent_knowledge.begin(), restored_state.agent_knowledge.end(), [](const AgentKnowledge& lhs, const AgentKnowledge& rhs) {
         return lhs.id < rhs.id;
     });
+    std::sort(restored_state.knowledge_transmissions.begin(), restored_state.knowledge_transmissions.end(), [](const KnowledgeTransmission& lhs, const KnowledgeTransmission& rhs) {
+        return lhs.id < rhs.id;
+    });
 
     std::unordered_map<PersonId, std::vector<std::size_t>> rebuilt_knowledge_indices_by_owner;
     std::unordered_map<Simulation::KnowledgeSemanticKey, std::size_t, Simulation::KnowledgeSemanticKeyHash> rebuilt_knowledge_index_by_semantic_key;
@@ -2264,12 +2434,14 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     destination.next_event_id_ = next_event_id;
     destination.next_memory_id_ = next_memory_id;
     destination.next_knowledge_id_ = next_knowledge_id;
+    destination.next_communication_id_ = next_communication_id;
     destination.demography_interval_ = SimulationDuration{demography_interval_ticks};
     destination.demography_next_run_ = SimulationTime{demography_next_run_ticks};
     destination.food_interval_ = SimulationDuration{food_interval_ticks};
     destination.food_next_run_ = SimulationTime{food_next_run_ticks};
     destination.knowledge_indices_by_owner_ = std::move(rebuilt_knowledge_indices_by_owner);
     destination.knowledge_index_by_semantic_key_ = std::move(rebuilt_knowledge_index_by_semantic_key);
+    destination.rebuild_communication_indexes();
 
     return SnapshotLoadResult{.ok = true, .code = SnapshotErrorCode::None, .message = ""};
 }

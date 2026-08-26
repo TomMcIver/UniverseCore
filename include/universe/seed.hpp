@@ -38,6 +38,9 @@ enum class SeedDomain : std::uint64_t {
     RegionWoodRegeneration = 0x3FA9C1D42BE67580ULL,
     RegionWoodDailyVariation = 0x7BD143AFE6059C21ULL,
     RegionStoneDailyVariation = 0xC5A21F94D83BE067ULL,
+    CommunicationTeacherSelection = 0x5173E0A5B96274D1ULL,
+    CommunicationKnowledgeSelection = 0xAD204B79E3F6C58AULL,
+    CommunicationAttempt = 0x38D4A71C20BF96E4ULL,
 };
 
 [[nodiscard]] constexpr std::uint64_t mix_u64(const std::uint64_t value) noexcept {

@@ -305,9 +305,10 @@ Current implementation status:
 - objective event journal remains canonical world truth
 - direct-observation `AgentMemory` remains canonical subjective experience evidence
 - deterministic typed `AgentKnowledge` stores each person's current structured state derived from memory/event provenance
+- deterministic local communication/teaching can create non-omniscient transmitted memories with explicit speaker/recipient provenance
 - canonical knowledge fact scope currently includes person life status, person birth-household knowledge, and settlement status
 - knowledge upsert semantics enforce one current fact per semantic key (owner + fact kind + subject)
-- no omniscience: world truth never auto-populates agent knowledge without direct memory evidence
+- no omniscience: world truth never auto-populates agent knowledge without memory evidence (direct or transmitted)
 
 ## AI integration boundary
 
@@ -349,7 +350,7 @@ Current implementation status:
 - fixed-width little-endian encoding for all persisted primitives
 - canonical collection ordering during serialization (people/households/events by stable ID, household members by person ID)
 - explicit load validation for malformed/truncated data, enum validity, ID uniqueness, references and scheduler invariants
-- snapshot schema v11 is the canonical persistence baseline for typed event journal + material/tool state + agent memory + agent knowledge
+- snapshot schema v12 is the canonical persistence baseline for typed event journal + material/tool state + agent memory + agent knowledge + knowledge transmission provenance
 
 Snapshot invariants:
 

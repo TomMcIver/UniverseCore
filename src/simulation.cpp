@@ -31,6 +31,12 @@ constexpr std::int64_t kAssignmentRequiredCoveragePercent = 115;
 constexpr std::int64_t kSettlementMaterialShareScale = 10'000;
 constexpr std::int64_t kToolWearWorkUnitsPerBreak = 24;
 constexpr std::uint32_t kToolProductivityBonusPercentAtFullCoverage = 45;
+constexpr std::uint32_t kCommunicationChanceSameSettlementPer10k = 2'800;
+constexpr std::uint32_t kTeachingChanceSameSettlementPer10k = 1'600;
+constexpr std::uint32_t kCommunicationChanceSameHouseholdPer10k = 4'200;
+constexpr std::uint32_t kTeachingChanceSameHouseholdPer10k = 6'400;
+constexpr std::uint32_t kCommunicationConfidenceCapPer10k = 7'000;
+constexpr std::uint32_t kTeachingConfidenceCapPer10k = 9'000;
 
 struct LabourDemandProfile {
     std::int64_t cultivation_labour_demand{};
@@ -264,6 +270,31 @@ std::vector<AgentMemory> Simulation::memories_for_person(const PersonId person_i
         }
     }
     return memories;
+}
+
+std::span<const KnowledgeTransmission> Simulation::knowledge_transmissions() const noexcept {
+    return state_.knowledge_transmissions;
+}
+
+std::vector<KnowledgeTransmission> Simulation::transmissions_for_recipient(const PersonId person_id) const {
+    std::vector<KnowledgeTransmission> transmissions;
+    for (const auto& transmission : state_.knowledge_transmissions) {
+        if (transmission.recipient_id == person_id) {
+            transmissions.push_back(transmission);
+        }
+    }
+    return transmissions;
+}
+
+std::optional<KnowledgeTransmission> Simulation::transmission_for_memory(const MemoryId recipient_memory_id) const {
+    const auto index_it = communication_index_by_recipient_memory_.find(recipient_memory_id);
+    if (index_it == communication_index_by_recipient_memory_.end()) {
+        return std::nullopt;
+    }
+    if (index_it->second >= state_.knowledge_transmissions.size()) {
+        return std::nullopt;
+    }
+    return state_.knowledge_transmissions[index_it->second];
 }
 
 bool Simulation::person_remembers_event(const PersonId person_id, const EventId event_id) const noexcept {
@@ -1486,11 +1517,200 @@ void Simulation::process_demography_period(const std::uint64_t demographic_year)
     process_mortality(demographic_year);
     process_births(demographic_year);
     process_settlement_restructuring(demographic_year);
+    process_communication_teaching(demographic_year);
     process_occupation_reassignment(demographic_year);
     refresh_population_count();
     refresh_food_aggregates();
     refresh_labour_aggregates();
     refresh_material_aggregates();
+}
+
+void Simulation::process_communication_teaching(const std::uint64_t demographic_year) {
+    std::unordered_map<PersonId, const Person*> person_by_id;
+    person_by_id.reserve(state_.people.size());
+    for (const auto& person : state_.people) {
+        person_by_id.emplace(person.id, &person);
+    }
+
+    std::unordered_map<HouseholdId, SettlementId> settlement_by_household;
+    settlement_by_household.reserve(state_.households.size());
+    for (const auto& household : state_.households) {
+        settlement_by_household.emplace(household.id, household.settlement_id);
+    }
+
+    std::vector<PersonId> recipient_ids;
+    recipient_ids.reserve(state_.people.size());
+    for (const auto& person : state_.people) {
+        if (person.alive) {
+            recipient_ids.push_back(person.id);
+        }
+    }
+    std::sort(recipient_ids.begin(), recipient_ids.end());
+
+    for (const auto recipient_id : recipient_ids) {
+        const auto recipient_it = person_by_id.find(recipient_id);
+        if (recipient_it == person_by_id.end()) {
+            continue;
+        }
+        const auto* recipient = recipient_it->second;
+        if (recipient == nullptr || !recipient->alive) {
+            continue;
+        }
+
+        std::vector<PersonId> household_candidates;
+        std::vector<PersonId> settlement_candidates;
+        const auto recipient_settlement_it = settlement_by_household.find(recipient->household_id);
+        if (recipient_settlement_it == settlement_by_household.end()) {
+            continue;
+        }
+        const auto recipient_settlement_id = recipient_settlement_it->second;
+        for (const auto& candidate : state_.people) {
+            if (!candidate.alive || candidate.id == recipient_id) {
+                continue;
+            }
+            if (knowledge_count_for_person(candidate.id) == 0U) {
+                continue;
+            }
+
+            if (candidate.household_id == recipient->household_id) {
+                household_candidates.push_back(candidate.id);
+                continue;
+            }
+
+            if (candidate.household_id == 0U || candidate.household_id == recipient->household_id) {
+                continue;
+            }
+
+            const auto candidate_settlement_it = settlement_by_household.find(candidate.household_id);
+            if (candidate_settlement_it == settlement_by_household.end()) {
+                continue;
+            }
+
+            if (recipient_settlement_id == candidate_settlement_it->second) {
+                settlement_candidates.push_back(candidate.id);
+            }
+        }
+
+        const auto& teacher_candidates = household_candidates.empty() ? settlement_candidates : household_candidates;
+        if (teacher_candidates.empty()) {
+            continue;
+        }
+
+        const auto selection_base_seed = derive_seed(
+            person_seed(recipient_id),
+            SeedDomain::CommunicationTeacherSelection,
+            demographic_year);
+
+        const auto teacher_index = static_cast<std::size_t>(
+            seed_random_bounded(selection_base_seed, teacher_candidates.size()));
+        const auto teacher_id = teacher_candidates[teacher_index];
+        const bool same_household = !household_candidates.empty();
+
+        const auto attempt_seed = derive_seed(
+            selection_base_seed,
+            SeedDomain::CommunicationAttempt,
+            teacher_id);
+        const auto teaching_chance = same_household
+            ? kTeachingChanceSameHouseholdPer10k
+            : kTeachingChanceSameSettlementPer10k;
+        const auto communication_chance = same_household
+            ? kCommunicationChanceSameHouseholdPer10k
+            : kCommunicationChanceSameSettlementPer10k;
+
+        const bool teaching = seed_chance_per_10k(attempt_seed, teaching_chance);
+        const auto communication_seed = derive_seed(
+            attempt_seed,
+            SeedDomain::CommunicationAttempt,
+            demographic_year + recipient_id + teacher_id);
+        const bool communication = teaching || seed_chance_per_10k(communication_seed, communication_chance);
+        if (!communication) {
+            continue;
+        }
+
+        auto teacher_knowledge = knowledge_for_person(teacher_id);
+        if (teacher_knowledge.empty()) {
+            continue;
+        }
+        std::sort(teacher_knowledge.begin(), teacher_knowledge.end(), [](const AgentKnowledge& lhs, const AgentKnowledge& rhs) {
+            return lhs.id < rhs.id;
+        });
+
+        std::vector<AgentKnowledge> transmissible_knowledge;
+        transmissible_knowledge.reserve(teacher_knowledge.size());
+        for (const auto& knowledge : teacher_knowledge) {
+            if (knowledge.source_memory_id == 0U) {
+                continue;
+            }
+
+            const TransmissionSemanticKey semantic_key{
+                .recipient_id = recipient_id,
+                .speaker_memory_id = knowledge.source_memory_id,
+            };
+            if (transmission_semantic_keys_.contains(semantic_key)) {
+                continue;
+            }
+
+            transmissible_knowledge.push_back(knowledge);
+        }
+
+        if (transmissible_knowledge.empty()) {
+            continue;
+        }
+
+        const auto knowledge_seed = derive_seed(
+            person_seed(recipient_id),
+            SeedDomain::CommunicationKnowledgeSelection,
+            (demographic_year * 1'000'003ULL) ^ teacher_id);
+        const auto knowledge_index = static_cast<std::size_t>(
+            seed_random_bounded(knowledge_seed, transmissible_knowledge.size()));
+        const auto& selected_knowledge = transmissible_knowledge[knowledge_index];
+
+        EventId source_event_id = 0U;
+        for (const auto& memory : state_.agent_memories) {
+            if (memory.id == selected_knowledge.source_memory_id) {
+                source_event_id = memory.source_event_id;
+                break;
+            }
+        }
+
+        if (source_event_id == 0U) {
+            continue;
+        }
+
+        const auto confidence_cap = teaching ? kTeachingConfidenceCapPer10k : kCommunicationConfidenceCapPer10k;
+        const auto confidence = std::min<std::uint32_t>(selected_knowledge.confidence_per_10k, confidence_cap);
+        const auto teacher_it = person_by_id.find(teacher_id);
+        if (teacher_it == person_by_id.end() || teacher_it->second == nullptr) {
+            continue;
+        }
+        const auto speaker_settlement_it = settlement_by_household.find(teacher_it->second->household_id);
+        if (speaker_settlement_it == settlement_by_household.end()) {
+            continue;
+        }
+        const auto recipient_memory_id = append_memory(AgentMemory{
+            .id = 0,
+            .owner_id = recipient_id,
+            .acquired_at = state_.time,
+            .source = teaching ? MemorySource::Teaching : MemorySource::Communication,
+            .source_event_id = source_event_id,
+            .confidence_per_10k = confidence,
+        });
+
+        append_knowledge_transmission(KnowledgeTransmission{
+            .id = 0,
+            .speaker_id = teacher_id,
+            .recipient_id = recipient_id,
+            .speaker_household_id = teacher_it->second->household_id,
+            .recipient_household_id = recipient->household_id,
+            .speaker_settlement_id = speaker_settlement_it->second,
+            .recipient_settlement_id = recipient_settlement_id,
+            .transmitted_at = state_.time,
+            .method = teaching ? CommunicationMethod::Teaching : CommunicationMethod::Communication,
+            .speaker_memory_id = selected_knowledge.source_memory_id,
+            .recipient_memory_id = recipient_memory_id,
+            .confidence_per_10k = confidence,
+        });
+    }
 }
 
 PersonId Simulation::next_person_id() noexcept {
@@ -1515,6 +1735,10 @@ MemoryId Simulation::next_memory_id() noexcept {
 
 KnowledgeId Simulation::next_knowledge_id() noexcept {
     return next_knowledge_id_++;
+}
+
+CommunicationId Simulation::next_communication_id() noexcept {
+    return next_communication_id_++;
 }
 
 SimulationSeed Simulation::root_seed() const noexcept {
@@ -3039,7 +3263,7 @@ EventId Simulation::emit_settlement_extinct_event(const SettlementId settlement_
     return event_id;
 }
 
-void Simulation::append_memory(AgentMemory memory) {
+MemoryId Simulation::append_memory(AgentMemory memory) {
     if (memory.owner_id == 0U || memory.source_event_id == 0U) {
         throw std::invalid_argument("Agent memory owner and source event ids must be non-zero");
     }
@@ -3052,10 +3276,114 @@ void Simulation::append_memory(AgentMemory memory) {
     if (memory.confidence_per_10k > 10'000U) {
         throw std::invalid_argument("Agent memory confidence must be <= 10000");
     }
+    if (memory.source != MemorySource::DirectObservation &&
+        memory.source != MemorySource::Communication &&
+        memory.source != MemorySource::Teaching) {
+        throw std::invalid_argument("Agent memory source is invalid");
+    }
 
     memory.id = next_memory_id();
     state_.agent_memories.push_back(memory);
     derive_knowledge_from_memory(memory);
+    return memory.id;
+}
+
+void Simulation::append_knowledge_transmission(KnowledgeTransmission transmission) {
+    if (transmission.speaker_id == 0U ||
+        transmission.recipient_id == 0U ||
+        transmission.speaker_household_id == 0U ||
+        transmission.recipient_household_id == 0U ||
+        transmission.speaker_settlement_id == 0U ||
+        transmission.recipient_settlement_id == 0U ||
+        transmission.speaker_memory_id == 0U ||
+        transmission.recipient_memory_id == 0U) {
+        throw std::invalid_argument("Knowledge transmission references must be non-zero");
+    }
+    if (transmission.speaker_id == transmission.recipient_id) {
+        throw std::invalid_argument("Knowledge transmission speaker and recipient must differ");
+    }
+    if (transmission.speaker_settlement_id != transmission.recipient_settlement_id) {
+        throw std::invalid_argument("Knowledge transmission must remain within one settlement");
+    }
+    if (transmission.transmitted_at.ticks < 0 || transmission.transmitted_at > state_.time) {
+        throw std::invalid_argument("Knowledge transmission time is invalid");
+    }
+    if (transmission.confidence_per_10k > 10'000U) {
+        throw std::invalid_argument("Knowledge transmission confidence must be <= 10000");
+    }
+
+    const AgentMemory* speaker_memory = nullptr;
+    const AgentMemory* recipient_memory = nullptr;
+    for (const auto& memory : state_.agent_memories) {
+        if (memory.id == transmission.speaker_memory_id) {
+            speaker_memory = &memory;
+        }
+        if (memory.id == transmission.recipient_memory_id) {
+            recipient_memory = &memory;
+        }
+        if (speaker_memory != nullptr && recipient_memory != nullptr) {
+            break;
+        }
+    }
+
+    if (speaker_memory == nullptr || recipient_memory == nullptr) {
+        throw std::invalid_argument("Knowledge transmission must reference existing memories");
+    }
+    if (speaker_memory->owner_id != transmission.speaker_id) {
+        throw std::invalid_argument("Knowledge transmission speaker mismatch");
+    }
+    if (recipient_memory->owner_id != transmission.recipient_id) {
+        throw std::invalid_argument("Knowledge transmission recipient mismatch");
+    }
+    if (recipient_memory->source != MemorySource::Communication &&
+        recipient_memory->source != MemorySource::Teaching) {
+        throw std::invalid_argument("Knowledge transmission recipient memory must be communication-derived");
+    }
+    if (recipient_memory->source == MemorySource::Communication && transmission.method != CommunicationMethod::Communication) {
+        throw std::invalid_argument("Knowledge transmission method/source mismatch for communication memory");
+    }
+    if (recipient_memory->source == MemorySource::Teaching && transmission.method != CommunicationMethod::Teaching) {
+        throw std::invalid_argument("Knowledge transmission method/source mismatch for teaching memory");
+    }
+    if (speaker_memory->source_event_id != recipient_memory->source_event_id) {
+        throw std::invalid_argument("Knowledge transmission memory event mismatch");
+    }
+
+    const Household* speaker_household = nullptr;
+    const Household* recipient_household = nullptr;
+    for (const auto& household : state_.households) {
+        if (household.id == transmission.speaker_household_id) {
+            speaker_household = &household;
+        }
+        if (household.id == transmission.recipient_household_id) {
+            recipient_household = &household;
+        }
+        if (speaker_household != nullptr && recipient_household != nullptr) {
+            break;
+        }
+    }
+
+    if (speaker_household == nullptr || recipient_household == nullptr) {
+        throw std::invalid_argument("Knowledge transmission households must exist");
+    }
+    if (speaker_household->settlement_id != transmission.speaker_settlement_id ||
+        recipient_household->settlement_id != transmission.recipient_settlement_id) {
+        throw std::invalid_argument("Knowledge transmission household/settlement mismatch");
+    }
+
+    const TransmissionSemanticKey semantic_key{
+        .recipient_id = transmission.recipient_id,
+        .speaker_memory_id = transmission.speaker_memory_id,
+    };
+    if (transmission_semantic_keys_.contains(semantic_key)) {
+        throw std::invalid_argument("Duplicate knowledge transmission semantic key");
+    }
+
+    transmission.id = next_communication_id();
+    state_.knowledge_transmissions.push_back(transmission);
+    const auto index = state_.knowledge_transmissions.size() - 1U;
+    communication_index_by_recipient_memory_[transmission.recipient_memory_id] = index;
+    transmission_semantic_keys_.insert(semantic_key);
 }
 
 void Simulation::append_direct_observation_memories(
@@ -3067,7 +3395,7 @@ void Simulation::append_direct_observation_memories(
             continue;
         }
 
-        append_memory(AgentMemory{
+        const auto memory_id = append_memory(AgentMemory{
             .id = 0,
             .owner_id = observer_id,
             .acquired_at = acquired_at,
@@ -3075,11 +3403,14 @@ void Simulation::append_direct_observation_memories(
             .source_event_id = source_event_id,
             .confidence_per_10k = 10'000U,
         });
+        (void)memory_id;
     }
 }
 
 void Simulation::derive_knowledge_from_memory(const AgentMemory& memory) {
-    if (memory.source != MemorySource::DirectObservation) {
+    if (memory.source != MemorySource::DirectObservation &&
+        memory.source != MemorySource::Communication &&
+        memory.source != MemorySource::Teaching) {
         return;
     }
 
@@ -3266,6 +3597,22 @@ void Simulation::rebuild_knowledge_indexes() {
             throw std::invalid_argument("Duplicate knowledge semantic key found while rebuilding indexes");
         }
         knowledge_indices_by_owner_[knowledge.owner_id].push_back(index);
+    }
+}
+
+void Simulation::rebuild_communication_indexes() {
+    communication_index_by_recipient_memory_.clear();
+    transmission_semantic_keys_.clear();
+    communication_index_by_recipient_memory_.reserve(state_.knowledge_transmissions.size());
+    transmission_semantic_keys_.reserve(state_.knowledge_transmissions.size());
+
+    for (std::size_t index = 0; index < state_.knowledge_transmissions.size(); ++index) {
+        const auto& transmission = state_.knowledge_transmissions[index];
+        communication_index_by_recipient_memory_[transmission.recipient_memory_id] = index;
+        transmission_semantic_keys_.insert(TransmissionSemanticKey{
+            .recipient_id = transmission.recipient_id,
+            .speaker_memory_id = transmission.speaker_memory_id,
+        });
     }
 }
 
