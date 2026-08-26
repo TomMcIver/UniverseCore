@@ -301,6 +301,32 @@ Run the interactive inspector:
 .\build-ui\Release\universe_ui.exe
 ```
 
+### Windows native UI launch (no host compiler required)
+
+If native `cmake`/MSVC/MinGW are unavailable on Windows, build a Windows `universe_ui.exe`
+through Podman + MinGW-w64 cross-compilation:
+
+```powershell
+./scripts/build-windows-ui.ps1
+```
+
+This writes host-runnable artifacts to:
+
+```text
+build/windows-ui/UniverseCore/universe_ui.exe
+build/windows-ui/UniverseCore/SDL3.dll
+```
+
+Launch the interactive inspector:
+
+```powershell
+./scripts/run-windows-ui.ps1
+```
+
+`build-windows-ui.ps1` uses a Podman-managed Linux build volume (`universecore-winui-build`)
+for generated files and dependency extraction reliability, while keeping source in the
+Windows checkout.
+
 ## Read first
 
 Coding agents must read:
