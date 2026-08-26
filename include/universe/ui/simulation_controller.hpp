@@ -149,6 +149,12 @@ public:
     [[nodiscard]] std::vector<AgentMemory> memories_for_person(PersonId person_id) const;
     [[nodiscard]] bool person_remembers_event(PersonId person_id, EventId event_id) const noexcept;
     [[nodiscard]] std::uint64_t memory_count_for_person(PersonId person_id) const noexcept;
+    [[nodiscard]] std::span<const AgentKnowledge> agent_knowledge() const noexcept;
+    [[nodiscard]] std::vector<AgentKnowledge> knowledge_for_person(PersonId person_id) const;
+    [[nodiscard]] std::uint64_t knowledge_count_for_person(PersonId person_id) const noexcept;
+    [[nodiscard]] std::optional<KnownLifeStatus> known_life_status(PersonId knower_id, PersonId subject_id) const noexcept;
+    [[nodiscard]] std::optional<HouseholdId> known_household_for_person(PersonId knower_id, PersonId subject_id) const noexcept;
+    [[nodiscard]] std::optional<SettlementStatusKnowledgeFact> known_settlement_status(PersonId knower_id, SettlementId settlement_id) const noexcept;
     [[nodiscard]] std::vector<SettlementSummaryView> settlement_summaries() const;
 
     void advance_days(std::uint64_t days);

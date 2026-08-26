@@ -24,6 +24,7 @@ The project deliberately starts without Unreal Engine. The initial objective is 
 - Timestamped canonical append-only event journal
 - Typed event payloads for `Birth`, `Death`, `SettlementFounded`, and `SettlementExtinct`
 - Canonical deterministic agent memory foundation (person-specific direct observation with event provenance)
+- Canonical deterministic agent knowledge state foundation (typed per-person structured facts derived from observed memories with provenance)
 - Versioned deterministic canonical snapshots
 - Deterministic household food production/storage/consumption
 - Deterministic regional environment resources (finite productive capacity + renewable wild stock)
@@ -39,7 +40,7 @@ The project deliberately starts without Unreal Engine. The initial objective is 
 - Optional SDL3 + Dear ImGui simulation inspector (`UNIVERSECORE_BUILD_UI=ON`)
 - UI command/query adapter over canonical simulation state
 - UI smoke test validating deterministic advance/save/load behavior
-- Snapshot schema v10 with deterministic typed-event/material/environment/inventory/tool-durability/agent-memory persistence/validation
+- Snapshot schema v11 with deterministic typed-event/material/environment/inventory/tool-durability/agent-memory/agent-knowledge persistence/validation
 - Reproducibility tests
 - No engine dependency
 

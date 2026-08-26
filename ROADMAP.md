@@ -91,7 +91,7 @@ Status: **active**
 
 - [x] event journal
 - [x] agent memory
-- [ ] knowledge graph/state
+- [x] knowledge graph/state
 - [ ] communication/teaching
 - [ ] records
 - [ ] knowledge loss

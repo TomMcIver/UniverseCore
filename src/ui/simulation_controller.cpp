@@ -260,6 +260,36 @@ std::uint64_t SimulationController::memory_count_for_person(const PersonId perso
     return simulation_.memory_count_for_person(person_id);
 }
 
+std::span<const AgentKnowledge> SimulationController::agent_knowledge() const noexcept {
+    return simulation_.agent_knowledge();
+}
+
+std::vector<AgentKnowledge> SimulationController::knowledge_for_person(const PersonId person_id) const {
+    return simulation_.knowledge_for_person(person_id);
+}
+
+std::uint64_t SimulationController::knowledge_count_for_person(const PersonId person_id) const noexcept {
+    return simulation_.knowledge_count_for_person(person_id);
+}
+
+std::optional<KnownLifeStatus> SimulationController::known_life_status(
+    const PersonId knower_id,
+    const PersonId subject_id) const noexcept {
+    return simulation_.known_life_status(knower_id, subject_id);
+}
+
+std::optional<HouseholdId> SimulationController::known_household_for_person(
+    const PersonId knower_id,
+    const PersonId subject_id) const noexcept {
+    return simulation_.known_household_for_person(knower_id, subject_id);
+}
+
+std::optional<SettlementStatusKnowledgeFact> SimulationController::known_settlement_status(
+    const PersonId knower_id,
+    const SettlementId settlement_id) const noexcept {
+    return simulation_.known_settlement_status(knower_id, settlement_id);
+}
+
 std::vector<SettlementSummaryView> SimulationController::settlement_summaries() const {
     const auto& state = simulation_.state();
     const auto labour_parameters = FoodModelParameters{};

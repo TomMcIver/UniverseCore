@@ -300,6 +300,15 @@ AgentKnowledge
 
 Technology becomes possible through combinations of knowledge, material access, tooling, energy, skills and institutions.
 
+Current implementation status:
+
+- objective event journal remains canonical world truth
+- direct-observation `AgentMemory` remains canonical subjective experience evidence
+- deterministic typed `AgentKnowledge` stores each person's current structured state derived from memory/event provenance
+- canonical knowledge fact scope currently includes person life status, person birth-household knowledge, and settlement status
+- knowledge upsert semantics enforce one current fact per semantic key (owner + fact kind + subject)
+- no omniscience: world truth never auto-populates agent knowledge without direct memory evidence
+
 ## AI integration boundary
 
 Future model calls should be mediated by a deterministic/validated protocol:
@@ -340,7 +349,7 @@ Current implementation status:
 - fixed-width little-endian encoding for all persisted primitives
 - canonical collection ordering during serialization (people/households/events by stable ID, household members by person ID)
 - explicit load validation for malformed/truncated data, enum validity, ID uniqueness, references and scheduler invariants
-- snapshot schema v10 is the canonical persistence baseline for typed event journal + material/tool state + agent memory
+- snapshot schema v11 is the canonical persistence baseline for typed event journal + material/tool state + agent memory + agent knowledge
 
 Snapshot invariants:
 

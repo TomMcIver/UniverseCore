@@ -50,6 +50,15 @@ const universe::Person* find_person_by_id(const universe::WorldState& state, con
     return nullptr;
 }
 
+const universe::AgentMemory* find_memory_by_id(const universe::WorldState& state, const universe::MemoryId id) {
+    for (const auto& memory : state.agent_memories) {
+        if (memory.id == id) {
+            return &memory;
+        }
+    }
+    return nullptr;
+}
+
 }  // namespace
 
 int main() {
@@ -168,6 +177,121 @@ int main() {
             const auto queried_count = memories.memory_count_for_person(person.id);
             const auto queried_memories = memories.memories_for_person(person.id);
             require(queried_count == queried_memories.size(), "memory_count_for_person must match memories_for_person size");
+
+            const auto queried_knowledge_count = memories.knowledge_count_for_person(person.id);
+            const auto queried_knowledge = memories.knowledge_for_person(person.id);
+            require(queried_knowledge_count == queried_knowledge.size(), "knowledge_count_for_person must match knowledge_for_person size");
+        }
+
+        struct KnowledgeSemanticKey {
+            universe::PersonId owner_id{};
+            universe::KnowledgeFactKind fact_kind{universe::KnowledgeFactKind::PersonLifeStatus};
+            std::uint64_t primary_subject_id{};
+
+            [[nodiscard]] bool operator==(const KnowledgeSemanticKey& other) const noexcept {
+                return owner_id == other.owner_id &&
+                    fact_kind == other.fact_kind &&
+                    primary_subject_id == other.primary_subject_id;
+            }
+        };
+
+        struct KnowledgeSemanticKeyHash {
+            [[nodiscard]] std::size_t operator()(const KnowledgeSemanticKey& key) const noexcept {
+                const auto mixed =
+                    (key.owner_id * 0x9E3779B97F4A7C15ULL) ^
+                    (static_cast<std::uint64_t>(key.fact_kind) * 0xD6E8FEB86659FD93ULL) ^
+                    (key.primary_subject_id * 0xA24BAED4963EE407ULL);
+                return static_cast<std::size_t>(mixed);
+            }
+        };
+
+        std::unordered_set<universe::KnowledgeId> knowledge_ids;
+        std::unordered_set<KnowledgeSemanticKey, KnowledgeSemanticKeyHash> semantic_keys;
+        for (const auto& knowledge : state.agent_knowledge) {
+            require(knowledge.id > 0U, "knowledge id must be non-zero");
+            require(knowledge.owner_id > 0U, "knowledge owner id must be non-zero");
+            require(knowledge.source == universe::KnowledgeSource::MemoryDerived, "knowledge source must be memory-derived");
+            require(knowledge.source_memory_id > 0U, "knowledge source memory id must be non-zero");
+            require(knowledge.acquired_at.ticks >= 0, "knowledge acquired time must be non-negative");
+            require(knowledge.updated_at.ticks >= knowledge.acquired_at.ticks, "knowledge updated time must be >= acquired time");
+            require(knowledge.updated_at.ticks <= state.time.ticks, "knowledge updated time must not exceed simulation time");
+            require(knowledge.confidence_per_10k <= 10'000U, "knowledge confidence must be bounded");
+            require(knowledge_ids.insert(knowledge.id).second, "knowledge ids must be unique");
+
+            const auto* source_memory = find_memory_by_id(state, knowledge.source_memory_id);
+            require(source_memory != nullptr, "knowledge source memory must exist");
+            require(source_memory->owner_id == knowledge.owner_id, "knowledge and source memory owner must match");
+            require(source_memory->acquired_at == knowledge.updated_at, "knowledge updated_at must match source memory acquisition time");
+            const auto* source_event = find_event_by_id(state, source_memory->source_event_id);
+            require(source_event != nullptr, "knowledge source event must exist");
+
+            if (const auto* fact = std::get_if<universe::PersonLifeStatusKnowledgeFact>(&knowledge.fact); fact != nullptr) {
+                const auto status = memories.known_life_status(knowledge.owner_id, fact->person_id);
+                require(status.has_value(), "known_life_status query must resolve life knowledge");
+                require(*status == fact->status, "known_life_status query must match canonical value");
+
+                if (fact->status == universe::KnownLifeStatus::Alive) {
+                    require(source_event->type == universe::EventType::Birth, "alive life fact must derive from birth event");
+                    const auto& payload = std::get<universe::BirthEventPayload>(source_event->payload);
+                    require(payload.child_id == fact->person_id, "alive life fact subject must match birth child");
+                } else {
+                    require(source_event->type == universe::EventType::Death, "dead life fact must derive from death event");
+                    const auto& payload = std::get<universe::DeathEventPayload>(source_event->payload);
+                    require(payload.person_id == fact->person_id, "dead life fact subject must match death person");
+                }
+
+                require(
+                    semantic_keys.insert(KnowledgeSemanticKey{
+                        .owner_id = knowledge.owner_id,
+                        .fact_kind = universe::KnowledgeFactKind::PersonLifeStatus,
+                        .primary_subject_id = fact->person_id,
+                    }).second,
+                    "owner+life-status+person semantic key must be unique");
+            } else if (const auto* fact = std::get_if<universe::PersonHouseholdKnowledgeFact>(&knowledge.fact); fact != nullptr) {
+                const auto household = memories.known_household_for_person(knowledge.owner_id, fact->person_id);
+                require(household.has_value(), "known_household_for_person query must resolve household knowledge");
+                require(*household == fact->household_id, "known_household_for_person query must match canonical value");
+
+                require(source_event->type == universe::EventType::Birth, "person-household fact must derive from birth event");
+                const auto& payload = std::get<universe::BirthEventPayload>(source_event->payload);
+                require(payload.child_id == fact->person_id, "person-household fact person must match birth child");
+                require(payload.household_id == fact->household_id, "person-household fact household must match birth household");
+
+                require(
+                    semantic_keys.insert(KnowledgeSemanticKey{
+                        .owner_id = knowledge.owner_id,
+                        .fact_kind = universe::KnowledgeFactKind::PersonHousehold,
+                        .primary_subject_id = fact->person_id,
+                    }).second,
+                    "owner+household+person semantic key must be unique");
+            } else if (const auto* fact = std::get_if<universe::SettlementStatusKnowledgeFact>(&knowledge.fact); fact != nullptr) {
+                const auto settlement = memories.known_settlement_status(knowledge.owner_id, fact->settlement_id);
+                require(settlement.has_value(), "known_settlement_status query must resolve settlement knowledge");
+                require(settlement->region_id == fact->region_id, "known_settlement_status region must match canonical value");
+                require(settlement->active == fact->active, "known_settlement_status active flag must match canonical value");
+
+                if (fact->active) {
+                    require(source_event->type == universe::EventType::SettlementFounded, "active settlement fact must derive from founded event");
+                    const auto& payload = std::get<universe::SettlementFoundedEventPayload>(source_event->payload);
+                    require(payload.settlement_id == fact->settlement_id, "active settlement fact id must match founded event");
+                    require(payload.region_id == fact->region_id, "active settlement fact region must match founded event");
+                } else {
+                    require(source_event->type == universe::EventType::SettlementExtinct, "inactive settlement fact must derive from extinct event");
+                    const auto& payload = std::get<universe::SettlementExtinctEventPayload>(source_event->payload);
+                    require(payload.settlement_id == fact->settlement_id, "inactive settlement fact id must match extinct event");
+                    require(payload.region_id == fact->region_id, "inactive settlement fact region must match extinct event");
+                }
+
+                require(
+                    semantic_keys.insert(KnowledgeSemanticKey{
+                        .owner_id = knowledge.owner_id,
+                        .fact_kind = universe::KnowledgeFactKind::SettlementStatus,
+                        .primary_subject_id = fact->settlement_id,
+                    }).second,
+                    "owner+settlement-status+settlement semantic key must be unique");
+            } else {
+                require(false, "knowledge fact variant must be recognized");
+            }
         }
     }
 

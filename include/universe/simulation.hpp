@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <optional>
 #include <span>
+#include <unordered_map>
 #include <variant>
 #include <vector>
 
@@ -20,6 +21,7 @@ using RegionId = std::uint64_t;
 using SettlementId = std::uint64_t;
 using EventId = std::uint64_t;
 using MemoryId = std::uint64_t;
+using KnowledgeId = std::uint64_t;
 
 enum class BiologicalSex : std::uint8_t {
     Female = 0,
@@ -166,6 +168,61 @@ struct AgentMemory {
     [[nodiscard]] bool operator==(const AgentMemory& other) const = default;
 };
 
+enum class KnownLifeStatus : std::uint8_t {
+    Alive = 0,
+    Dead = 1,
+};
+
+enum class KnowledgeFactKind : std::uint8_t {
+    PersonLifeStatus = 0,
+    PersonHousehold = 1,
+    SettlementStatus = 2,
+};
+
+struct PersonLifeStatusKnowledgeFact {
+    PersonId person_id{};
+    KnownLifeStatus status{KnownLifeStatus::Alive};
+
+    [[nodiscard]] bool operator==(const PersonLifeStatusKnowledgeFact& other) const = default;
+};
+
+struct PersonHouseholdKnowledgeFact {
+    PersonId person_id{};
+    HouseholdId household_id{};
+
+    [[nodiscard]] bool operator==(const PersonHouseholdKnowledgeFact& other) const = default;
+};
+
+struct SettlementStatusKnowledgeFact {
+    SettlementId settlement_id{};
+    RegionId region_id{};
+    bool active{true};
+
+    [[nodiscard]] bool operator==(const SettlementStatusKnowledgeFact& other) const = default;
+};
+
+using KnowledgeFact = std::variant<
+    PersonLifeStatusKnowledgeFact,
+    PersonHouseholdKnowledgeFact,
+    SettlementStatusKnowledgeFact>;
+
+enum class KnowledgeSource : std::uint8_t {
+    MemoryDerived = 0,
+};
+
+struct AgentKnowledge {
+    KnowledgeId id{};
+    PersonId owner_id{};
+    SimulationTime acquired_at{};
+    SimulationTime updated_at{};
+    KnowledgeSource source{KnowledgeSource::MemoryDerived};
+    MemoryId source_memory_id{};
+    KnowledgeFact fact{};
+    std::uint32_t confidence_per_10k{10'000};
+
+    [[nodiscard]] bool operator==(const AgentKnowledge& other) const = default;
+};
+
 struct SimulationConfig {
     SeedValue seed{1};
     std::uint64_t initial_population{200};
@@ -248,6 +305,7 @@ struct WorldState {
     std::vector<Settlement> settlements{};
     std::vector<SimulationEvent> event_log{};
     std::vector<AgentMemory> agent_memories{};
+    std::vector<AgentKnowledge> agent_knowledge{};
 };
 
 class Simulation {
@@ -260,6 +318,12 @@ public:
     [[nodiscard]] std::vector<AgentMemory> memories_for_person(PersonId person_id) const;
     [[nodiscard]] bool person_remembers_event(PersonId person_id, EventId event_id) const noexcept;
     [[nodiscard]] std::uint64_t memory_count_for_person(PersonId person_id) const noexcept;
+    [[nodiscard]] std::span<const AgentKnowledge> agent_knowledge() const noexcept;
+    [[nodiscard]] std::vector<AgentKnowledge> knowledge_for_person(PersonId person_id) const;
+    [[nodiscard]] std::uint64_t knowledge_count_for_person(PersonId person_id) const noexcept;
+    [[nodiscard]] std::optional<KnownLifeStatus> known_life_status(PersonId knower_id, PersonId subject_id) const noexcept;
+    [[nodiscard]] std::optional<HouseholdId> known_household_for_person(PersonId knower_id, PersonId subject_id) const noexcept;
+    [[nodiscard]] std::optional<SettlementStatusKnowledgeFact> known_settlement_status(PersonId knower_id, SettlementId settlement_id) const noexcept;
     [[nodiscard]] std::vector<std::byte> save_snapshot() const;
     [[nodiscard]] static SnapshotLoadResult load_snapshot(std::span<const std::byte> data, Simulation& destination);
     void advance(SimulationDuration duration);
@@ -272,6 +336,7 @@ private:
     [[nodiscard]] RegionId next_region_id() noexcept;
     [[nodiscard]] SettlementId next_settlement_id() noexcept;
     [[nodiscard]] MemoryId next_memory_id() noexcept;
+    [[nodiscard]] KnowledgeId next_knowledge_id() noexcept;
     [[nodiscard]] SimulationSeed root_seed() const noexcept;
     [[nodiscard]] SimulationSeed person_seed(PersonId person_id) const noexcept;
     [[nodiscard]] SimulationSeed household_seed(HouseholdId household_id) const noexcept;
@@ -332,7 +397,44 @@ private:
     EventId emit_settlement_extinct_event(SettlementId settlement_id, RegionId region_id);
     void append_memory(AgentMemory memory);
     void append_direct_observation_memories(EventId source_event_id, std::span<const PersonId> observer_ids, SimulationTime acquired_at);
+    void derive_knowledge_from_memory(const AgentMemory& memory);
+    void upsert_knowledge(
+        PersonId owner_id,
+        SimulationTime acquired_at,
+        MemoryId source_memory_id,
+        std::uint32_t confidence_per_10k,
+        KnowledgeFact fact,
+        KnowledgeFactKind fact_kind,
+        std::uint64_t primary_subject_id,
+        std::uint64_t secondary_subject_id);
+    void rebuild_knowledge_indexes();
     void refresh_population_count() noexcept;
+
+    struct KnowledgeSemanticKey {
+        PersonId owner_id{};
+        KnowledgeFactKind fact_kind{KnowledgeFactKind::PersonLifeStatus};
+        std::uint64_t primary_subject_id{};
+        std::uint64_t secondary_subject_id{};
+
+        [[nodiscard]] bool operator==(const KnowledgeSemanticKey& other) const noexcept {
+            return owner_id == other.owner_id &&
+                fact_kind == other.fact_kind &&
+                primary_subject_id == other.primary_subject_id &&
+                secondary_subject_id == other.secondary_subject_id;
+        }
+    };
+
+    struct KnowledgeSemanticKeyHash {
+        [[nodiscard]] std::size_t operator()(const KnowledgeSemanticKey& key) const noexcept {
+            const auto kind_u64 = static_cast<std::uint64_t>(key.fact_kind);
+            const auto mixed =
+                (key.owner_id * 0x9E3779B97F4A7C15ULL) ^
+                (kind_u64 * 0xD6E8FEB86659FD93ULL) ^
+                (key.primary_subject_id * 0xA24BAED4963EE407ULL) ^
+                (key.secondary_subject_id * 0x94D049BB133111EBULL);
+            return static_cast<std::size_t>(mixed);
+        }
+    };
 
     SimulationConfig config_;
     WorldState state_;
@@ -343,12 +445,15 @@ private:
     SettlementId next_settlement_id_{1};
     EventId next_event_id_{1};
     MemoryId next_memory_id_{1};
+    KnowledgeId next_knowledge_id_{1};
     SimulationDuration demography_interval_{DemographicCalendarAdapter::year_duration()};
     SimulationTime demography_next_run_{DemographicCalendarAdapter::year_duration().ticks};
     SimulationDuration food_interval_{days(1)};
     SimulationTime food_next_run_{days(1).ticks};
     FoodModelParameters food_parameters_{};
     MaterialModelParameters material_parameters_{};
+    std::unordered_map<PersonId, std::vector<std::size_t>> knowledge_indices_by_owner_{};
+    std::unordered_map<KnowledgeSemanticKey, std::size_t, KnowledgeSemanticKeyHash> knowledge_index_by_semantic_key_{};
 
     friend class SnapshotCodec;
 };

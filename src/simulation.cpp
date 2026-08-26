@@ -275,6 +275,41 @@ bool Simulation::person_remembers_event(const PersonId person_id, const EventId 
     return false;
 }
 
+
+struct KnowledgeFactDescriptor {
+    KnowledgeFactKind kind{KnowledgeFactKind::PersonLifeStatus};
+    std::uint64_t primary_subject_id{};
+    std::uint64_t secondary_subject_id{};
+};
+
+[[nodiscard]] KnowledgeFactDescriptor describe_knowledge_fact(const KnowledgeFact& fact) {
+    if (const auto* person_life = std::get_if<PersonLifeStatusKnowledgeFact>(&fact); person_life != nullptr) {
+        return KnowledgeFactDescriptor{
+            .kind = KnowledgeFactKind::PersonLifeStatus,
+            .primary_subject_id = person_life->person_id,
+            .secondary_subject_id = 0U,
+        };
+    }
+
+    if (const auto* person_household = std::get_if<PersonHouseholdKnowledgeFact>(&fact); person_household != nullptr) {
+        return KnowledgeFactDescriptor{
+            .kind = KnowledgeFactKind::PersonHousehold,
+            .primary_subject_id = person_household->person_id,
+            .secondary_subject_id = 0U,
+        };
+    }
+
+    if (const auto* settlement = std::get_if<SettlementStatusKnowledgeFact>(&fact); settlement != nullptr) {
+        return KnowledgeFactDescriptor{
+            .kind = KnowledgeFactKind::SettlementStatus,
+            .primary_subject_id = settlement->settlement_id,
+            .secondary_subject_id = 0U,
+        };
+    }
+
+    throw std::invalid_argument("Unknown knowledge fact variant");
+}
+
 std::uint64_t Simulation::memory_count_for_person(const PersonId person_id) const noexcept {
     std::uint64_t count = 0;
     for (const auto& memory : state_.agent_memories) {
@@ -283,6 +318,101 @@ std::uint64_t Simulation::memory_count_for_person(const PersonId person_id) cons
         }
     }
     return count;
+}
+
+std::span<const AgentKnowledge> Simulation::agent_knowledge() const noexcept {
+    return state_.agent_knowledge;
+}
+
+std::vector<AgentKnowledge> Simulation::knowledge_for_person(const PersonId person_id) const {
+    std::vector<AgentKnowledge> facts;
+    const auto owner_it = knowledge_indices_by_owner_.find(person_id);
+    if (owner_it == knowledge_indices_by_owner_.end()) {
+        return facts;
+    }
+
+    facts.reserve(owner_it->second.size());
+    for (const auto index : owner_it->second) {
+        if (index >= state_.agent_knowledge.size()) {
+            continue;
+        }
+        facts.push_back(state_.agent_knowledge[index]);
+    }
+    return facts;
+}
+
+std::uint64_t Simulation::knowledge_count_for_person(const PersonId person_id) const noexcept {
+    const auto owner_it = knowledge_indices_by_owner_.find(person_id);
+    if (owner_it == knowledge_indices_by_owner_.end()) {
+        return 0U;
+    }
+    return static_cast<std::uint64_t>(owner_it->second.size());
+}
+
+std::optional<KnownLifeStatus> Simulation::known_life_status(
+    const PersonId knower_id,
+    const PersonId subject_id) const noexcept {
+    const KnowledgeSemanticKey key{
+        .owner_id = knower_id,
+        .fact_kind = KnowledgeFactKind::PersonLifeStatus,
+        .primary_subject_id = subject_id,
+        .secondary_subject_id = 0U,
+    };
+    const auto key_it = knowledge_index_by_semantic_key_.find(key);
+    if (key_it == knowledge_index_by_semantic_key_.end() || key_it->second >= state_.agent_knowledge.size()) {
+        return std::nullopt;
+    }
+
+    const auto* fact = std::get_if<PersonLifeStatusKnowledgeFact>(&state_.agent_knowledge[key_it->second].fact);
+    if (fact == nullptr) {
+        return std::nullopt;
+    }
+
+    return fact->status;
+}
+
+std::optional<HouseholdId> Simulation::known_household_for_person(
+    const PersonId knower_id,
+    const PersonId subject_id) const noexcept {
+    const KnowledgeSemanticKey key{
+        .owner_id = knower_id,
+        .fact_kind = KnowledgeFactKind::PersonHousehold,
+        .primary_subject_id = subject_id,
+        .secondary_subject_id = 0U,
+    };
+    const auto key_it = knowledge_index_by_semantic_key_.find(key);
+    if (key_it == knowledge_index_by_semantic_key_.end() || key_it->second >= state_.agent_knowledge.size()) {
+        return std::nullopt;
+    }
+
+    const auto* fact = std::get_if<PersonHouseholdKnowledgeFact>(&state_.agent_knowledge[key_it->second].fact);
+    if (fact == nullptr) {
+        return std::nullopt;
+    }
+
+    return fact->household_id;
+}
+
+std::optional<SettlementStatusKnowledgeFact> Simulation::known_settlement_status(
+    const PersonId knower_id,
+    const SettlementId settlement_id) const noexcept {
+    const KnowledgeSemanticKey key{
+        .owner_id = knower_id,
+        .fact_kind = KnowledgeFactKind::SettlementStatus,
+        .primary_subject_id = settlement_id,
+        .secondary_subject_id = 0U,
+    };
+    const auto key_it = knowledge_index_by_semantic_key_.find(key);
+    if (key_it == knowledge_index_by_semantic_key_.end() || key_it->second >= state_.agent_knowledge.size()) {
+        return std::nullopt;
+    }
+
+    const auto* fact = std::get_if<SettlementStatusKnowledgeFact>(&state_.agent_knowledge[key_it->second].fact);
+    if (fact == nullptr) {
+        return std::nullopt;
+    }
+
+    return *fact;
 }
 
 std::vector<std::byte> Simulation::save_snapshot() const {
@@ -1381,6 +1511,10 @@ SettlementId Simulation::next_settlement_id() noexcept {
 
 MemoryId Simulation::next_memory_id() noexcept {
     return next_memory_id_++;
+}
+
+KnowledgeId Simulation::next_knowledge_id() noexcept {
+    return next_knowledge_id_++;
 }
 
 SimulationSeed Simulation::root_seed() const noexcept {
@@ -2921,6 +3055,7 @@ void Simulation::append_memory(AgentMemory memory) {
 
     memory.id = next_memory_id();
     state_.agent_memories.push_back(memory);
+    derive_knowledge_from_memory(memory);
 }
 
 void Simulation::append_direct_observation_memories(
@@ -2940,6 +3075,197 @@ void Simulation::append_direct_observation_memories(
             .source_event_id = source_event_id,
             .confidence_per_10k = 10'000U,
         });
+    }
+}
+
+void Simulation::derive_knowledge_from_memory(const AgentMemory& memory) {
+    if (memory.source != MemorySource::DirectObservation) {
+        return;
+    }
+
+    if (memory.source_event_id == 0U || memory.source_event_id > state_.event_log.size()) {
+        throw std::invalid_argument("Memory source event id is out of range for knowledge derivation");
+    }
+
+    const auto& source_event = state_.event_log[static_cast<std::size_t>(memory.source_event_id - 1U)];
+    if (source_event.id != memory.source_event_id) {
+        throw std::invalid_argument("Memory source event id does not match canonical event order");
+    }
+
+    if (source_event.type == EventType::Birth) {
+        const auto& payload = std::get<BirthEventPayload>(source_event.payload);
+        upsert_knowledge(
+            memory.owner_id,
+            memory.acquired_at,
+            memory.id,
+            memory.confidence_per_10k,
+            KnowledgeFact{PersonLifeStatusKnowledgeFact{
+                .person_id = payload.child_id,
+                .status = KnownLifeStatus::Alive,
+            }},
+            KnowledgeFactKind::PersonLifeStatus,
+            payload.child_id,
+            0U);
+
+        upsert_knowledge(
+            memory.owner_id,
+            memory.acquired_at,
+            memory.id,
+            memory.confidence_per_10k,
+            KnowledgeFact{PersonHouseholdKnowledgeFact{
+                .person_id = payload.child_id,
+                .household_id = payload.household_id,
+            }},
+            KnowledgeFactKind::PersonHousehold,
+            payload.child_id,
+            0U);
+        return;
+    }
+
+    if (source_event.type == EventType::Death) {
+        const auto& payload = std::get<DeathEventPayload>(source_event.payload);
+        upsert_knowledge(
+            memory.owner_id,
+            memory.acquired_at,
+            memory.id,
+            memory.confidence_per_10k,
+            KnowledgeFact{PersonLifeStatusKnowledgeFact{
+                .person_id = payload.person_id,
+                .status = KnownLifeStatus::Dead,
+            }},
+            KnowledgeFactKind::PersonLifeStatus,
+            payload.person_id,
+            0U);
+        return;
+    }
+
+    if (source_event.type == EventType::SettlementFounded) {
+        const auto& payload = std::get<SettlementFoundedEventPayload>(source_event.payload);
+        upsert_knowledge(
+            memory.owner_id,
+            memory.acquired_at,
+            memory.id,
+            memory.confidence_per_10k,
+            KnowledgeFact{SettlementStatusKnowledgeFact{
+                .settlement_id = payload.settlement_id,
+                .region_id = payload.region_id,
+                .active = true,
+            }},
+            KnowledgeFactKind::SettlementStatus,
+            payload.settlement_id,
+            0U);
+        return;
+    }
+
+    if (source_event.type == EventType::SettlementExtinct) {
+        const auto& payload = std::get<SettlementExtinctEventPayload>(source_event.payload);
+        upsert_knowledge(
+            memory.owner_id,
+            memory.acquired_at,
+            memory.id,
+            memory.confidence_per_10k,
+            KnowledgeFact{SettlementStatusKnowledgeFact{
+                .settlement_id = payload.settlement_id,
+                .region_id = payload.region_id,
+                .active = false,
+            }},
+            KnowledgeFactKind::SettlementStatus,
+            payload.settlement_id,
+            0U);
+        return;
+    }
+}
+
+void Simulation::upsert_knowledge(
+    const PersonId owner_id,
+    const SimulationTime acquired_at,
+    const MemoryId source_memory_id,
+    const std::uint32_t confidence_per_10k,
+    KnowledgeFact fact,
+    const KnowledgeFactKind fact_kind,
+    const std::uint64_t primary_subject_id,
+    const std::uint64_t secondary_subject_id) {
+    if (owner_id == 0U || source_memory_id == 0U || primary_subject_id == 0U) {
+        throw std::invalid_argument("Knowledge upsert references must be non-zero");
+    }
+    if (acquired_at.ticks < 0 || acquired_at > state_.time) {
+        throw std::invalid_argument("Knowledge upsert acquisition time is invalid");
+    }
+    if (confidence_per_10k > 10'000U) {
+        throw std::invalid_argument("Knowledge confidence must be <= 10000");
+    }
+
+    const KnowledgeSemanticKey semantic_key{
+        .owner_id = owner_id,
+        .fact_kind = fact_kind,
+        .primary_subject_id = primary_subject_id,
+        .secondary_subject_id = secondary_subject_id,
+    };
+
+    const auto existing_it = knowledge_index_by_semantic_key_.find(semantic_key);
+    if (existing_it == knowledge_index_by_semantic_key_.end()) {
+        AgentKnowledge knowledge{};
+        knowledge.id = next_knowledge_id();
+        knowledge.owner_id = owner_id;
+        knowledge.acquired_at = acquired_at;
+        knowledge.updated_at = acquired_at;
+        knowledge.source = KnowledgeSource::MemoryDerived;
+        knowledge.source_memory_id = source_memory_id;
+        knowledge.fact = std::move(fact);
+        knowledge.confidence_per_10k = confidence_per_10k;
+
+        state_.agent_knowledge.push_back(std::move(knowledge));
+        const auto index = state_.agent_knowledge.size() - 1U;
+        knowledge_indices_by_owner_[owner_id].push_back(index);
+        knowledge_index_by_semantic_key_.emplace(semantic_key, index);
+        return;
+    }
+
+    if (existing_it->second >= state_.agent_knowledge.size()) {
+        throw std::invalid_argument("Knowledge semantic index is out of range");
+    }
+
+    auto& knowledge = state_.agent_knowledge[existing_it->second];
+    if (knowledge.owner_id != owner_id) {
+        throw std::invalid_argument("Knowledge owner mismatch during upsert");
+    }
+
+    if (acquired_at < knowledge.acquired_at) {
+        knowledge.acquired_at = acquired_at;
+    }
+
+    if (acquired_at > knowledge.updated_at ||
+        (acquired_at == knowledge.updated_at && source_memory_id >= knowledge.source_memory_id)) {
+        knowledge.updated_at = acquired_at;
+        knowledge.source = KnowledgeSource::MemoryDerived;
+        knowledge.source_memory_id = source_memory_id;
+        knowledge.fact = std::move(fact);
+        knowledge.confidence_per_10k = confidence_per_10k;
+    }
+}
+
+void Simulation::rebuild_knowledge_indexes() {
+    knowledge_indices_by_owner_.clear();
+    knowledge_index_by_semantic_key_.clear();
+    knowledge_indices_by_owner_.reserve(state_.agent_knowledge.size());
+    knowledge_index_by_semantic_key_.reserve(state_.agent_knowledge.size());
+
+    for (std::size_t index = 0; index < state_.agent_knowledge.size(); ++index) {
+        const auto& knowledge = state_.agent_knowledge[index];
+        const auto descriptor = describe_knowledge_fact(knowledge.fact);
+
+        const KnowledgeSemanticKey semantic_key{
+            .owner_id = knowledge.owner_id,
+            .fact_kind = descriptor.kind,
+            .primary_subject_id = descriptor.primary_subject_id,
+            .secondary_subject_id = descriptor.secondary_subject_id,
+        };
+
+        const auto inserted = knowledge_index_by_semantic_key_.emplace(semantic_key, index);
+        if (!inserted.second) {
+            throw std::invalid_argument("Duplicate knowledge semantic key found while rebuilding indexes");
+        }
+        knowledge_indices_by_owner_[knowledge.owner_id].push_back(index);
     }
 }
 

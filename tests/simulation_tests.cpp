@@ -600,6 +600,96 @@ void verify_event_log_invariants(const universe::WorldState& state) {
             require(false, "settlement extinction should not create direct memories in current model");
         }
     }
+
+    struct KnowledgeSemanticKey {
+        universe::PersonId owner_id{};
+        universe::KnowledgeFactKind fact_kind{universe::KnowledgeFactKind::PersonLifeStatus};
+        std::uint64_t primary_subject_id{};
+
+        [[nodiscard]] bool operator==(const KnowledgeSemanticKey& other) const noexcept {
+            return owner_id == other.owner_id &&
+                fact_kind == other.fact_kind &&
+                primary_subject_id == other.primary_subject_id;
+        }
+    };
+
+    struct KnowledgeSemanticKeyHash {
+        [[nodiscard]] std::size_t operator()(const KnowledgeSemanticKey& key) const noexcept {
+            const auto mixed =
+                (key.owner_id * 0x9E3779B97F4A7C15ULL) ^
+                (static_cast<std::uint64_t>(key.fact_kind) * 0xD6E8FEB86659FD93ULL) ^
+                (key.primary_subject_id * 0xA24BAED4963EE407ULL);
+            return static_cast<std::size_t>(mixed);
+        }
+    };
+
+    std::unordered_set<KnowledgeSemanticKey, KnowledgeSemanticKeyHash> semantic_keys;
+    universe::KnowledgeId expected_knowledge_id = 1;
+    for (const auto& knowledge : state.agent_knowledge) {
+        require(knowledge.id == expected_knowledge_id, "knowledge ids must be contiguous and deterministic");
+        ++expected_knowledge_id;
+        require(knowledge.owner_id > 0U, "knowledge owner id must be non-zero");
+        require(knowledge.source == universe::KnowledgeSource::MemoryDerived, "knowledge source must be memory-derived");
+        require(knowledge.source_memory_id > 0U, "knowledge source memory id must be non-zero");
+        require(knowledge.confidence_per_10k <= 10'000U, "knowledge confidence must remain bounded");
+        require(knowledge.acquired_at.ticks >= 0, "knowledge acquired_at must be non-negative");
+        require(knowledge.updated_at.ticks >= knowledge.acquired_at.ticks, "knowledge updated_at must be >= acquired_at");
+        require(knowledge.updated_at.ticks <= state.time.ticks, "knowledge updated_at must not exceed simulation time");
+
+        const auto* source_memory = [&state](const universe::MemoryId memory_id) -> const universe::AgentMemory* {
+            for (const auto& memory : state.agent_memories) {
+                if (memory.id == memory_id) {
+                    return &memory;
+                }
+            }
+            return nullptr;
+        }(knowledge.source_memory_id);
+
+        require(source_memory != nullptr, "knowledge source memory must reference existing memory");
+        require(source_memory->owner_id == knowledge.owner_id, "knowledge source memory owner must match knowledge owner");
+        require(source_memory->acquired_at == knowledge.updated_at, "knowledge updated_at must align with source memory acquisition");
+
+        if (const auto* fact = std::get_if<universe::PersonLifeStatusKnowledgeFact>(&knowledge.fact); fact != nullptr) {
+            require(fact->person_id > 0U, "person life-status knowledge person id must be non-zero");
+            const auto* subject = find_person(state, fact->person_id);
+            require(subject != nullptr, "person life-status knowledge person id must reference existing person");
+
+            require(
+                semantic_keys.insert(KnowledgeSemanticKey{
+                    .owner_id = knowledge.owner_id,
+                    .fact_kind = universe::KnowledgeFactKind::PersonLifeStatus,
+                    .primary_subject_id = fact->person_id,
+                }).second,
+                "knowledge semantic key owner+person-life-status+subject must be unique");
+        } else if (const auto* fact = std::get_if<universe::PersonHouseholdKnowledgeFact>(&knowledge.fact); fact != nullptr) {
+            require(fact->person_id > 0U, "person-household knowledge person id must be non-zero");
+            require(fact->household_id > 0U, "person-household knowledge household id must be non-zero");
+            require(find_person(state, fact->person_id) != nullptr, "person-household knowledge person must exist");
+            require(find_household(state, fact->household_id) != nullptr, "person-household knowledge household must exist");
+
+            require(
+                semantic_keys.insert(KnowledgeSemanticKey{
+                    .owner_id = knowledge.owner_id,
+                    .fact_kind = universe::KnowledgeFactKind::PersonHousehold,
+                    .primary_subject_id = fact->person_id,
+                }).second,
+                "knowledge semantic key owner+person-household+subject must be unique");
+        } else if (const auto* fact = std::get_if<universe::SettlementStatusKnowledgeFact>(&knowledge.fact); fact != nullptr) {
+            require(fact->settlement_id > 0U, "settlement-status knowledge settlement id must be non-zero");
+            require(fact->region_id > 0U, "settlement-status knowledge region id must be non-zero");
+            require(find_settlement(state, fact->settlement_id) != nullptr, "settlement-status knowledge settlement must exist");
+
+            require(
+                semantic_keys.insert(KnowledgeSemanticKey{
+                    .owner_id = knowledge.owner_id,
+                    .fact_kind = universe::KnowledgeFactKind::SettlementStatus,
+                    .primary_subject_id = fact->settlement_id,
+                }).second,
+                "knowledge semantic key owner+settlement-status+subject must be unique");
+        } else {
+            require(false, "knowledge fact variant must be recognized");
+        }
+    }
 }
 
 void require_world_state_equal(const universe::WorldState& lhs, const universe::WorldState& rhs, const char* context) {
@@ -666,6 +756,7 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
     require(lhs.settlements.size() == rhs.settlements.size(), context);
     require(lhs.event_log.size() == rhs.event_log.size(), context);
     require(lhs.agent_memories.size() == rhs.agent_memories.size(), context);
+    require(lhs.agent_knowledge.size() == rhs.agent_knowledge.size(), context);
 
     for (std::size_t i = 0; i < lhs.people.size(); ++i) {
         const auto& a = lhs.people[i];
@@ -764,6 +855,19 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
         require(a.acquired_at == b.acquired_at, context);
         require(a.source == b.source, context);
         require(a.source_event_id == b.source_event_id, context);
+        require(a.confidence_per_10k == b.confidence_per_10k, context);
+    }
+
+    for (std::size_t i = 0; i < lhs.agent_knowledge.size(); ++i) {
+        const auto& a = lhs.agent_knowledge[i];
+        const auto& b = rhs.agent_knowledge[i];
+        require(a.id == b.id, context);
+        require(a.owner_id == b.owner_id, context);
+        require(a.acquired_at == b.acquired_at, context);
+        require(a.updated_at == b.updated_at, context);
+        require(a.source == b.source, context);
+        require(a.source_memory_id == b.source_memory_id, context);
+        require(a.fact == b.fact, context);
         require(a.confidence_per_10k == b.confidence_per_10k, context);
     }
 }
@@ -978,6 +1082,70 @@ MemorySectionInfo locate_memory_section(const universe::WorldState& state) {
         cursor += kMemoryRecordSize;
     }
 
+    return info;
+}
+
+struct KnowledgeSectionInfo {
+    std::size_t knowledge_count_offset{};
+    std::uint64_t knowledge_count{};
+    std::vector<std::size_t> knowledge_offsets{};
+    std::vector<std::size_t> knowledge_fact_kind_offsets{};
+    std::vector<universe::KnowledgeFactKind> fact_kinds{};
+    std::size_t next_knowledge_id_offset{};
+};
+
+KnowledgeSectionInfo locate_knowledge_section(const universe::WorldState& state) {
+    const auto memory_section = locate_memory_section(state);
+
+    std::vector<const universe::AgentKnowledge*> knowledge_order;
+    knowledge_order.reserve(state.agent_knowledge.size());
+    for (const auto& knowledge : state.agent_knowledge) {
+        knowledge_order.push_back(&knowledge);
+    }
+    std::sort(knowledge_order.begin(), knowledge_order.end(), [](const universe::AgentKnowledge* lhs, const universe::AgentKnowledge* rhs) {
+        return lhs->id < rhs->id;
+    });
+
+    KnowledgeSectionInfo info{};
+    info.knowledge_count_offset = memory_section.memory_count_offset + 8U + (memory_section.memory_offsets.size() * 37U);
+    info.knowledge_count = static_cast<std::uint64_t>(knowledge_order.size());
+    info.knowledge_offsets.reserve(knowledge_order.size());
+    info.knowledge_fact_kind_offsets.reserve(knowledge_order.size());
+    info.fact_kinds.reserve(knowledge_order.size());
+
+    std::size_t cursor = info.knowledge_count_offset + 8U;
+    for (const auto* knowledge : knowledge_order) {
+        info.knowledge_offsets.push_back(cursor);
+        cursor += 8U;   // id
+        cursor += 8U;   // owner
+        cursor += 8U;   // acquired
+        cursor += 8U;   // updated
+        cursor += 1U;   // source
+        cursor += 8U;   // source memory
+        info.knowledge_fact_kind_offsets.push_back(cursor);
+        const auto kind_offset = cursor;
+        cursor += 1U;   // fact kind
+
+        if (std::holds_alternative<universe::PersonLifeStatusKnowledgeFact>(knowledge->fact)) {
+            info.fact_kinds.push_back(universe::KnowledgeFactKind::PersonLifeStatus);
+            cursor += 8U; // person id
+            cursor += 1U; // life status
+        } else if (std::holds_alternative<universe::PersonHouseholdKnowledgeFact>(knowledge->fact)) {
+            info.fact_kinds.push_back(universe::KnowledgeFactKind::PersonHousehold);
+            cursor += 8U; // person id
+            cursor += 8U; // household id
+        } else {
+            (void)kind_offset;
+            info.fact_kinds.push_back(universe::KnowledgeFactKind::SettlementStatus);
+            cursor += 8U; // settlement id
+            cursor += 8U; // region id
+            cursor += 1U; // active
+        }
+
+        cursor += 4U;   // confidence
+    }
+
+    info.next_knowledge_id_offset = cursor;
     return info;
 }
 
@@ -2169,6 +2337,141 @@ int main() {
             acquired_before_event,
             universe::SnapshotErrorCode::InvalidState,
             "memory acquired_at before source event timestamp must be rejected");
+    }
+
+    {
+        universe::Simulation knowledge_source{config};
+        knowledge_source.run_years(140);
+        const auto valid = knowledge_source.save_snapshot();
+        const auto knowledge_section = locate_knowledge_section(knowledge_source.state());
+        require(knowledge_section.knowledge_count > 1U, "knowledge corruption tests require at least two knowledge records");
+
+        auto knowledge_id_zero = clone_bytes(valid);
+        write_u64_le(knowledge_id_zero, knowledge_section.knowledge_offsets.front(), 0U);
+        refresh_snapshot_payload_hash(knowledge_id_zero);
+        require_snapshot_load_fails(
+            knowledge_id_zero,
+            universe::SnapshotErrorCode::InvalidState,
+            "knowledge id zero must be rejected");
+
+        auto duplicate_knowledge_id = clone_bytes(valid);
+        const auto first_id = read_u64_le(duplicate_knowledge_id, knowledge_section.knowledge_offsets.front());
+        write_u64_le(duplicate_knowledge_id, knowledge_section.knowledge_offsets[1], first_id);
+        refresh_snapshot_payload_hash(duplicate_knowledge_id);
+        require_snapshot_load_fails(
+            duplicate_knowledge_id,
+            universe::SnapshotErrorCode::DuplicateId,
+            "duplicate knowledge ids must be rejected");
+
+        auto non_contiguous_ids = clone_bytes(valid);
+        write_u64_le(non_contiguous_ids, knowledge_section.knowledge_offsets.front(), knowledge_section.knowledge_count + 17U);
+        refresh_snapshot_payload_hash(non_contiguous_ids);
+        require_snapshot_load_fails(
+            non_contiguous_ids,
+            universe::SnapshotErrorCode::InvalidState,
+            "non-contiguous knowledge ids must be rejected");
+
+        auto invalid_owner = clone_bytes(valid);
+        write_u64_le(invalid_owner, knowledge_section.knowledge_offsets.front() + 8U, 0U);
+        refresh_snapshot_payload_hash(invalid_owner);
+        require_snapshot_load_fails(
+            invalid_owner,
+            universe::SnapshotErrorCode::InvalidReference,
+            "knowledge owner id must be valid");
+
+        auto invalid_source_memory = clone_bytes(valid);
+        write_u64_le(invalid_source_memory, knowledge_section.knowledge_offsets.front() + 33U, 0U);
+        refresh_snapshot_payload_hash(invalid_source_memory);
+        require_snapshot_load_fails(
+            invalid_source_memory,
+            universe::SnapshotErrorCode::InvalidReference,
+            "knowledge source memory id must be valid");
+
+        auto invalid_source_enum = clone_bytes(valid);
+        invalid_source_enum[knowledge_section.knowledge_offsets.front() + 32U] = std::byte{1};
+        refresh_snapshot_payload_hash(invalid_source_enum);
+        require_snapshot_load_fails(
+            invalid_source_enum,
+            universe::SnapshotErrorCode::InvalidEnum,
+            "knowledge source enum out of range must be rejected");
+
+        auto invalid_fact_kind = clone_bytes(valid);
+        invalid_fact_kind[knowledge_section.knowledge_fact_kind_offsets.front()] = std::byte{9};
+        refresh_snapshot_payload_hash(invalid_fact_kind);
+        require_snapshot_load_fails(
+            invalid_fact_kind,
+            universe::SnapshotErrorCode::InvalidEnum,
+            "knowledge fact kind out of range must be rejected");
+
+        auto updated_before_acquired = clone_bytes(valid);
+        const auto acquired_ticks = read_u64_le(updated_before_acquired, knowledge_section.knowledge_offsets.front() + 16U);
+        if (acquired_ticks > 0U) {
+            write_u64_le(updated_before_acquired, knowledge_section.knowledge_offsets.front() + 24U, acquired_ticks - 1U);
+        } else {
+            write_u64_le(updated_before_acquired, knowledge_section.knowledge_offsets.front() + 24U, 0U);
+        }
+        refresh_snapshot_payload_hash(updated_before_acquired);
+        require_snapshot_load_fails(
+            updated_before_acquired,
+            universe::SnapshotErrorCode::InvalidState,
+            "knowledge updated_at before acquired_at must be rejected");
+
+        auto invalid_confidence = clone_bytes(valid);
+        const auto confidence_offset = knowledge_section.next_knowledge_id_offset - 4U;
+        write_u32_le(invalid_confidence, confidence_offset, 10'001U);
+        refresh_snapshot_payload_hash(invalid_confidence);
+        require_snapshot_load_fails(
+            invalid_confidence,
+            universe::SnapshotErrorCode::InvalidState,
+            "knowledge confidence above 10000 must be rejected");
+
+        std::size_t same_kind_first = std::numeric_limits<std::size_t>::max();
+        std::size_t same_kind_second = std::numeric_limits<std::size_t>::max();
+        for (std::size_t i = 0; i < knowledge_section.fact_kinds.size(); ++i) {
+            for (std::size_t j = i + 1; j < knowledge_section.fact_kinds.size(); ++j) {
+                if (knowledge_section.fact_kinds[i] == knowledge_section.fact_kinds[j]) {
+                    same_kind_first = i;
+                    same_kind_second = j;
+                    break;
+                }
+            }
+            if (same_kind_first != std::numeric_limits<std::size_t>::max()) {
+                break;
+            }
+        }
+        require(
+            same_kind_first != std::numeric_limits<std::size_t>::max(),
+            "knowledge corruption tests require two knowledge records of same kind");
+
+        auto duplicate_semantic_key = clone_bytes(valid);
+        const auto first_offset = knowledge_section.knowledge_offsets[same_kind_first];
+        const auto second_offset = knowledge_section.knowledge_offsets[same_kind_second];
+        const auto kind = knowledge_section.fact_kinds[same_kind_first];
+        const auto owner = read_u64_le(duplicate_semantic_key, first_offset + 8U);
+        write_u64_le(duplicate_semantic_key, second_offset + 8U, owner);
+        if (kind == universe::KnowledgeFactKind::PersonLifeStatus) {
+            const auto subject = read_u64_le(duplicate_semantic_key, first_offset + 42U);
+            write_u64_le(duplicate_semantic_key, second_offset + 42U, subject);
+        } else if (kind == universe::KnowledgeFactKind::PersonHousehold) {
+            const auto subject = read_u64_le(duplicate_semantic_key, first_offset + 42U);
+            write_u64_le(duplicate_semantic_key, second_offset + 42U, subject);
+        } else {
+            const auto subject = read_u64_le(duplicate_semantic_key, first_offset + 42U);
+            write_u64_le(duplicate_semantic_key, second_offset + 42U, subject);
+        }
+        refresh_snapshot_payload_hash(duplicate_semantic_key);
+        require_snapshot_load_fails(
+            duplicate_semantic_key,
+            universe::SnapshotErrorCode::InvalidState,
+            "duplicate knowledge semantic keys must be rejected");
+
+        auto invalid_next_knowledge_id = clone_bytes(valid);
+        write_u64_le(invalid_next_knowledge_id, knowledge_section.next_knowledge_id_offset, 1U);
+        refresh_snapshot_payload_hash(invalid_next_knowledge_id);
+        require_snapshot_load_fails(
+            invalid_next_knowledge_id,
+            universe::SnapshotErrorCode::InvalidState,
+            "invalid next knowledge id must be rejected");
     }
 
     universe::Simulation a{config};

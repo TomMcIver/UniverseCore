@@ -37,6 +37,27 @@ const universe::SimulationEvent* find_event(const universe::WorldState& state, c
     return nullptr;
 }
 
+const universe::AgentMemory* find_memory(const universe::WorldState& state, const universe::MemoryId id) {
+    for (const auto& memory : state.agent_memories) {
+        if (memory.id == id) {
+            return &memory;
+        }
+    }
+    return nullptr;
+}
+
+std::vector<universe::PersonId> event_observers(const universe::WorldState& state, const universe::EventId event_id) {
+    std::vector<universe::PersonId> observers;
+    for (const auto& memory : state.agent_memories) {
+        if (memory.source_event_id == event_id) {
+            observers.push_back(memory.owner_id);
+        }
+    }
+    std::sort(observers.begin(), observers.end());
+    observers.erase(std::unique(observers.begin(), observers.end()), observers.end());
+    return observers;
+}
+
 void verify_resource_invariants(const universe::WorldState& state, const std::int64_t expected_initial_food_units) {
     std::int64_t total_food_stored = 0;
     std::int64_t total_food_produced = 0;
@@ -254,6 +275,265 @@ int main() {
         require(
             continuous.save_snapshot() == segmented.save_snapshot(),
             "repeated save/load continuation must preserve canonical memory/event state without duplication");
+    }
+
+    {
+        universe::Simulation knowledge_run{config};
+        knowledge_run.run_years(160);
+        const auto& state = knowledge_run.state();
+
+        bool birth_case_verified = false;
+        bool stale_case_verified = false;
+        bool no_omniscience_verified = false;
+        bool settlement_extinction_stale_verified = false;
+
+        std::unordered_map<universe::PersonId, const universe::SimulationEvent*> birth_event_by_child;
+        for (const auto& event : state.event_log) {
+            if (event.type != universe::EventType::Birth) {
+                continue;
+            }
+            const auto& payload = std::get<universe::BirthEventPayload>(event.payload);
+            birth_event_by_child.emplace(payload.child_id, &event);
+        }
+
+        for (const auto& event : state.event_log) {
+            if (event.type == universe::EventType::Birth && !birth_case_verified) {
+                const auto& payload = std::get<universe::BirthEventPayload>(event.payload);
+                const auto* child = find_person(state, payload.child_id);
+                if (child == nullptr || !child->alive) {
+                    continue;
+                }
+                const auto observers = event_observers(state, event.id);
+                if (observers.empty()) {
+                    continue;
+                }
+
+                const auto observer_id = observers.front();
+                universe::PersonId unrelated_id = 0;
+                for (const auto& person : state.people) {
+                    if (person.id == observer_id || person.id == payload.child_id) {
+                        continue;
+                    }
+                    if (!knowledge_run.person_remembers_event(person.id, event.id)) {
+                        unrelated_id = person.id;
+                        break;
+                    }
+                }
+                if (unrelated_id == 0U) {
+                    continue;
+                }
+
+                const auto observer_status = knowledge_run.known_life_status(observer_id, payload.child_id);
+                const auto observer_household = knowledge_run.known_household_for_person(observer_id, payload.child_id);
+                require(observer_status.has_value(), "birth observer should know newborn is alive");
+                require(*observer_status == universe::KnownLifeStatus::Alive, "birth observer life-status knowledge must be alive");
+                require(observer_household.has_value(), "birth observer should know newborn household");
+                require(*observer_household == payload.household_id, "birth observer household knowledge must match birth household");
+
+                require(
+                    !knowledge_run.known_life_status(payload.child_id, payload.child_id).has_value(),
+                    "newborn must not automatically gain self life-status knowledge from own birth event");
+                require(
+                    !knowledge_run.known_household_for_person(payload.child_id, payload.child_id).has_value(),
+                    "newborn must not automatically gain self household knowledge from own birth event");
+                require(
+                    !knowledge_run.known_life_status(unrelated_id, payload.child_id).has_value(),
+                    "unrelated non-observer must not gain birth life-status knowledge");
+                require(
+                    !knowledge_run.known_household_for_person(unrelated_id, payload.child_id).has_value(),
+                    "unrelated non-observer must not gain birth household knowledge");
+
+                birth_case_verified = true;
+            }
+
+            if (event.type == universe::EventType::SettlementFounded && !no_omniscience_verified) {
+                const auto& payload = std::get<universe::SettlementFoundedEventPayload>(event.payload);
+                const auto observers = event_observers(state, event.id);
+                if (observers.empty()) {
+                    continue;
+                }
+
+                universe::PersonId unrelated_id = 0;
+                for (const auto& person : state.people) {
+                    if (std::find(observers.begin(), observers.end(), person.id) == observers.end()) {
+                        unrelated_id = person.id;
+                        break;
+                    }
+                }
+                if (unrelated_id == 0U) {
+                    continue;
+                }
+
+                require(
+                    !knowledge_run.known_settlement_status(unrelated_id, payload.settlement_id).has_value(),
+                    "non-observer must not gain settlement knowledge from journal omniscience");
+                no_omniscience_verified = true;
+            }
+        }
+
+        struct StaleKnowledgeCase {
+            universe::PersonId child_id{};
+            universe::PersonId stale_observer_id{};
+            universe::PersonId death_observer_id{};
+            universe::EventId birth_event_id{};
+            universe::EventId death_event_id{};
+        } stale_case{};
+
+        bool found_stale_case = false;
+        for (const auto& event : state.event_log) {
+            if (event.type != universe::EventType::Death) {
+                continue;
+            }
+            const auto& death_payload = std::get<universe::DeathEventPayload>(event.payload);
+            const auto birth_it = birth_event_by_child.find(death_payload.person_id);
+            if (birth_it == birth_event_by_child.end()) {
+                continue;
+            }
+
+            const auto* birth_event = birth_it->second;
+            const auto birth_observers = event_observers(state, birth_event->id);
+            const auto death_observers = event_observers(state, event.id);
+            if (birth_observers.empty() || death_observers.empty()) {
+                continue;
+            }
+
+            universe::PersonId stale_observer_id = 0;
+            for (const auto observer_id : birth_observers) {
+                if (std::find(death_observers.begin(), death_observers.end(), observer_id) == death_observers.end()) {
+                    stale_observer_id = observer_id;
+                    break;
+                }
+            }
+            if (stale_observer_id == 0U) {
+                continue;
+            }
+
+            stale_case = StaleKnowledgeCase{
+                .child_id = death_payload.person_id,
+                .stale_observer_id = stale_observer_id,
+                .death_observer_id = death_observers.front(),
+                .birth_event_id = birth_event->id,
+                .death_event_id = event.id,
+            };
+            found_stale_case = true;
+            break;
+        }
+
+        require(found_stale_case, "integration run should contain stale-knowledge scenario");
+        const auto* dead_person = find_person(state, stale_case.child_id);
+        require(dead_person != nullptr, "stale-knowledge dead person must exist");
+        require(!dead_person->alive, "stale-knowledge target must be dead in world truth");
+
+        const auto stale_status = knowledge_run.known_life_status(stale_case.stale_observer_id, stale_case.child_id);
+        require(stale_status.has_value(), "stale observer should retain life-status knowledge");
+        require(*stale_status == universe::KnownLifeStatus::Alive, "stale observer should still believe target is alive");
+
+        const auto death_observer_status = knowledge_run.known_life_status(stale_case.death_observer_id, stale_case.child_id);
+        require(death_observer_status.has_value(), "death observer should have life-status knowledge");
+        require(*death_observer_status == universe::KnownLifeStatus::Dead, "death observer should know target is dead");
+        stale_case_verified = true;
+
+        std::uint64_t life_fact_count = 0;
+        universe::KnowledgeId life_fact_id = 0;
+        for (const auto& knowledge : knowledge_run.knowledge_for_person(stale_case.death_observer_id)) {
+            const auto* life = std::get_if<universe::PersonLifeStatusKnowledgeFact>(&knowledge.fact);
+            if (life == nullptr || life->person_id != stale_case.child_id) {
+                continue;
+            }
+            ++life_fact_count;
+            life_fact_id = knowledge.id;
+            require(life->status == universe::KnownLifeStatus::Dead, "life status for death observer must be dead after update");
+        }
+        require(life_fact_count == 1U, "life-status upsert must keep one current entry per owner/subject");
+        require(life_fact_id > 0U, "life-status knowledge id must be stable and non-zero");
+
+        bool found_settlement_stale_case = false;
+        for (const auto& event : state.event_log) {
+            if (event.type != universe::EventType::SettlementExtinct) {
+                continue;
+            }
+            const auto& extinct_payload = std::get<universe::SettlementExtinctEventPayload>(event.payload);
+
+            for (const auto& prior_event : state.event_log) {
+                if (prior_event.id >= event.id || prior_event.type != universe::EventType::SettlementFounded) {
+                    continue;
+                }
+                const auto& founded_payload = std::get<universe::SettlementFoundedEventPayload>(prior_event.payload);
+                if (founded_payload.settlement_id != extinct_payload.settlement_id) {
+                    continue;
+                }
+
+                const auto founded_observers = event_observers(state, prior_event.id);
+                if (founded_observers.empty()) {
+                    continue;
+                }
+
+                const auto observer_id = founded_observers.front();
+                require(
+                    !knowledge_run.person_remembers_event(observer_id, event.id),
+                    "settlement extinction currently has zero direct observer memories");
+
+                const auto settlement_status = knowledge_run.known_settlement_status(observer_id, founded_payload.settlement_id);
+                require(settlement_status.has_value(), "founded settlement observer should have settlement knowledge");
+                require(settlement_status->region_id == founded_payload.region_id, "settlement knowledge region must match founded event");
+                require(settlement_status->active, "settlement knowledge should remain active without extinction memory");
+
+                found_settlement_stale_case = true;
+                break;
+            }
+
+            if (found_settlement_stale_case) {
+                break;
+            }
+        }
+
+        require(found_settlement_stale_case, "integration run should include founded-then-extinct stale settlement knowledge case");
+        require(birth_case_verified, "birth-derived knowledge behavior should be verified");
+        require(stale_case_verified, "stale life-status knowledge behavior should be verified");
+        require(no_omniscience_verified, "no-omniscience behavior should be verified");
+        settlement_extinction_stale_verified = found_settlement_stale_case;
+        require(settlement_extinction_stale_verified, "settlement extinction stale-knowledge behavior should be verified");
+
+        const auto birth_event = find_event(state, stale_case.birth_event_id);
+        const auto death_event = find_event(state, stale_case.death_event_id);
+        require(birth_event != nullptr && death_event != nullptr, "stale case events must exist");
+        const auto birth_year = universe::DemographicCalendarAdapter::demographic_year(birth_event->timestamp);
+        const auto death_year = universe::DemographicCalendarAdapter::demographic_year(death_event->timestamp);
+        require(death_year > birth_year, "death used for update-after-load test must occur after birth");
+
+        universe::Simulation pre_load{config};
+        pre_load.run_years(birth_year);
+        const auto pre_status = pre_load.known_life_status(stale_case.death_observer_id, stale_case.child_id);
+        require(pre_status.has_value() && *pre_status == universe::KnownLifeStatus::Alive, "pre-load knowledge should be alive after birth observation");
+
+        universe::KnowledgeId pre_knowledge_id = 0;
+        for (const auto& knowledge : pre_load.knowledge_for_person(stale_case.death_observer_id)) {
+            const auto* fact = std::get_if<universe::PersonLifeStatusKnowledgeFact>(&knowledge.fact);
+            if (fact != nullptr && fact->person_id == stale_case.child_id) {
+                pre_knowledge_id = knowledge.id;
+                break;
+            }
+        }
+        require(pre_knowledge_id > 0U, "pre-load life-status knowledge id must exist");
+
+        const auto boundary = pre_load.save_snapshot();
+        universe::Simulation resumed{universe::SimulationConfig{.seed = 999U, .initial_population = 10U}};
+        const auto load_result = universe::Simulation::load_snapshot(boundary, resumed);
+        require(load_result.ok, "knowledge boundary snapshot must load");
+        resumed.run_years(death_year - birth_year);
+
+        const auto post_status = resumed.known_life_status(stale_case.death_observer_id, stale_case.child_id);
+        require(post_status.has_value() && *post_status == universe::KnownLifeStatus::Dead, "post-load life-status should update to dead after observed death");
+
+        universe::KnowledgeId post_knowledge_id = 0;
+        for (const auto& knowledge : resumed.knowledge_for_person(stale_case.death_observer_id)) {
+            const auto* fact = std::get_if<universe::PersonLifeStatusKnowledgeFact>(&knowledge.fact);
+            if (fact != nullptr && fact->person_id == stale_case.child_id) {
+                post_knowledge_id = knowledge.id;
+                break;
+            }
+        }
+        require(post_knowledge_id == pre_knowledge_id, "knowledge id must remain stable across load and later upsert update");
     }
 
     {

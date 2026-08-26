@@ -15,6 +15,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <variant>
 #include <vector>
 
@@ -23,11 +24,16 @@ namespace {
 using universe::BiologicalSex;
 using universe::Household;
 using universe::HouseholdId;
+using universe::KnownLifeStatus;
+using universe::KnowledgeFact;
+using universe::KnowledgeFactKind;
 using universe::MemorySource;
+using universe::MemoryId;
 using universe::Person;
 using universe::PersonId;
 using universe::Settlement;
 using universe::SettlementId;
+using universe::AgentMemory;
 using universe::EventId;
 using universe::EventType;
 using universe::SimulationEvent;
@@ -161,6 +167,49 @@ struct UiState {
             return "CraftWorker";
     }
     return "Unknown";
+}
+
+[[nodiscard]] const char* known_life_status_label(const KnownLifeStatus status) {
+    switch (status) {
+        case KnownLifeStatus::Alive:
+            return "Alive";
+        case KnownLifeStatus::Dead:
+            return "Dead";
+    }
+    return "Unknown";
+}
+
+[[nodiscard]] const char* knowledge_source_label(const universe::KnowledgeSource source) {
+    switch (source) {
+        case universe::KnowledgeSource::MemoryDerived:
+            return "MemoryDerived";
+    }
+    return "Unknown";
+}
+
+[[nodiscard]] const char* knowledge_fact_kind_label(const KnowledgeFactKind kind) {
+    switch (kind) {
+        case KnowledgeFactKind::PersonLifeStatus:
+            return "PersonLifeStatus";
+        case KnowledgeFactKind::PersonHousehold:
+            return "PersonHousehold";
+        case KnowledgeFactKind::SettlementStatus:
+            return "SettlementStatus";
+    }
+    return "Unknown";
+}
+
+[[nodiscard]] KnowledgeFactKind knowledge_fact_kind(const KnowledgeFact& fact) {
+    if (std::holds_alternative<universe::PersonLifeStatusKnowledgeFact>(fact)) {
+        return KnowledgeFactKind::PersonLifeStatus;
+    }
+    if (std::holds_alternative<universe::PersonHouseholdKnowledgeFact>(fact)) {
+        return KnowledgeFactKind::PersonHousehold;
+    }
+    if (std::holds_alternative<universe::SettlementStatusKnowledgeFact>(fact)) {
+        return KnowledgeFactKind::SettlementStatus;
+    }
+    throw std::invalid_argument("Unknown knowledge fact variant");
 }
 
 void apply_time_step(SimulationController& controller, const int run_step_index) {
@@ -486,6 +535,19 @@ int main(int argc, char** argv) {
         const auto settlement_summaries = controller.settlement_summaries();
         const auto people = controller.people();
         const auto events = controller.events();
+        const auto memories = controller.agent_memories();
+
+        std::unordered_map<MemoryId, const AgentMemory*> memory_by_id;
+        memory_by_id.reserve(memories.size());
+        for (const auto& memory : memories) {
+            memory_by_id.emplace(memory.id, &memory);
+        }
+
+        std::unordered_map<EventId, const SimulationEvent*> event_by_id;
+        event_by_id.reserve(events.size());
+        for (const auto& event : events) {
+            event_by_id.emplace(event.id, &event);
+        }
 
         ImGui::BeginChild("settlements", ImVec2(0, 180), true);
         ImGui::Text("Settlements");
@@ -762,6 +824,75 @@ int main(int argc, char** argv) {
                         ImGui::TextUnformatted(memory_source_label(memory.source));
                         ImGui::TableSetColumnIndex(5);
                         ImGui::Text("%u/10000", memory.confidence_per_10k);
+                    }
+
+                    ImGui::EndTable();
+                }
+
+                const auto person_knowledge = controller.knowledge_for_person(person->id);
+                ImGui::Separator();
+                ImGui::Text("Knowledge: %llu", static_cast<unsigned long long>(person_knowledge.size()));
+
+                if (ImGui::BeginTable("person_knowledge_table", 9, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY, ImVec2(0, 150))) {
+                    ImGui::TableSetupColumn("KnowledgeId");
+                    ImGui::TableSetupColumn("Kind");
+                    ImGui::TableSetupColumn("Subject");
+                    ImGui::TableSetupColumn("State");
+                    ImGui::TableSetupColumn("Source");
+                    ImGui::TableSetupColumn("Memory");
+                    ImGui::TableSetupColumn("Event");
+                    ImGui::TableSetupColumn("Acquired");
+                    ImGui::TableSetupColumn("Updated");
+                    ImGui::TableHeadersRow();
+
+                    for (const auto& knowledge : person_knowledge) {
+                        const auto fact_kind = knowledge_fact_kind(knowledge.fact);
+                        const auto source_memory_it = memory_by_id.find(knowledge.source_memory_id);
+                        const auto* source_memory = source_memory_it == memory_by_id.end() ? nullptr : source_memory_it->second;
+                        const auto source_event_it =
+                            source_memory == nullptr ? event_by_id.end() : event_by_id.find(source_memory->source_event_id);
+                        const auto* source_event = source_event_it == event_by_id.end() ? nullptr : source_event_it->second;
+
+                        std::string subject;
+                        std::string state_label;
+                        if (const auto* life = std::get_if<universe::PersonLifeStatusKnowledgeFact>(&knowledge.fact); life != nullptr) {
+                            subject = "Person #" + std::to_string(life->person_id);
+                            state_label = known_life_status_label(life->status);
+                        } else if (const auto* household = std::get_if<universe::PersonHouseholdKnowledgeFact>(&knowledge.fact); household != nullptr) {
+                            subject = "Person #" + std::to_string(household->person_id);
+                            state_label = "Household #" + std::to_string(household->household_id);
+                        } else if (const auto* settlement = std::get_if<universe::SettlementStatusKnowledgeFact>(&knowledge.fact); settlement != nullptr) {
+                            subject = "Settlement #" + std::to_string(settlement->settlement_id);
+                            state_label = "Region #" + std::to_string(settlement->region_id) + (settlement->active ? " Active" : " Inactive");
+                        }
+
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+                        ImGui::TextUnformatted(std::to_string(knowledge.id).c_str());
+                        ImGui::TableSetColumnIndex(1);
+                        ImGui::TextUnformatted(knowledge_fact_kind_label(fact_kind));
+                        ImGui::TableSetColumnIndex(2);
+                        ImGui::TextUnformatted(subject.c_str());
+                        ImGui::TableSetColumnIndex(3);
+                        ImGui::TextUnformatted(state_label.c_str());
+                        ImGui::TableSetColumnIndex(4);
+                        ImGui::Text("%s %u/10000", knowledge_source_label(knowledge.source), knowledge.confidence_per_10k);
+                        ImGui::TableSetColumnIndex(5);
+                        ImGui::Text("#%llu", static_cast<unsigned long long>(knowledge.source_memory_id));
+                        ImGui::TableSetColumnIndex(6);
+                        if (source_event == nullptr) {
+                            ImGui::TextUnformatted("Unknown");
+                        } else {
+                            ImGui::Text("%s #%llu", event_type_label(source_event->type), static_cast<unsigned long long>(source_event->id));
+                        }
+                        ImGui::TableSetColumnIndex(7);
+                        ImGui::Text("y%llu t=%lld",
+                            static_cast<unsigned long long>(universe::DemographicCalendarAdapter::demographic_year(knowledge.acquired_at)),
+                            static_cast<long long>(knowledge.acquired_at.ticks));
+                        ImGui::TableSetColumnIndex(8);
+                        ImGui::Text("y%llu t=%lld",
+                            static_cast<unsigned long long>(universe::DemographicCalendarAdapter::demographic_year(knowledge.updated_at)),
+                            static_cast<long long>(knowledge.updated_at.ticks));
                     }
 
                     ImGui::EndTable();

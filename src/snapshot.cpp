@@ -188,6 +188,10 @@ private:
     return id > 0U;
 }
 
+[[nodiscard]] bool is_valid_knowledge_id(const KnowledgeId id) noexcept {
+    return id > 0U;
+}
+
 struct DirectMemoryKey {
     PersonId owner_id{};
     EventId event_id{};
@@ -201,6 +205,31 @@ struct DirectMemoryKeyHash {
     [[nodiscard]] std::size_t operator()(const DirectMemoryKey& key) const noexcept {
         const auto mixed = (static_cast<std::uint64_t>(key.owner_id) * 0x9E3779B97F4A7C15ULL) ^
             (static_cast<std::uint64_t>(key.event_id) + 0xD6E8FEB86659FD93ULL);
+        return static_cast<std::size_t>(mixed);
+    }
+};
+
+struct KnowledgeSemanticKey {
+    PersonId owner_id{};
+    KnowledgeFactKind kind{KnowledgeFactKind::PersonLifeStatus};
+    std::uint64_t primary_subject_id{};
+    std::uint64_t secondary_subject_id{};
+
+    [[nodiscard]] bool operator==(const KnowledgeSemanticKey& other) const noexcept {
+        return owner_id == other.owner_id &&
+            kind == other.kind &&
+            primary_subject_id == other.primary_subject_id &&
+            secondary_subject_id == other.secondary_subject_id;
+    }
+};
+
+struct KnowledgeSemanticKeyHash {
+    [[nodiscard]] std::size_t operator()(const KnowledgeSemanticKey& key) const noexcept {
+        const auto mixed =
+            (static_cast<std::uint64_t>(key.owner_id) * 0x9E3779B97F4A7C15ULL) ^
+            (static_cast<std::uint64_t>(key.kind) * 0xD6E8FEB86659FD93ULL) ^
+            (key.primary_subject_id * 0xA24BAED4963EE407ULL) ^
+            (key.secondary_subject_id * 0x94D049BB133111EBULL);
         return static_cast<std::size_t>(mixed);
     }
 };
@@ -465,6 +494,45 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
         payload.write_u32(memory->confidence_per_10k);
     }
 
+    std::vector<const AgentKnowledge*> knowledge_order;
+    knowledge_order.reserve(simulation.state_.agent_knowledge.size());
+    for (const auto& knowledge : simulation.state_.agent_knowledge) {
+        knowledge_order.push_back(&knowledge);
+    }
+    std::sort(knowledge_order.begin(), knowledge_order.end(), [](const AgentKnowledge* lhs, const AgentKnowledge* rhs) {
+        return lhs->id < rhs->id;
+    });
+
+    payload.write_u64(static_cast<std::uint64_t>(knowledge_order.size()));
+    for (const auto* knowledge : knowledge_order) {
+        payload.write_u64(knowledge->id);
+        payload.write_u64(knowledge->owner_id);
+        payload.write_i64(knowledge->acquired_at.ticks);
+        payload.write_i64(knowledge->updated_at.ticks);
+        payload.write_u8(static_cast<std::uint8_t>(knowledge->source));
+        payload.write_u64(knowledge->source_memory_id);
+
+        if (const auto* life = std::get_if<PersonLifeStatusKnowledgeFact>(&knowledge->fact); life != nullptr) {
+            payload.write_u8(static_cast<std::uint8_t>(KnowledgeFactKind::PersonLifeStatus));
+            payload.write_u64(life->person_id);
+            payload.write_u8(static_cast<std::uint8_t>(life->status));
+        } else if (const auto* household = std::get_if<PersonHouseholdKnowledgeFact>(&knowledge->fact); household != nullptr) {
+            payload.write_u8(static_cast<std::uint8_t>(KnowledgeFactKind::PersonHousehold));
+            payload.write_u64(household->person_id);
+            payload.write_u64(household->household_id);
+        } else if (const auto* settlement = std::get_if<SettlementStatusKnowledgeFact>(&knowledge->fact); settlement != nullptr) {
+            payload.write_u8(static_cast<std::uint8_t>(KnowledgeFactKind::SettlementStatus));
+            payload.write_u64(settlement->settlement_id);
+            payload.write_u64(settlement->region_id);
+            payload.write_bool(settlement->active);
+        } else {
+            throw std::invalid_argument("Knowledge fact payload mismatch");
+        }
+
+        payload.write_u32(knowledge->confidence_per_10k);
+    }
+    payload.write_u64(simulation.next_knowledge_id_);
+
     payload.write_bool(simulation.config_.materials_system_enabled);
     payload.write_u32(simulation.config_.wood_resource_scale_percent);
     payload.write_u32(simulation.config_.stone_resource_scale_percent);
@@ -568,6 +636,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     std::uint64_t next_settlement_id = 0;
     std::uint64_t next_event_id = 0;
     std::uint64_t next_memory_id = 0;
+    std::uint64_t next_knowledge_id = 0;
     std::int64_t demography_interval_ticks = 0;
     std::int64_t demography_next_run_ticks = 0;
     std::int64_t food_interval_ticks = 0;
@@ -1056,6 +1125,92 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         }
 
         restored_state.agent_memories.push_back(memory);
+    }
+
+    std::uint64_t knowledge_count = 0;
+    if (!payload_reader.read_u64(knowledge_count)) {
+        return load_error(SnapshotErrorCode::TruncatedData, "Snapshot knowledge section is truncated");
+    }
+
+    if (knowledge_count > payload_reader.remaining() / 55U) {
+        return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot knowledge section has invalid length");
+    }
+
+    restored_state.agent_knowledge.clear();
+    restored_state.agent_knowledge.reserve(static_cast<std::size_t>(knowledge_count));
+    std::unordered_set<KnowledgeId> knowledge_ids;
+
+    for (std::uint64_t i = 0; i < knowledge_count; ++i) {
+        AgentKnowledge knowledge{};
+        std::uint8_t source_raw = 0;
+        std::uint8_t fact_kind_raw = 0;
+
+        if (!payload_reader.read_u64(knowledge.id) ||
+            !payload_reader.read_u64(knowledge.owner_id) ||
+            !payload_reader.read_i64(knowledge.acquired_at.ticks) ||
+            !payload_reader.read_i64(knowledge.updated_at.ticks) ||
+            !payload_reader.read_u8(source_raw) ||
+            !payload_reader.read_u64(knowledge.source_memory_id) ||
+            !payload_reader.read_u8(fact_kind_raw)) {
+            return load_error(SnapshotErrorCode::TruncatedData, "Snapshot knowledge record is truncated");
+        }
+
+        if (!is_valid_knowledge_id(knowledge.id)) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot knowledge id must be non-zero");
+        }
+        if (!is_valid_person_id(knowledge.owner_id)) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot knowledge owner id must be non-zero");
+        }
+        if (!is_valid_memory_id(knowledge.source_memory_id)) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot knowledge source memory id must be non-zero");
+        }
+        if (source_raw > static_cast<std::uint8_t>(KnowledgeSource::MemoryDerived)) {
+            return load_error(SnapshotErrorCode::InvalidEnum, "Snapshot knowledge source enum is invalid");
+        }
+        knowledge.source = static_cast<KnowledgeSource>(source_raw);
+
+        if (!knowledge_ids.insert(knowledge.id).second) {
+            return load_error(SnapshotErrorCode::DuplicateId, "Snapshot contains duplicate knowledge ids");
+        }
+
+        if (fact_kind_raw == static_cast<std::uint8_t>(KnowledgeFactKind::PersonLifeStatus)) {
+            PersonLifeStatusKnowledgeFact fact{};
+            std::uint8_t status_raw = 0;
+            if (!payload_reader.read_u64(fact.person_id) || !payload_reader.read_u8(status_raw)) {
+                return load_error(SnapshotErrorCode::TruncatedData, "Snapshot person-life knowledge payload is truncated");
+            }
+            if (status_raw > static_cast<std::uint8_t>(KnownLifeStatus::Dead)) {
+                return load_error(SnapshotErrorCode::InvalidEnum, "Snapshot person-life status enum is invalid");
+            }
+            fact.status = static_cast<KnownLifeStatus>(status_raw);
+            knowledge.fact = fact;
+        } else if (fact_kind_raw == static_cast<std::uint8_t>(KnowledgeFactKind::PersonHousehold)) {
+            PersonHouseholdKnowledgeFact fact{};
+            if (!payload_reader.read_u64(fact.person_id) || !payload_reader.read_u64(fact.household_id)) {
+                return load_error(SnapshotErrorCode::TruncatedData, "Snapshot person-household knowledge payload is truncated");
+            }
+            knowledge.fact = fact;
+        } else if (fact_kind_raw == static_cast<std::uint8_t>(KnowledgeFactKind::SettlementStatus)) {
+            SettlementStatusKnowledgeFact fact{};
+            if (!payload_reader.read_u64(fact.settlement_id) ||
+                !payload_reader.read_u64(fact.region_id) ||
+                !payload_reader.read_bool(fact.active)) {
+                return load_error(SnapshotErrorCode::TruncatedData, "Snapshot settlement-status knowledge payload is truncated");
+            }
+            knowledge.fact = fact;
+        } else {
+            return load_error(SnapshotErrorCode::InvalidEnum, "Snapshot knowledge fact kind is invalid");
+        }
+
+        if (!payload_reader.read_u32(knowledge.confidence_per_10k)) {
+            return load_error(SnapshotErrorCode::TruncatedData, "Snapshot knowledge confidence is truncated");
+        }
+
+        restored_state.agent_knowledge.push_back(knowledge);
+    }
+
+    if (!payload_reader.read_u64(next_knowledge_id)) {
+        return load_error(SnapshotErrorCode::TruncatedData, "Snapshot next knowledge id is truncated");
     }
 
     if (!payload_reader.read_bool(restored_config.materials_system_enabled) ||
@@ -1733,6 +1888,12 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         event_by_id.emplace(event.id, &event);
     }
 
+    std::unordered_map<MemoryId, const AgentMemory*> memory_by_id;
+    memory_by_id.reserve(restored_state.agent_memories.size());
+    for (const auto& memory : restored_state.agent_memories) {
+        memory_by_id.emplace(memory.id, &memory);
+    }
+
     MemoryId expected_memory_id = 1;
     std::unordered_set<DirectMemoryKey, DirectMemoryKeyHash> validated_direct_memory_keys;
     for (const auto& memory : restored_state.agent_memories) {
@@ -1773,6 +1934,143 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     const auto expected_next_memory_id = static_cast<MemoryId>(restored_state.agent_memories.size() + 1U);
     if (next_memory_id != expected_next_memory_id) {
         return load_error(SnapshotErrorCode::InvalidState, "Snapshot next memory id is inconsistent");
+    }
+
+    std::unordered_set<KnowledgeSemanticKey, KnowledgeSemanticKeyHash> knowledge_semantic_keys;
+    KnowledgeId expected_knowledge_id = 1;
+    for (const auto& knowledge : restored_state.agent_knowledge) {
+        if (knowledge.id != expected_knowledge_id) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot knowledge ids must be contiguous");
+        }
+        ++expected_knowledge_id;
+
+        if (!person_by_id.contains(knowledge.owner_id)) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot knowledge owner references unknown person");
+        }
+        if (knowledge.acquired_at.ticks < 0 || knowledge.updated_at.ticks < 0) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot knowledge times must be non-negative");
+        }
+        if (knowledge.updated_at < knowledge.acquired_at) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot knowledge updated_at must not precede acquired_at");
+        }
+        if (knowledge.updated_at.ticks > restored_state.time.ticks) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot knowledge updated_at exceeds simulation time");
+        }
+        if (knowledge.confidence_per_10k > 10'000U) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot knowledge confidence is out of range");
+        }
+        if (knowledge.source != KnowledgeSource::MemoryDerived) {
+            return load_error(SnapshotErrorCode::InvalidEnum, "Snapshot knowledge source enum is invalid");
+        }
+
+        const auto source_memory_it = memory_by_id.find(knowledge.source_memory_id);
+        if (source_memory_it == memory_by_id.end()) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot knowledge source memory references unknown memory");
+        }
+        const auto* source_memory = source_memory_it->second;
+        if (source_memory->owner_id != knowledge.owner_id) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot knowledge source memory owner mismatch");
+        }
+        if (source_memory->acquired_at > knowledge.updated_at) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot knowledge source memory occurs after knowledge update");
+        }
+        if (source_memory->acquired_at != knowledge.updated_at) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot knowledge updated_at must match source memory acquisition");
+        }
+
+        const auto source_event_it = event_by_id.find(source_memory->source_event_id);
+        if (source_event_it == event_by_id.end()) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot knowledge source memory references unknown event");
+        }
+        const auto* source_event = source_event_it->second;
+
+        KnowledgeSemanticKey semantic_key{};
+        semantic_key.owner_id = knowledge.owner_id;
+
+        if (const auto* fact = std::get_if<PersonLifeStatusKnowledgeFact>(&knowledge.fact); fact != nullptr) {
+            if (!is_valid_person_id(fact->person_id)) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot person-life knowledge references invalid person id");
+            }
+            if (!person_by_id.contains(fact->person_id)) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot person-life knowledge references unknown person");
+            }
+            semantic_key.kind = KnowledgeFactKind::PersonLifeStatus;
+            semantic_key.primary_subject_id = fact->person_id;
+
+            if (fact->status == KnownLifeStatus::Alive) {
+                if (source_event->type != EventType::Birth) {
+                    return load_error(SnapshotErrorCode::InvalidState, "Alive life-status knowledge must derive from Birth event");
+                }
+                const auto& source_payload = std::get<BirthEventPayload>(source_event->payload);
+                if (source_payload.child_id != fact->person_id) {
+                    return load_error(SnapshotErrorCode::InvalidState, "Alive life-status knowledge subject/event mismatch");
+                }
+            } else {
+                if (source_event->type != EventType::Death) {
+                    return load_error(SnapshotErrorCode::InvalidState, "Dead life-status knowledge must derive from Death event");
+                }
+                const auto& source_payload = std::get<DeathEventPayload>(source_event->payload);
+                if (source_payload.person_id != fact->person_id) {
+                    return load_error(SnapshotErrorCode::InvalidState, "Dead life-status knowledge subject/event mismatch");
+                }
+            }
+        } else if (const auto* household_fact = std::get_if<PersonHouseholdKnowledgeFact>(&knowledge.fact); household_fact != nullptr) {
+            if (!is_valid_person_id(household_fact->person_id) || !is_valid_household_id(household_fact->household_id)) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot person-household knowledge references invalid ids");
+            }
+            if (!person_by_id.contains(household_fact->person_id) || !household_by_id.contains(household_fact->household_id)) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot person-household knowledge references unknown entities");
+            }
+            semantic_key.kind = KnowledgeFactKind::PersonHousehold;
+            semantic_key.primary_subject_id = household_fact->person_id;
+
+            if (source_event->type != EventType::Birth) {
+                return load_error(SnapshotErrorCode::InvalidState, "Person-household knowledge must derive from Birth event");
+            }
+            const auto& source_payload = std::get<BirthEventPayload>(source_event->payload);
+            if (source_payload.child_id != household_fact->person_id || source_payload.household_id != household_fact->household_id) {
+                return load_error(SnapshotErrorCode::InvalidState, "Person-household knowledge subject/event mismatch");
+            }
+        } else if (const auto* settlement_fact = std::get_if<SettlementStatusKnowledgeFact>(&knowledge.fact); settlement_fact != nullptr) {
+            if (!is_valid_settlement_id(settlement_fact->settlement_id) || settlement_fact->region_id == 0U) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot settlement-status knowledge references invalid ids");
+            }
+            if (!settlement_by_id.contains(settlement_fact->settlement_id) || !region_by_id.contains(settlement_fact->region_id)) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot settlement-status knowledge references unknown entities");
+            }
+            semantic_key.kind = KnowledgeFactKind::SettlementStatus;
+            semantic_key.primary_subject_id = settlement_fact->settlement_id;
+
+            if (settlement_fact->active) {
+                if (source_event->type != EventType::SettlementFounded) {
+                    return load_error(SnapshotErrorCode::InvalidState, "Active settlement knowledge must derive from SettlementFounded event");
+                }
+                const auto& source_payload = std::get<SettlementFoundedEventPayload>(source_event->payload);
+                if (source_payload.settlement_id != settlement_fact->settlement_id || source_payload.region_id != settlement_fact->region_id) {
+                    return load_error(SnapshotErrorCode::InvalidState, "Settlement founded knowledge subject/event mismatch");
+                }
+            } else {
+                if (source_event->type != EventType::SettlementExtinct) {
+                    return load_error(SnapshotErrorCode::InvalidState, "Inactive settlement knowledge must derive from SettlementExtinct event");
+                }
+                const auto& source_payload = std::get<SettlementExtinctEventPayload>(source_event->payload);
+                if (source_payload.settlement_id != settlement_fact->settlement_id || source_payload.region_id != settlement_fact->region_id) {
+                    return load_error(SnapshotErrorCode::InvalidState, "Settlement extinct knowledge subject/event mismatch");
+                }
+            }
+        } else {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot knowledge fact variant is invalid");
+        }
+
+        const auto inserted = knowledge_semantic_keys.insert(semantic_key);
+        if (!inserted.second) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot duplicate knowledge semantic key for owner");
+        }
+    }
+
+    const auto expected_next_knowledge_id = static_cast<KnowledgeId>(restored_state.agent_knowledge.size() + 1U);
+    if (next_knowledge_id != expected_next_knowledge_id) {
+        return load_error(SnapshotErrorCode::InvalidState, "Snapshot next knowledge id is inconsistent");
     }
 
     if (restored_state.total_births != birth_event_count || restored_state.total_deaths != death_event_count) {
@@ -1922,6 +2220,39 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     std::sort(restored_state.agent_memories.begin(), restored_state.agent_memories.end(), [](const AgentMemory& lhs, const AgentMemory& rhs) {
         return lhs.id < rhs.id;
     });
+    std::sort(restored_state.agent_knowledge.begin(), restored_state.agent_knowledge.end(), [](const AgentKnowledge& lhs, const AgentKnowledge& rhs) {
+        return lhs.id < rhs.id;
+    });
+
+    std::unordered_map<PersonId, std::vector<std::size_t>> rebuilt_knowledge_indices_by_owner;
+    std::unordered_map<Simulation::KnowledgeSemanticKey, std::size_t, Simulation::KnowledgeSemanticKeyHash> rebuilt_knowledge_index_by_semantic_key;
+    rebuilt_knowledge_indices_by_owner.reserve(restored_state.agent_knowledge.size());
+    rebuilt_knowledge_index_by_semantic_key.reserve(restored_state.agent_knowledge.size());
+    for (std::size_t index = 0; index < restored_state.agent_knowledge.size(); ++index) {
+        const auto& knowledge = restored_state.agent_knowledge[index];
+        Simulation::KnowledgeSemanticKey semantic_key{};
+        semantic_key.owner_id = knowledge.owner_id;
+        semantic_key.secondary_subject_id = 0U;
+
+        if (const auto* life_fact = std::get_if<PersonLifeStatusKnowledgeFact>(&knowledge.fact); life_fact != nullptr) {
+            semantic_key.fact_kind = KnowledgeFactKind::PersonLifeStatus;
+            semantic_key.primary_subject_id = life_fact->person_id;
+        } else if (const auto* household_fact = std::get_if<PersonHouseholdKnowledgeFact>(&knowledge.fact); household_fact != nullptr) {
+            semantic_key.fact_kind = KnowledgeFactKind::PersonHousehold;
+            semantic_key.primary_subject_id = household_fact->person_id;
+        } else if (const auto* settlement_fact = std::get_if<SettlementStatusKnowledgeFact>(&knowledge.fact); settlement_fact != nullptr) {
+            semantic_key.fact_kind = KnowledgeFactKind::SettlementStatus;
+            semantic_key.primary_subject_id = settlement_fact->settlement_id;
+        } else {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot knowledge fact variant is invalid for index rebuild");
+        }
+
+        const auto inserted = rebuilt_knowledge_index_by_semantic_key.emplace(semantic_key, index);
+        if (!inserted.second) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot duplicate knowledge semantic key for index rebuild");
+        }
+        rebuilt_knowledge_indices_by_owner[knowledge.owner_id].push_back(index);
+    }
 
     destination.config_ = restored_config;
     destination.state_ = std::move(restored_state);
@@ -1932,10 +2263,13 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     destination.next_settlement_id_ = next_settlement_id;
     destination.next_event_id_ = next_event_id;
     destination.next_memory_id_ = next_memory_id;
+    destination.next_knowledge_id_ = next_knowledge_id;
     destination.demography_interval_ = SimulationDuration{demography_interval_ticks};
     destination.demography_next_run_ = SimulationTime{demography_next_run_ticks};
     destination.food_interval_ = SimulationDuration{food_interval_ticks};
     destination.food_next_run_ = SimulationTime{food_next_run_ticks};
+    destination.knowledge_indices_by_owner_ = std::move(rebuilt_knowledge_indices_by_owner);
+    destination.knowledge_index_by_semantic_key_ = std::move(rebuilt_knowledge_index_by_semantic_key);
 
     return SnapshotLoadResult{.ok = true, .code = SnapshotErrorCode::None, .message = ""};
 }
