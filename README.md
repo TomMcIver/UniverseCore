@@ -74,6 +74,39 @@ podman run --rm \
 	./scripts/container-test.sh
 ```
 
+Run fast developer feedback tests (incremental build + fast suite only):
+
+```bash
+podman run --rm \
+	-v "${PWD}:/workspace" \
+	-w /workspace \
+	universecore-dev \
+	./scripts/container-test-fast.sh
+```
+
+Run integration suite only:
+
+```bash
+podman run --rm \
+	-v "${PWD}:/workspace" \
+	-w /workspace \
+	universecore-dev \
+	./scripts/container-test-integration.sh
+```
+
+Run long regression suite only:
+
+```bash
+podman run --rm \
+	-v "${PWD}:/workspace" \
+	-w /workspace \
+	universecore-dev \
+	bash -lc "./scripts/container-build.sh && ctest --test-dir build/container -L long --output-on-failure"
+```
+
+`container-test-fast.sh` is for development iteration only.
+`container-test.sh` remains the complete verification command for milestone/ship gates.
+
 Run full build + tests (SELinux-enabled Linux host):
 
 ```bash
@@ -177,6 +210,23 @@ podman run --rm \
 
 Container builds write artifacts to `build/container` in the mounted repository.
 
+To keep generated files on a Podman-managed Linux volume instead of the Windows bind mount:
+
+```powershell
+./scripts/container-test-volume.ps1 -Suite all
+./scripts/container-test-volume.ps1 -Suite fast
+./scripts/container-test-volume.ps1 -Suite integration
+./scripts/container-test-volume.ps1 -Suite long
+```
+
+Equivalent shell wrapper:
+
+```bash
+./scripts/container-test-volume.sh
+UNIVERSECORE_TEST_SUITE=fast ./scripts/container-test-volume.sh
+UNIVERSECORE_TEST_SUITE=long ./scripts/container-test-volume.sh
+```
+
 ### macOS / Linux
 
 ```bash
@@ -193,6 +243,32 @@ cmake -S . -B build-ui -DCMAKE_BUILD_TYPE=Release -DUNIVERSECORE_BUILD_UI=ON
 cmake --build build-ui -j
 ctest --test-dir build-ui --output-on-failure
 ./build-ui/universe_ui --smoke-test
+```
+
+Containerized UI incremental build + smoke test:
+
+```bash
+./scripts/container-ui-test.sh
+```
+
+Volume-backed UI build + smoke test (recommended on Windows bind mounts):
+
+```powershell
+./scripts/container-ui-test-volume.ps1
+./scripts/container-ui-test-volume.ps1 -Clean
+```
+
+Shell equivalent:
+
+```bash
+./scripts/container-ui-test-volume.sh
+UNIVERSECORE_UI_CLEAN=1 ./scripts/container-ui-test-volume.sh
+```
+
+Containerized clean UI verification (forces clean dependency/build state):
+
+```bash
+./scripts/container-ui-verify-clean.sh
 ```
 
 Run the interactive inspector:

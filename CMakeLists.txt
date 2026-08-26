@@ -98,9 +98,20 @@ endif()
 
 if(UNIVERSECORE_BUILD_TESTS)
     enable_testing()
+    add_executable(universe_core_tests_fast tests/fast_tests.cpp)
+    target_link_libraries(universe_core_tests_fast PRIVATE universe_core)
+    add_test(NAME universe_core_tests_fast COMMAND universe_core_tests_fast)
+    set_tests_properties(universe_core_tests_fast PROPERTIES LABELS "fast")
+
+    add_executable(universe_core_tests_integration tests/integration_tests.cpp)
+    target_link_libraries(universe_core_tests_integration PRIVATE universe_core)
+    add_test(NAME universe_core_tests_integration COMMAND universe_core_tests_integration)
+    set_tests_properties(universe_core_tests_integration PROPERTIES LABELS "integration")
+
     add_executable(universe_core_tests tests/simulation_tests.cpp)
     target_link_libraries(universe_core_tests PRIVATE universe_core universe_ui_support)
-    add_test(NAME universe_core_tests COMMAND universe_core_tests)
+    add_test(NAME universe_core_tests_long COMMAND universe_core_tests)
+    set_tests_properties(universe_core_tests_long PROPERTIES LABELS "long")
 
     if(UNIVERSECORE_BUILD_UI)
         add_test(NAME universe_ui_smoke COMMAND universe_ui --smoke-test)
