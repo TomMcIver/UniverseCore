@@ -145,6 +145,10 @@ public:
     [[nodiscard]] std::span<const Settlement> settlements() const noexcept;
     [[nodiscard]] std::span<const RegionEnvironmentState> regions() const noexcept;
     [[nodiscard]] std::span<const SimulationEvent> events() const noexcept;
+    [[nodiscard]] std::span<const AgentMemory> agent_memories() const noexcept;
+    [[nodiscard]] std::vector<AgentMemory> memories_for_person(PersonId person_id) const;
+    [[nodiscard]] bool person_remembers_event(PersonId person_id, EventId event_id) const noexcept;
+    [[nodiscard]] std::uint64_t memory_count_for_person(PersonId person_id) const noexcept;
     [[nodiscard]] std::vector<SettlementSummaryView> settlement_summaries() const;
 
     void advance_days(std::uint64_t days);

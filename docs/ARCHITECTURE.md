@@ -119,6 +119,8 @@ Current implementation status:
 - canonical event emission currently includes `Birth`, `Death`, `SettlementFounded`, and `SettlementExtinct`
 - canonical event metadata includes deterministic ID + canonical simulation timestamp (`SimulationTime`)
 - deterministic ordering derived from deterministic system update order
+- canonical per-person agent memory state stores direct observations with deterministic `MemoryId`, owner, source `EventId`, acquisition time, and confidence
+- objective event journal remains world truth; person memory capture is event-driven and observer-scoped (no automatic omniscience)
 
 ## Simulation LOD
 
@@ -338,7 +340,7 @@ Current implementation status:
 - fixed-width little-endian encoding for all persisted primitives
 - canonical collection ordering during serialization (people/households/events by stable ID, household members by person ID)
 - explicit load validation for malformed/truncated data, enum validity, ID uniqueness, references and scheduler invariants
-- snapshot schema v9 is the canonical persistence baseline for typed event journal + material/tool state
+- snapshot schema v10 is the canonical persistence baseline for typed event journal + material/tool state + agent memory
 
 Snapshot invariants:
 

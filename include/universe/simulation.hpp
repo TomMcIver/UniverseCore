@@ -19,6 +19,7 @@ using HouseholdId = std::uint64_t;
 using RegionId = std::uint64_t;
 using SettlementId = std::uint64_t;
 using EventId = std::uint64_t;
+using MemoryId = std::uint64_t;
 
 enum class BiologicalSex : std::uint8_t {
     Female = 0,
@@ -150,6 +151,21 @@ struct SimulationEvent {
     SimulationEventPayload payload{};
 };
 
+enum class MemorySource : std::uint8_t {
+    DirectObservation = 0,
+};
+
+struct AgentMemory {
+    MemoryId id{};
+    PersonId owner_id{};
+    SimulationTime acquired_at{};
+    MemorySource source{MemorySource::DirectObservation};
+    EventId source_event_id{};
+    std::uint32_t confidence_per_10k{10'000};
+
+    [[nodiscard]] bool operator==(const AgentMemory& other) const = default;
+};
+
 struct SimulationConfig {
     SeedValue seed{1};
     std::uint64_t initial_population{200};
@@ -231,6 +247,7 @@ struct WorldState {
     std::vector<RegionEnvironmentState> regions{};
     std::vector<Settlement> settlements{};
     std::vector<SimulationEvent> event_log{};
+    std::vector<AgentMemory> agent_memories{};
 };
 
 class Simulation {
@@ -239,6 +256,10 @@ public:
 
     [[nodiscard]] const WorldState& state() const noexcept;
     [[nodiscard]] SimulationTime time() const noexcept;
+    [[nodiscard]] std::span<const AgentMemory> agent_memories() const noexcept;
+    [[nodiscard]] std::vector<AgentMemory> memories_for_person(PersonId person_id) const;
+    [[nodiscard]] bool person_remembers_event(PersonId person_id, EventId event_id) const noexcept;
+    [[nodiscard]] std::uint64_t memory_count_for_person(PersonId person_id) const noexcept;
     [[nodiscard]] std::vector<std::byte> save_snapshot() const;
     [[nodiscard]] static SnapshotLoadResult load_snapshot(std::span<const std::byte> data, Simulation& destination);
     void advance(SimulationDuration duration);
@@ -250,6 +271,7 @@ private:
     [[nodiscard]] HouseholdId next_household_id() noexcept;
     [[nodiscard]] RegionId next_region_id() noexcept;
     [[nodiscard]] SettlementId next_settlement_id() noexcept;
+    [[nodiscard]] MemoryId next_memory_id() noexcept;
     [[nodiscard]] SimulationSeed root_seed() const noexcept;
     [[nodiscard]] SimulationSeed person_seed(PersonId person_id) const noexcept;
     [[nodiscard]] SimulationSeed household_seed(HouseholdId household_id) const noexcept;
@@ -303,11 +325,13 @@ private:
     void initialize_households();
     void process_mortality(std::uint64_t demographic_year);
     void process_births(std::uint64_t demographic_year);
-    void append_event(SimulationEvent event);
-    void emit_death_event(PersonId person_id, HouseholdId household_id);
-    void emit_birth_event(PersonId child_id, HouseholdId household_id, PersonId mother_id, std::optional<PersonId> father_id);
-    void emit_settlement_founded_event(SettlementId settlement_id, RegionId region_id, std::optional<SettlementId> source_settlement_id);
-    void emit_settlement_extinct_event(SettlementId settlement_id, RegionId region_id);
+    EventId append_event(SimulationEvent event);
+    EventId emit_death_event(PersonId person_id, HouseholdId household_id);
+    EventId emit_birth_event(PersonId child_id, HouseholdId household_id, PersonId mother_id, std::optional<PersonId> father_id);
+    EventId emit_settlement_founded_event(SettlementId settlement_id, RegionId region_id, std::optional<SettlementId> source_settlement_id);
+    EventId emit_settlement_extinct_event(SettlementId settlement_id, RegionId region_id);
+    void append_memory(AgentMemory memory);
+    void append_direct_observation_memories(EventId source_event_id, std::span<const PersonId> observer_ids, SimulationTime acquired_at);
     void refresh_population_count() noexcept;
 
     SimulationConfig config_;
@@ -318,6 +342,7 @@ private:
     RegionId next_region_id_{1};
     SettlementId next_settlement_id_{1};
     EventId next_event_id_{1};
+    MemoryId next_memory_id_{1};
     SimulationDuration demography_interval_{DemographicCalendarAdapter::year_duration()};
     SimulationTime demography_next_run_{DemographicCalendarAdapter::year_duration().ticks};
     SimulationDuration food_interval_{days(1)};

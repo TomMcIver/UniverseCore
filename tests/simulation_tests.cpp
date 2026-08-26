@@ -559,6 +559,47 @@ void verify_event_log_invariants(const universe::WorldState& state) {
 
     require(birth_events == state.total_births, "every generated birth must produce exactly one birth event");
     require(death_events == state.total_deaths, "every generated death must produce exactly one death event");
+
+    std::unordered_map<universe::EventId, const universe::SimulationEvent*> event_by_id;
+    event_by_id.reserve(state.event_log.size());
+    for (const auto& event : state.event_log) {
+        event_by_id.emplace(event.id, &event);
+    }
+
+    std::unordered_map<universe::PersonId, std::unordered_set<universe::EventId>> direct_memories_by_owner;
+    universe::MemoryId expected_memory_id = 1;
+    for (const auto& memory : state.agent_memories) {
+        require(memory.id == expected_memory_id, "memory ids must be contiguous and deterministic");
+        ++expected_memory_id;
+        require(memory.owner_id > 0U, "memory owner id must be non-zero");
+        require(memory.source_event_id > 0U, "memory event id must be non-zero");
+        require(memory.source == universe::MemorySource::DirectObservation, "M2 memory source must be direct observation");
+        require(memory.confidence_per_10k <= 10'000U, "memory confidence must remain bounded");
+
+        const auto* owner = find_person(state, memory.owner_id);
+        require(owner != nullptr, "memory owner must reference existing person");
+
+        const auto event_it = event_by_id.find(memory.source_event_id);
+        require(event_it != event_by_id.end(), "memory source event must exist");
+        const auto* source_event = event_it->second;
+        require(source_event->timestamp == memory.acquired_at, "direct memory acquisition timestamp must match source event");
+
+        require(
+            direct_memories_by_owner[memory.owner_id].insert(memory.source_event_id).second,
+            "owner/event direct memory must be unique");
+
+        if (source_event->type == universe::EventType::Birth) {
+            const auto& payload = std::get<universe::BirthEventPayload>(source_event->payload);
+            require(memory.owner_id != payload.child_id, "newborn must not remember own birth");
+        }
+        if (source_event->type == universe::EventType::Death) {
+            const auto& payload = std::get<universe::DeathEventPayload>(source_event->payload);
+            require(memory.owner_id != payload.person_id, "person must not remember own death");
+        }
+        if (source_event->type == universe::EventType::SettlementExtinct) {
+            require(false, "settlement extinction should not create direct memories in current model");
+        }
+    }
 }
 
 void require_world_state_equal(const universe::WorldState& lhs, const universe::WorldState& rhs, const char* context) {
@@ -624,6 +665,7 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
     require(lhs.regions.size() == rhs.regions.size(), context);
     require(lhs.settlements.size() == rhs.settlements.size(), context);
     require(lhs.event_log.size() == rhs.event_log.size(), context);
+    require(lhs.agent_memories.size() == rhs.agent_memories.size(), context);
 
     for (std::size_t i = 0; i < lhs.people.size(); ++i) {
         const auto& a = lhs.people[i];
@@ -713,6 +755,17 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
         require(a.type == b.type, context);
         require(a.payload == b.payload, context);
     }
+
+    for (std::size_t i = 0; i < lhs.agent_memories.size(); ++i) {
+        const auto& a = lhs.agent_memories[i];
+        const auto& b = rhs.agent_memories[i];
+        require(a.id == b.id, context);
+        require(a.owner_id == b.owner_id, context);
+        require(a.acquired_at == b.acquired_at, context);
+        require(a.source == b.source, context);
+        require(a.source_event_id == b.source_event_id, context);
+        require(a.confidence_per_10k == b.confidence_per_10k, context);
+    }
 }
 
 std::vector<std::byte> clone_bytes(const std::vector<std::byte>& bytes) {
@@ -764,11 +817,12 @@ struct EventSectionInfo {
     std::vector<std::size_t> event_type_offsets{};
     std::vector<universe::EventType> event_types{};
     std::vector<std::optional<std::size_t>> payload_discriminator_offsets{};
+    std::size_t section_end_offset{};
 };
 
 EventSectionInfo locate_event_section(const universe::WorldState& state) {
     constexpr std::size_t header_size = 24U;
-    constexpr std::size_t payload_people_count_offset = 582U;
+    constexpr std::size_t payload_people_count_offset = 590U;
 
     EventSectionInfo info{};
     std::size_t cursor = header_size + payload_people_count_offset;
@@ -888,6 +942,40 @@ EventSectionInfo locate_event_section(const universe::WorldState& state) {
         }
 
         info.payload_discriminator_offsets.push_back(discriminator_offset);
+    }
+
+    info.section_end_offset = cursor;
+    return info;
+}
+
+struct MemorySectionInfo {
+    std::size_t memory_count_offset{};
+    std::uint64_t memory_count{};
+    std::vector<std::size_t> memory_offsets{};
+};
+
+MemorySectionInfo locate_memory_section(const universe::WorldState& state) {
+    constexpr std::size_t kMemoryRecordSize = 37U;
+    const auto event_section = locate_event_section(state);
+
+    std::vector<const universe::AgentMemory*> memory_order;
+    memory_order.reserve(state.agent_memories.size());
+    for (const auto& memory : state.agent_memories) {
+        memory_order.push_back(&memory);
+    }
+    std::sort(memory_order.begin(), memory_order.end(), [](const universe::AgentMemory* lhs, const universe::AgentMemory* rhs) {
+        return lhs->id < rhs->id;
+    });
+
+    MemorySectionInfo info{};
+    info.memory_count_offset = event_section.section_end_offset;
+    info.memory_count = static_cast<std::uint64_t>(memory_order.size());
+    info.memory_offsets.reserve(memory_order.size());
+
+    std::size_t cursor = info.memory_count_offset + 8U;
+    for (std::size_t i = 0; i < memory_order.size(); ++i) {
+        info.memory_offsets.push_back(cursor);
+        cursor += kMemoryRecordSize;
     }
 
     return info;
@@ -1850,8 +1938,8 @@ int main() {
             "payload corruption must be rejected via checksum");
 
         constexpr std::size_t header_size = 24U;
-        constexpr std::size_t payload_people_count_offset = 582U;
-        constexpr std::size_t payload_first_person_offset = 590U;
+        constexpr std::size_t payload_people_count_offset = 590U;
+        constexpr std::size_t payload_first_person_offset = 598U;
         constexpr std::size_t payload_person_record_size = 41U;
         constexpr std::size_t person_sex_offset_in_record = 16U;
         constexpr std::size_t person_household_offset_in_record = 18U;
@@ -1983,6 +2071,104 @@ int main() {
         require_snapshot_load_fails_any(
             invalid_discriminator,
             "invalid payload discriminators must be rejected");
+    }
+
+    {
+        universe::Simulation memory_source{config};
+        memory_source.run_years(120);
+        const auto valid = memory_source.save_snapshot();
+        const auto memory_section = locate_memory_section(memory_source.state());
+        require(memory_section.memory_count > 1U, "memory corruption tests require at least two memories");
+
+        auto memory_id_zero = clone_bytes(valid);
+        write_u64_le(memory_id_zero, memory_section.memory_offsets.front(), 0U);
+        refresh_snapshot_payload_hash(memory_id_zero);
+        require_snapshot_load_fails(
+            memory_id_zero,
+            universe::SnapshotErrorCode::InvalidState,
+            "memory id zero must be rejected");
+
+        auto duplicate_memory_id = clone_bytes(valid);
+        const auto first_memory_id = read_u64_le(duplicate_memory_id, memory_section.memory_offsets.front());
+        write_u64_le(duplicate_memory_id, memory_section.memory_offsets[1], first_memory_id);
+        refresh_snapshot_payload_hash(duplicate_memory_id);
+        require_snapshot_load_fails(
+            duplicate_memory_id,
+            universe::SnapshotErrorCode::DuplicateId,
+            "duplicate memory ids must be rejected");
+
+        auto non_contiguous_memory_ids = clone_bytes(valid);
+        write_u64_le(
+            non_contiguous_memory_ids,
+            memory_section.memory_offsets.front(),
+            static_cast<std::uint64_t>(memory_section.memory_count + 17U));
+        refresh_snapshot_payload_hash(non_contiguous_memory_ids);
+        require_snapshot_load_fails(
+            non_contiguous_memory_ids,
+            universe::SnapshotErrorCode::InvalidState,
+            "non-contiguous memory ids must be rejected");
+
+        auto invalid_owner = clone_bytes(valid);
+        write_u64_le(invalid_owner, memory_section.memory_offsets.front() + 8U, 0U);
+        refresh_snapshot_payload_hash(invalid_owner);
+        require_snapshot_load_fails(
+            invalid_owner,
+            universe::SnapshotErrorCode::InvalidReference,
+            "memory owner id must be valid");
+
+        auto invalid_event_id = clone_bytes(valid);
+        write_u64_le(invalid_event_id, memory_section.memory_offsets.front() + 25U, 0U);
+        refresh_snapshot_payload_hash(invalid_event_id);
+        require_snapshot_load_fails(
+            invalid_event_id,
+            universe::SnapshotErrorCode::InvalidReference,
+            "memory source event id must be valid");
+
+        auto future_acquired_at = clone_bytes(valid);
+        write_u64_le(
+            future_acquired_at,
+            memory_section.memory_offsets.front() + 16U,
+            static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()));
+        refresh_snapshot_payload_hash(future_acquired_at);
+        require_snapshot_load_fails(
+            future_acquired_at,
+            universe::SnapshotErrorCode::InvalidState,
+            "memory acquired_at beyond simulation time must be rejected");
+
+        auto invalid_source_enum = clone_bytes(valid);
+        invalid_source_enum[memory_section.memory_offsets.front() + 24U] = std::byte{1};
+        refresh_snapshot_payload_hash(invalid_source_enum);
+        require_snapshot_load_fails(
+            invalid_source_enum,
+            universe::SnapshotErrorCode::InvalidEnum,
+            "memory source enum out of range must be rejected");
+
+        auto invalid_confidence = clone_bytes(valid);
+        write_u32_le(invalid_confidence, memory_section.memory_offsets.front() + 33U, 10'001U);
+        refresh_snapshot_payload_hash(invalid_confidence);
+        require_snapshot_load_fails(
+            invalid_confidence,
+            universe::SnapshotErrorCode::InvalidState,
+            "memory confidence above 10000 must be rejected");
+
+        auto duplicate_direct_memory = clone_bytes(valid);
+        const auto first_owner_id = read_u64_le(duplicate_direct_memory, memory_section.memory_offsets.front() + 8U);
+        const auto first_event_id = read_u64_le(duplicate_direct_memory, memory_section.memory_offsets.front() + 25U);
+        write_u64_le(duplicate_direct_memory, memory_section.memory_offsets[1] + 8U, first_owner_id);
+        write_u64_le(duplicate_direct_memory, memory_section.memory_offsets[1] + 25U, first_event_id);
+        refresh_snapshot_payload_hash(duplicate_direct_memory);
+        require_snapshot_load_fails(
+            duplicate_direct_memory,
+            universe::SnapshotErrorCode::InvalidState,
+            "duplicate direct owner/event memories must be rejected");
+
+        auto acquired_before_event = clone_bytes(valid);
+        write_u64_le(acquired_before_event, memory_section.memory_offsets.front() + 16U, 0U);
+        refresh_snapshot_payload_hash(acquired_before_event);
+        require_snapshot_load_fails(
+            acquired_before_event,
+            universe::SnapshotErrorCode::InvalidState,
+            "memory acquired_at before source event timestamp must be rejected");
     }
 
     universe::Simulation a{config};

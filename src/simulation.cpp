@@ -6,6 +6,7 @@
 #include <limits>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace universe {
@@ -249,6 +250,39 @@ const WorldState& Simulation::state() const noexcept {
 
 SimulationTime Simulation::time() const noexcept {
     return state_.time;
+}
+
+std::span<const AgentMemory> Simulation::agent_memories() const noexcept {
+    return state_.agent_memories;
+}
+
+std::vector<AgentMemory> Simulation::memories_for_person(const PersonId person_id) const {
+    std::vector<AgentMemory> memories;
+    for (const auto& memory : state_.agent_memories) {
+        if (memory.owner_id == person_id) {
+            memories.push_back(memory);
+        }
+    }
+    return memories;
+}
+
+bool Simulation::person_remembers_event(const PersonId person_id, const EventId event_id) const noexcept {
+    for (const auto& memory : state_.agent_memories) {
+        if (memory.owner_id == person_id && memory.source_event_id == event_id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::uint64_t Simulation::memory_count_for_person(const PersonId person_id) const noexcept {
+    std::uint64_t count = 0;
+    for (const auto& memory : state_.agent_memories) {
+        if (memory.owner_id == person_id) {
+            ++count;
+        }
+    }
+    return count;
 }
 
 std::vector<std::byte> Simulation::save_snapshot() const {
@@ -1345,6 +1379,10 @@ SettlementId Simulation::next_settlement_id() noexcept {
     return next_settlement_id_++;
 }
 
+MemoryId Simulation::next_memory_id() noexcept {
+    return next_memory_id_++;
+}
+
 SimulationSeed Simulation::root_seed() const noexcept {
     return simulation_seed_;
 }
@@ -2101,6 +2139,14 @@ void Simulation::process_settlement_extinction() {
 }
 
 void Simulation::process_settlement_founding(const std::uint64_t demographic_year) {
+    std::unordered_set<PersonId> alive_person_ids;
+    alive_person_ids.reserve(state_.people.size());
+    for (const auto& person : state_.people) {
+        if (person.alive) {
+            alive_person_ids.insert(person.id);
+        }
+    }
+
     std::vector<RegionId> region_ids;
     region_ids.reserve(state_.regions.size());
     for (const auto& region : state_.regions) {
@@ -2219,6 +2265,7 @@ void Simulation::process_settlement_founding(const std::uint64_t demographic_yea
         move_count = std::min<std::uint64_t>(move_count, max_movable);
 
         const auto new_settlement_id = next_settlement_id();
+        const auto source_settlement_id = source->id;
         const auto assigned_share = std::min<std::uint32_t>(unallocated_share, kFoundingDefaultShare);
         state_.settlements.push_back(Settlement{
             .id = new_settlement_id,
@@ -2226,7 +2273,6 @@ void Simulation::process_settlement_founding(const std::uint64_t demographic_yea
             .active = true,
             .access_share_points = assigned_share,
         });
-        emit_settlement_founded_event(new_settlement_id, region_id, source->id);
 
         std::sort(source_alive_households.begin(), source_alive_households.end(), [&](const Household* lhs, const Household* rhs) {
             const auto lhs_seed = derive_seed(household_seed(lhs->id), SeedDomain::SettlementHouseholdSelection, demographic_year ^ new_settlement_id);
@@ -2240,6 +2286,20 @@ void Simulation::process_settlement_founding(const std::uint64_t demographic_yea
         for (std::uint64_t i = 0; i < move_count; ++i) {
             source_alive_households[i]->settlement_id = new_settlement_id;
         }
+
+        std::vector<PersonId> moved_observers;
+        for (std::uint64_t i = 0; i < move_count; ++i) {
+            for (const auto member_id : source_alive_households[i]->member_ids) {
+                if (alive_person_ids.contains(member_id)) {
+                    moved_observers.push_back(member_id);
+                }
+            }
+        }
+        std::sort(moved_observers.begin(), moved_observers.end());
+        moved_observers.erase(std::unique(moved_observers.begin(), moved_observers.end()), moved_observers.end());
+
+        const auto event_id = emit_settlement_founded_event(new_settlement_id, region_id, source_settlement_id);
+        append_direct_observation_memories(event_id, moved_observers, state_.time);
     }
 
     std::sort(state_.settlements.begin(), state_.settlements.end(), [](const Settlement& lhs, const Settlement& rhs) {
@@ -2620,6 +2680,18 @@ void Simulation::refresh_labour_aggregates() {
 }
 
 void Simulation::process_mortality(const std::uint64_t demographic_year) {
+    std::unordered_map<PersonId, Person*> person_by_id;
+    person_by_id.reserve(state_.people.size());
+    for (auto& person : state_.people) {
+        person_by_id.emplace(person.id, &person);
+    }
+
+    std::unordered_map<HouseholdId, Household*> household_by_id;
+    household_by_id.reserve(state_.households.size());
+    for (auto& household : state_.households) {
+        household_by_id.emplace(household.id, &household);
+    }
+
     for (auto& person : state_.people) {
         if (!person.alive) {
             continue;
@@ -2639,7 +2711,20 @@ void Simulation::process_mortality(const std::uint64_t demographic_year) {
             person.alive = false;
             remove_from_household(household_id, person.id);
             ++state_.total_deaths;
-            emit_death_event(person.id, household_id);
+
+            std::vector<PersonId> observers;
+            const auto household_it = household_by_id.find(household_id);
+            if (household_it != household_by_id.end()) {
+                for (const auto member_id : household_it->second->member_ids) {
+                    const auto person_it = person_by_id.find(member_id);
+                    if (person_it != person_by_id.end() && person_it->second->alive) {
+                        observers.push_back(member_id);
+                    }
+                }
+            }
+
+            const auto event_id = emit_death_event(person.id, household_id);
+            append_direct_observation_memories(event_id, observers, state_.time);
         }
     }
 }
@@ -2653,6 +2738,20 @@ void Simulation::process_births(const std::uint64_t demographic_year) {
 
     std::vector<PendingBirth> pending_births;
     pending_births.reserve(64);
+
+    std::unordered_map<HouseholdId, Household*> household_by_id;
+    household_by_id.reserve(state_.households.size());
+    for (auto& household : state_.households) {
+        household_by_id.emplace(household.id, &household);
+    }
+
+    std::unordered_set<PersonId> alive_person_ids;
+    alive_person_ids.reserve(state_.people.size());
+    for (const auto& person : state_.people) {
+        if (person.alive) {
+            alive_person_ids.insert(person.id);
+        }
+    }
 
     for (const auto& person : state_.people) {
         if (!person.alive || person.sex != BiologicalSex::Female) {
@@ -2703,28 +2802,49 @@ void Simulation::process_births(const std::uint64_t demographic_year) {
             .father_id = birth.father_id,
         });
 
-        for (auto& household : state_.households) {
-            if (household.id == birth.household_id) {
-                household.member_ids.push_back(newborn_id);
-                break;
-            }
+        auto household_it = household_by_id.find(birth.household_id);
+        if (household_it != household_by_id.end()) {
+            household_it->second->member_ids.push_back(newborn_id);
         }
+        alive_person_ids.insert(newborn_id);
 
         ++state_.total_births;
-        emit_birth_event(newborn_id, birth.household_id, birth.mother_id, birth.father_id);
+
+        std::vector<PersonId> observers;
+        const auto observer_household_it = household_by_id.find(birth.household_id);
+        if (observer_household_it != household_by_id.end()) {
+            for (const auto member_id : observer_household_it->second->member_ids) {
+                if (member_id == newborn_id) {
+                    continue;
+                }
+                if (alive_person_ids.contains(member_id)) {
+                    observers.push_back(member_id);
+                }
+            }
+        }
+        if (alive_person_ids.contains(birth.mother_id) &&
+            !std::binary_search(observers.begin(), observers.end(), birth.mother_id)) {
+            const auto insert_it = std::lower_bound(observers.begin(), observers.end(), birth.mother_id);
+            observers.insert(insert_it, birth.mother_id);
+        }
+        observers.erase(std::unique(observers.begin(), observers.end()), observers.end());
+
+        const auto event_id = emit_birth_event(newborn_id, birth.household_id, birth.mother_id, birth.father_id);
+        append_direct_observation_memories(event_id, observers, state_.time);
     }
 }
 
-void Simulation::append_event(SimulationEvent event) {
+EventId Simulation::append_event(SimulationEvent event) {
     if (!event_payload_matches_type(event)) {
         throw std::invalid_argument("Event payload does not match event type");
     }
     event.id = next_event_id_++;
     state_.event_log.push_back(event);
+    return event.id;
 }
 
-void Simulation::emit_death_event(const PersonId person_id, const HouseholdId household_id) {
-    append_event(SimulationEvent{
+EventId Simulation::emit_death_event(const PersonId person_id, const HouseholdId household_id) {
+    const auto event_id = append_event(SimulationEvent{
         .id = 0,
         .timestamp = state_.time,
         .type = EventType::Death,
@@ -2733,14 +2853,15 @@ void Simulation::emit_death_event(const PersonId person_id, const HouseholdId ho
             .household_id = household_id,
         },
     });
+    return event_id;
 }
 
-void Simulation::emit_birth_event(
+EventId Simulation::emit_birth_event(
     const PersonId child_id,
     const HouseholdId household_id,
     const PersonId mother_id,
     const std::optional<PersonId> father_id) {
-    append_event(SimulationEvent{
+    const auto event_id = append_event(SimulationEvent{
         .id = 0,
         .timestamp = state_.time,
         .type = EventType::Birth,
@@ -2751,13 +2872,14 @@ void Simulation::emit_birth_event(
             .household_id = household_id,
         },
     });
+    return event_id;
 }
 
-void Simulation::emit_settlement_founded_event(
+EventId Simulation::emit_settlement_founded_event(
     const SettlementId settlement_id,
     const RegionId region_id,
     const std::optional<SettlementId> source_settlement_id) {
-    append_event(SimulationEvent{
+    const auto event_id = append_event(SimulationEvent{
         .id = 0,
         .timestamp = state_.time,
         .type = EventType::SettlementFounded,
@@ -2767,10 +2889,11 @@ void Simulation::emit_settlement_founded_event(
             .source_settlement_id = source_settlement_id,
         },
     });
+    return event_id;
 }
 
-void Simulation::emit_settlement_extinct_event(const SettlementId settlement_id, const RegionId region_id) {
-    append_event(SimulationEvent{
+EventId Simulation::emit_settlement_extinct_event(const SettlementId settlement_id, const RegionId region_id) {
+    const auto event_id = append_event(SimulationEvent{
         .id = 0,
         .timestamp = state_.time,
         .type = EventType::SettlementExtinct,
@@ -2779,6 +2902,45 @@ void Simulation::emit_settlement_extinct_event(const SettlementId settlement_id,
             .region_id = region_id,
         },
     });
+    return event_id;
+}
+
+void Simulation::append_memory(AgentMemory memory) {
+    if (memory.owner_id == 0U || memory.source_event_id == 0U) {
+        throw std::invalid_argument("Agent memory owner and source event ids must be non-zero");
+    }
+    if (memory.acquired_at.ticks < 0) {
+        throw std::invalid_argument("Agent memory acquisition time must be non-negative");
+    }
+    if (memory.acquired_at > state_.time) {
+        throw std::invalid_argument("Agent memory acquisition time must not exceed simulation time");
+    }
+    if (memory.confidence_per_10k > 10'000U) {
+        throw std::invalid_argument("Agent memory confidence must be <= 10000");
+    }
+
+    memory.id = next_memory_id();
+    state_.agent_memories.push_back(memory);
+}
+
+void Simulation::append_direct_observation_memories(
+    const EventId source_event_id,
+    std::span<const PersonId> observer_ids,
+    const SimulationTime acquired_at) {
+    for (const auto observer_id : observer_ids) {
+        if (observer_id == 0U) {
+            continue;
+        }
+
+        append_memory(AgentMemory{
+            .id = 0,
+            .owner_id = observer_id,
+            .acquired_at = acquired_at,
+            .source = MemorySource::DirectObservation,
+            .source_event_id = source_event_id,
+            .confidence_per_10k = 10'000U,
+        });
+    }
 }
 
 void Simulation::refresh_population_count() noexcept {

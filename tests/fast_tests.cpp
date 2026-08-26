@@ -8,6 +8,8 @@
 #include <cstdlib>
 #include <iostream>
 #include <stdexcept>
+#include <unordered_map>
+#include <unordered_set>
 #include <variant>
 #include <vector>
 
@@ -28,6 +30,24 @@ universe::Simulation load_from_snapshot_or_fail(const std::vector<std::byte>& by
     }
     require(load_result.ok, context);
     return loaded;
+}
+
+const universe::SimulationEvent* find_event_by_id(const universe::WorldState& state, const universe::EventId id) {
+    for (const auto& event : state.event_log) {
+        if (event.id == id) {
+            return &event;
+        }
+    }
+    return nullptr;
+}
+
+const universe::Person* find_person_by_id(const universe::WorldState& state, const universe::PersonId id) {
+    for (const auto& person : state.people) {
+        if (person.id == id) {
+            return &person;
+        }
+    }
+    return nullptr;
 }
 
 }  // namespace
@@ -113,6 +133,61 @@ int main() {
             } else if (event.type == universe::EventType::SettlementExtinct) {
                 require(std::holds_alternative<universe::SettlementExtinctEventPayload>(event.payload), "extinct payload must match event type");
             }
+        }
+    }
+
+    {
+        universe::Simulation memories{config};
+        memories.run_years(40);
+        const auto& state = memories.state();
+
+        std::unordered_set<universe::MemoryId> memory_ids;
+        std::unordered_map<universe::PersonId, std::unordered_set<universe::EventId>> direct_pairs;
+        for (const auto& memory : state.agent_memories) {
+            require(memory.id > 0U, "memory id must be non-zero");
+            require(memory.owner_id > 0U, "memory owner id must be non-zero");
+            require(memory.source_event_id > 0U, "memory event id must be non-zero");
+            require(memory.source == universe::MemorySource::DirectObservation, "M2 memory source must be direct observation");
+            require(memory.confidence_per_10k <= 10'000U, "memory confidence must be bounded");
+            require(memory.confidence_per_10k == 10'000U, "direct observations start at full confidence");
+            require(memory_ids.insert(memory.id).second, "memory ids must be unique");
+
+            require(
+                direct_pairs[memory.owner_id].insert(memory.source_event_id).second,
+                "direct observation memory must be unique per owner/event");
+
+            const auto* owner = find_person_by_id(state, memory.owner_id);
+            require(owner != nullptr, "memory owner must reference existing person");
+            const auto* event = find_event_by_id(state, memory.source_event_id);
+            require(event != nullptr, "memory source event must reference existing event");
+            require(event->timestamp == memory.acquired_at, "direct memory must align with source event timestamp");
+            require(memories.person_remembers_event(memory.owner_id, memory.source_event_id), "person_remembers_event must match stored memory");
+        }
+
+        for (const auto& person : state.people) {
+            const auto queried_count = memories.memory_count_for_person(person.id);
+            const auto queried_memories = memories.memories_for_person(person.id);
+            require(queried_count == queried_memories.size(), "memory_count_for_person must match memories_for_person size");
+        }
+    }
+
+    {
+        universe::Simulation no_omniscience{config};
+        no_omniscience.run_years(50);
+
+        const auto& state = no_omniscience.state();
+        for (const auto& event : state.event_log) {
+            if (event.type != universe::EventType::SettlementExtinct) {
+                continue;
+            }
+
+            std::uint64_t observers = 0;
+            for (const auto& memory : state.agent_memories) {
+                if (memory.source_event_id == event.id) {
+                    ++observers;
+                }
+            }
+            require(observers == 0U, "settlement extinction may have zero direct observers");
         }
     }
 

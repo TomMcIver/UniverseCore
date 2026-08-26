@@ -244,6 +244,22 @@ std::span<const SimulationEvent> SimulationController::events() const noexcept {
     return simulation_.state().event_log;
 }
 
+std::span<const AgentMemory> SimulationController::agent_memories() const noexcept {
+    return simulation_.agent_memories();
+}
+
+std::vector<AgentMemory> SimulationController::memories_for_person(const PersonId person_id) const {
+    return simulation_.memories_for_person(person_id);
+}
+
+bool SimulationController::person_remembers_event(const PersonId person_id, const EventId event_id) const noexcept {
+    return simulation_.person_remembers_event(person_id, event_id);
+}
+
+std::uint64_t SimulationController::memory_count_for_person(const PersonId person_id) const noexcept {
+    return simulation_.memory_count_for_person(person_id);
+}
+
 std::vector<SettlementSummaryView> SimulationController::settlement_summaries() const {
     const auto& state = simulation_.state();
     const auto labour_parameters = FoodModelParameters{};

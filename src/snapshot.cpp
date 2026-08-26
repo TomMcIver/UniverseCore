@@ -184,6 +184,27 @@ private:
     return id > 0U;
 }
 
+[[nodiscard]] bool is_valid_memory_id(const MemoryId id) noexcept {
+    return id > 0U;
+}
+
+struct DirectMemoryKey {
+    PersonId owner_id{};
+    EventId event_id{};
+
+    [[nodiscard]] bool operator==(const DirectMemoryKey& other) const noexcept {
+        return owner_id == other.owner_id && event_id == other.event_id;
+    }
+};
+
+struct DirectMemoryKeyHash {
+    [[nodiscard]] std::size_t operator()(const DirectMemoryKey& key) const noexcept {
+        const auto mixed = (static_cast<std::uint64_t>(key.owner_id) * 0x9E3779B97F4A7C15ULL) ^
+            (static_cast<std::uint64_t>(key.event_id) + 0xD6E8FEB86659FD93ULL);
+        return static_cast<std::size_t>(mixed);
+    }
+};
+
 }  // namespace
 
 std::uint64_t snapshot_hash64(const std::span<const std::byte> data) noexcept {
@@ -255,6 +276,7 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
     payload.write_u64(simulation.next_region_id_);
     payload.write_u64(simulation.next_settlement_id_);
     payload.write_u64(simulation.next_event_id_);
+    payload.write_u64(simulation.next_memory_id_);
     payload.write_i64(simulation.demography_interval_.ticks);
     payload.write_i64(simulation.demography_next_run_.ticks);
     payload.write_i64(simulation.food_interval_.ticks);
@@ -424,6 +446,25 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
         }
     }
 
+    std::vector<const AgentMemory*> memory_order;
+    memory_order.reserve(simulation.state_.agent_memories.size());
+    for (const auto& memory : simulation.state_.agent_memories) {
+        memory_order.push_back(&memory);
+    }
+    std::sort(memory_order.begin(), memory_order.end(), [](const AgentMemory* lhs, const AgentMemory* rhs) {
+        return lhs->id < rhs->id;
+    });
+
+    payload.write_u64(static_cast<std::uint64_t>(memory_order.size()));
+    for (const auto* memory : memory_order) {
+        payload.write_u64(memory->id);
+        payload.write_u64(memory->owner_id);
+        payload.write_i64(memory->acquired_at.ticks);
+        payload.write_u8(static_cast<std::uint8_t>(memory->source));
+        payload.write_u64(memory->source_event_id);
+        payload.write_u32(memory->confidence_per_10k);
+    }
+
     payload.write_bool(simulation.config_.materials_system_enabled);
     payload.write_u32(simulation.config_.wood_resource_scale_percent);
     payload.write_u32(simulation.config_.stone_resource_scale_percent);
@@ -526,6 +567,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     std::uint64_t next_region_id = 0;
     std::uint64_t next_settlement_id = 0;
     std::uint64_t next_event_id = 0;
+    std::uint64_t next_memory_id = 0;
     std::int64_t demography_interval_ticks = 0;
     std::int64_t demography_next_run_ticks = 0;
     std::int64_t food_interval_ticks = 0;
@@ -594,6 +636,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         !payload_reader.read_u64(next_region_id) ||
         !payload_reader.read_u64(next_settlement_id) ||
         !payload_reader.read_u64(next_event_id) ||
+        !payload_reader.read_u64(next_memory_id) ||
         !payload_reader.read_i64(demography_interval_ticks) ||
         !payload_reader.read_i64(demography_next_run_ticks) ||
         !payload_reader.read_i64(food_interval_ticks) ||
@@ -947,6 +990,72 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         }
 
         restored_state.event_log.push_back(event);
+    }
+
+    std::uint64_t memory_count = 0;
+    if (!payload_reader.read_u64(memory_count)) {
+        return load_error(SnapshotErrorCode::TruncatedData, "Snapshot memory section is truncated");
+    }
+
+    if (memory_count > payload_reader.remaining() / 37U) {
+        return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot memory section has invalid length");
+    }
+
+    restored_state.agent_memories.clear();
+    restored_state.agent_memories.reserve(static_cast<std::size_t>(memory_count));
+    std::unordered_set<MemoryId> memory_ids;
+    std::unordered_set<DirectMemoryKey, DirectMemoryKeyHash> direct_memory_keys;
+
+    for (std::uint64_t i = 0; i < memory_count; ++i) {
+        AgentMemory memory{};
+        std::uint8_t source_raw = 0;
+
+        if (!payload_reader.read_u64(memory.id) ||
+            !payload_reader.read_u64(memory.owner_id) ||
+            !payload_reader.read_i64(memory.acquired_at.ticks) ||
+            !payload_reader.read_u8(source_raw) ||
+            !payload_reader.read_u64(memory.source_event_id) ||
+            !payload_reader.read_u32(memory.confidence_per_10k)) {
+            return load_error(SnapshotErrorCode::TruncatedData, "Snapshot memory record is truncated");
+        }
+
+        if (!is_valid_memory_id(memory.id)) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot memory id must be non-zero");
+        }
+        if (!is_valid_person_id(memory.owner_id)) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot memory owner id must be non-zero");
+        }
+        if (!is_valid_event_id(memory.source_event_id)) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot memory source event id must be non-zero");
+        }
+        if (source_raw > static_cast<std::uint8_t>(MemorySource::DirectObservation)) {
+            return load_error(SnapshotErrorCode::InvalidEnum, "Snapshot memory source enum is invalid");
+        }
+        memory.source = static_cast<MemorySource>(source_raw);
+
+        if (!memory_ids.insert(memory.id).second) {
+            return load_error(SnapshotErrorCode::DuplicateId, "Snapshot contains duplicate memory ids");
+        }
+        if (memory.acquired_at.ticks < 0) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot memory acquisition time must be non-negative");
+        }
+        if (memory.acquired_at.ticks > restored_state.time.ticks) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot memory acquisition time exceeds simulation time");
+        }
+        if (memory.confidence_per_10k > 10'000U) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot memory confidence is out of range");
+        }
+        if (memory.source == MemorySource::DirectObservation) {
+            const auto inserted = direct_memory_keys.insert(DirectMemoryKey{
+                .owner_id = memory.owner_id,
+                .event_id = memory.source_event_id,
+            });
+            if (!inserted.second) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot duplicate direct memory for owner/event");
+            }
+        }
+
+        restored_state.agent_memories.push_back(memory);
     }
 
     if (!payload_reader.read_bool(restored_config.materials_system_enabled) ||
@@ -1618,6 +1727,54 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         return load_error(SnapshotErrorCode::InvalidState, "Snapshot next event id is inconsistent");
     }
 
+    std::unordered_map<EventId, const SimulationEvent*> event_by_id;
+    event_by_id.reserve(restored_state.event_log.size());
+    for (const auto& event : restored_state.event_log) {
+        event_by_id.emplace(event.id, &event);
+    }
+
+    MemoryId expected_memory_id = 1;
+    std::unordered_set<DirectMemoryKey, DirectMemoryKeyHash> validated_direct_memory_keys;
+    for (const auto& memory : restored_state.agent_memories) {
+        if (memory.id != expected_memory_id) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot memory ids must be contiguous");
+        }
+        ++expected_memory_id;
+
+        if (!person_by_id.contains(memory.owner_id)) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot memory owner references unknown person");
+        }
+
+        const auto event_it = event_by_id.find(memory.source_event_id);
+        if (event_it == event_by_id.end()) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot memory source event references unknown event");
+        }
+        const auto* source_event = event_it->second;
+
+        if (source_event->timestamp > memory.acquired_at) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot memory acquisition must not precede source event");
+        }
+
+        if (memory.source == MemorySource::DirectObservation) {
+            if (memory.acquired_at != source_event->timestamp) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot direct memory acquisition must equal source event timestamp");
+            }
+
+            const auto inserted = validated_direct_memory_keys.insert(DirectMemoryKey{
+                .owner_id = memory.owner_id,
+                .event_id = memory.source_event_id,
+            });
+            if (!inserted.second) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot duplicate direct memory for owner/event pair");
+            }
+        }
+    }
+
+    const auto expected_next_memory_id = static_cast<MemoryId>(restored_state.agent_memories.size() + 1U);
+    if (next_memory_id != expected_next_memory_id) {
+        return load_error(SnapshotErrorCode::InvalidState, "Snapshot next memory id is inconsistent");
+    }
+
     if (restored_state.total_births != birth_event_count || restored_state.total_deaths != death_event_count) {
         return load_error(SnapshotErrorCode::InvalidState, "Snapshot event totals do not match cumulative counters");
     }
@@ -1762,6 +1919,9 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     std::sort(restored_state.event_log.begin(), restored_state.event_log.end(), [](const SimulationEvent& lhs, const SimulationEvent& rhs) {
         return lhs.id < rhs.id;
     });
+    std::sort(restored_state.agent_memories.begin(), restored_state.agent_memories.end(), [](const AgentMemory& lhs, const AgentMemory& rhs) {
+        return lhs.id < rhs.id;
+    });
 
     destination.config_ = restored_config;
     destination.state_ = std::move(restored_state);
@@ -1771,6 +1931,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     destination.next_region_id_ = next_region_id;
     destination.next_settlement_id_ = next_settlement_id;
     destination.next_event_id_ = next_event_id;
+    destination.next_memory_id_ = next_memory_id;
     destination.demography_interval_ = SimulationDuration{demography_interval_ticks};
     destination.demography_next_run_ = SimulationTime{demography_next_run_ticks};
     destination.food_interval_ = SimulationDuration{food_interval_ticks};

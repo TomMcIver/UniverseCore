@@ -23,10 +23,13 @@ namespace {
 using universe::BiologicalSex;
 using universe::Household;
 using universe::HouseholdId;
+using universe::MemorySource;
 using universe::Person;
 using universe::PersonId;
 using universe::Settlement;
 using universe::SettlementId;
+using universe::EventId;
+using universe::EventType;
 using universe::SimulationEvent;
 using universe::ui::SimulationController;
 using universe::ui::SettlementSummaryView;
@@ -109,6 +112,37 @@ struct UiState {
         }
     }
     return nullptr;
+}
+
+[[nodiscard]] const SimulationEvent* find_event(const std::span<const SimulationEvent> events, const EventId id) {
+    for (const auto& event : events) {
+        if (event.id == id) {
+            return &event;
+        }
+    }
+    return nullptr;
+}
+
+[[nodiscard]] const char* event_type_label(const EventType event_type) {
+    switch (event_type) {
+        case EventType::Birth:
+            return "Birth";
+        case EventType::Death:
+            return "Death";
+        case EventType::SettlementFounded:
+            return "SettlementFounded";
+        case EventType::SettlementExtinct:
+            return "SettlementExtinct";
+    }
+    return "Unknown";
+}
+
+[[nodiscard]] const char* memory_source_label(const MemorySource source) {
+    switch (source) {
+        case MemorySource::DirectObservation:
+            return "Direct";
+    }
+    return "Unknown";
 }
 
 [[nodiscard]] const char* occupation_label(const universe::Occupation occupation) {
@@ -687,6 +721,51 @@ int main(int argc, char** argv) {
                 if (ImGui::SmallButton(("Go household " + std::to_string(person->household_id)).c_str())) {
                     ui.selected_household = person->household_id;
                 }
+
+                const auto person_memories = controller.memories_for_person(person->id);
+                ImGui::Separator();
+                ImGui::Text("Memories: %llu", static_cast<unsigned long long>(person_memories.size()));
+
+                if (ImGui::BeginTable("person_memory_table", 6, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY, ImVec2(0, 120))) {
+                    ImGui::TableSetupColumn("MemoryId");
+                    ImGui::TableSetupColumn("AcquiredYear");
+                    ImGui::TableSetupColumn("Event");
+                    ImGui::TableSetupColumn("EventYear");
+                    ImGui::TableSetupColumn("Source");
+                    ImGui::TableSetupColumn("Confidence");
+                    ImGui::TableHeadersRow();
+
+                    for (const auto& memory : person_memories) {
+                        const auto* source_event = find_event(events, memory.source_event_id);
+                        const auto acquired_year = universe::DemographicCalendarAdapter::demographic_year(memory.acquired_at);
+                        const auto event_year = source_event == nullptr
+                            ? 0U
+                            : universe::DemographicCalendarAdapter::demographic_year(source_event->timestamp);
+                        const auto event_label = source_event == nullptr
+                            ? "Unknown"
+                            : event_type_label(source_event->type);
+
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+                        ImGui::TextUnformatted(std::to_string(memory.id).c_str());
+                        ImGui::TableSetColumnIndex(1);
+                        ImGui::Text("%llu (t=%lld)",
+                            static_cast<unsigned long long>(acquired_year),
+                            static_cast<long long>(memory.acquired_at.ticks));
+                        ImGui::TableSetColumnIndex(2);
+                        ImGui::Text("%s #%llu",
+                            event_label,
+                            static_cast<unsigned long long>(memory.source_event_id));
+                        ImGui::TableSetColumnIndex(3);
+                        ImGui::TextUnformatted(std::to_string(event_year).c_str());
+                        ImGui::TableSetColumnIndex(4);
+                        ImGui::TextUnformatted(memory_source_label(memory.source));
+                        ImGui::TableSetColumnIndex(5);
+                        ImGui::Text("%u/10000", memory.confidence_per_10k);
+                    }
+
+                    ImGui::EndTable();
+                }
             }
         }
 
@@ -733,15 +812,7 @@ int main(int argc, char** argv) {
                 ImGui::TableSetColumnIndex(1);
                 ImGui::TextUnformatted(std::to_string(universe::DemographicCalendarAdapter::demographic_year(event.timestamp)).c_str());
                 ImGui::TableSetColumnIndex(2);
-                if (event.type == universe::EventType::Birth) {
-                    ImGui::TextUnformatted("Birth");
-                } else if (event.type == universe::EventType::Death) {
-                    ImGui::TextUnformatted("Death");
-                } else if (event.type == universe::EventType::SettlementFounded) {
-                    ImGui::TextUnformatted("SettlementFounded");
-                } else if (event.type == universe::EventType::SettlementExtinct) {
-                    ImGui::TextUnformatted("SettlementExtinct");
-                }
+                ImGui::TextUnformatted(event_type_label(event.type));
 
                 ImGui::TableSetColumnIndex(3);
                 if (event.type == universe::EventType::Birth) {
