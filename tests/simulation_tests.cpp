@@ -572,6 +572,16 @@ void verify_event_log_invariants(const universe::WorldState& state) {
     for (const auto& transmission : state.knowledge_transmissions) {
         transmission_by_recipient_memory.emplace(transmission.recipient_memory_id, &transmission);
     }
+    std::unordered_map<universe::MemoryId, const universe::KnowledgeRecordAccess*> record_access_by_memory;
+    record_access_by_memory.reserve(state.knowledge_record_accesses.size());
+    for (const auto& access : state.knowledge_record_accesses) {
+        record_access_by_memory.emplace(access.reader_memory_id, &access);
+    }
+    std::unordered_map<universe::RecordId, const universe::KnowledgeRecord*> record_by_id;
+    record_by_id.reserve(state.knowledge_records.size());
+    for (const auto& record : state.knowledge_records) {
+        record_by_id.emplace(record.id, &record);
+    }
 
     universe::MemoryId expected_memory_id = 1;
     for (const auto& memory : state.agent_memories) {
@@ -582,7 +592,8 @@ void verify_event_log_invariants(const universe::WorldState& state) {
         require(
             memory.source == universe::MemorySource::DirectObservation ||
                 memory.source == universe::MemorySource::Communication ||
-                memory.source == universe::MemorySource::Teaching,
+                memory.source == universe::MemorySource::Teaching ||
+                memory.source == universe::MemorySource::Record,
             "memory source must be recognized");
         require(memory.confidence_per_10k <= 10'000U, "memory confidence must remain bounded");
 
@@ -624,6 +635,20 @@ void verify_event_log_invariants(const universe::WorldState& state) {
             require(
                 transmission->speaker_settlement_id == transmission->recipient_settlement_id,
                 "transmission must stay within settlement locality");
+        } else if (memory.source == universe::MemorySource::Record) {
+            const auto access_it = record_access_by_memory.find(memory.id);
+            require(access_it != record_access_by_memory.end(), "record memory must have record-access provenance");
+            const auto* access = access_it->second;
+            require(access->reader_id == memory.owner_id, "record access reader must match memory owner");
+            require(access->read_at == memory.acquired_at, "record access time must match memory acquisition");
+            require(access->confidence_per_10k == memory.confidence_per_10k, "record access confidence must match memory confidence");
+
+            const auto record_it = record_by_id.find(access->record_id);
+            require(record_it != record_by_id.end(), "record access must reference existing record");
+            const auto* record = record_it->second;
+            require(record->settlement_id == access->reader_settlement_id, "record access must stay within record settlement");
+            require(record->source_event_id == memory.source_event_id, "record memory must preserve record source event");
+            require(access->read_at.ticks >= record->recorded_at.ticks, "record access time must not predate record creation");
         }
 
         if (source_event->type == universe::EventType::Birth) {
@@ -797,6 +822,8 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
     require(lhs.event_log.size() == rhs.event_log.size(), context);
     require(lhs.agent_memories.size() == rhs.agent_memories.size(), context);
     require(lhs.knowledge_transmissions.size() == rhs.knowledge_transmissions.size(), context);
+    require(lhs.knowledge_records.size() == rhs.knowledge_records.size(), context);
+    require(lhs.knowledge_record_accesses.size() == rhs.knowledge_record_accesses.size(), context);
     require(lhs.agent_knowledge.size() == rhs.agent_knowledge.size(), context);
 
     for (std::size_t i = 0; i < lhs.people.size(); ++i) {
@@ -913,6 +940,31 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
         require(a.method == b.method, context);
         require(a.speaker_memory_id == b.speaker_memory_id, context);
         require(a.recipient_memory_id == b.recipient_memory_id, context);
+        require(a.confidence_per_10k == b.confidence_per_10k, context);
+    }
+
+    for (std::size_t i = 0; i < lhs.knowledge_records.size(); ++i) {
+        const auto& a = lhs.knowledge_records[i];
+        const auto& b = rhs.knowledge_records[i];
+        require(a.id == b.id, context);
+        require(a.settlement_id == b.settlement_id, context);
+        require(a.author_id == b.author_id, context);
+        require(a.author_household_id == b.author_household_id, context);
+        require(a.recorded_at == b.recorded_at, context);
+        require(a.source_memory_id == b.source_memory_id, context);
+        require(a.source_event_id == b.source_event_id, context);
+        require(a.confidence_per_10k == b.confidence_per_10k, context);
+    }
+
+    for (std::size_t i = 0; i < lhs.knowledge_record_accesses.size(); ++i) {
+        const auto& a = lhs.knowledge_record_accesses[i];
+        const auto& b = rhs.knowledge_record_accesses[i];
+        require(a.record_id == b.record_id, context);
+        require(a.reader_id == b.reader_id, context);
+        require(a.reader_household_id == b.reader_household_id, context);
+        require(a.reader_settlement_id == b.reader_settlement_id, context);
+        require(a.reader_memory_id == b.reader_memory_id, context);
+        require(a.read_at == b.read_at, context);
         require(a.confidence_per_10k == b.confidence_per_10k, context);
     }
 
@@ -2362,7 +2414,7 @@ int main() {
             "memory acquired_at beyond simulation time must be rejected");
 
         auto invalid_source_enum = clone_bytes(valid);
-        invalid_source_enum[memory_section.memory_offsets.front() + 24U] = std::byte{3};
+        invalid_source_enum[memory_section.memory_offsets.front() + 24U] = std::byte{4};
         refresh_snapshot_payload_hash(invalid_source_enum);
         require_snapshot_load_fails(
             invalid_source_enum,

@@ -152,6 +152,8 @@ struct UiState {
             return "Communication";
         case MemorySource::Teaching:
             return "Teaching";
+        case MemorySource::Record:
+            return "Record";
     }
     return "Unknown";
 }
@@ -859,6 +861,7 @@ int main(int argc, char** argv) {
                             source_memory == nullptr ? event_by_id.end() : event_by_id.find(source_memory->source_event_id);
                         const auto* source_event = source_event_it == event_by_id.end() ? nullptr : source_event_it->second;
                         const auto transmission = controller.transmission_for_memory(knowledge.source_memory_id);
+                        const auto record_access = controller.record_access_for_memory(knowledge.source_memory_id);
 
                         std::string subject;
                         std::string state_label;
@@ -885,7 +888,12 @@ int main(int argc, char** argv) {
                         ImGui::TableSetColumnIndex(4);
                         ImGui::Text("%s %u/10000", knowledge_source_label(knowledge.source), knowledge.confidence_per_10k);
                         ImGui::TableSetColumnIndex(5);
-                        if (!transmission.has_value()) {
+                        if (record_access.has_value()) {
+                            const auto record_year = universe::DemographicCalendarAdapter::demographic_year(record_access->read_at);
+                            ImGui::Text("Read record #%llu y%llu",
+                                static_cast<unsigned long long>(record_access->record_id),
+                                static_cast<unsigned long long>(record_year));
+                        } else if (!transmission.has_value()) {
                             ImGui::TextUnformatted("DirectObservation");
                         } else {
                             const auto method_label = transmission->method == CommunicationMethod::Teaching

@@ -102,6 +102,16 @@ void verify_memory_invariants(const universe::WorldState& state, const universe:
     for (const auto& transmission : state.knowledge_transmissions) {
         transmission_by_recipient_memory.emplace(transmission.recipient_memory_id, &transmission);
     }
+    std::unordered_map<universe::MemoryId, const universe::KnowledgeRecordAccess*> record_access_by_memory;
+    record_access_by_memory.reserve(state.knowledge_record_accesses.size());
+    for (const auto& access : state.knowledge_record_accesses) {
+        record_access_by_memory.emplace(access.reader_memory_id, &access);
+    }
+    std::unordered_map<universe::RecordId, const universe::KnowledgeRecord*> record_by_id;
+    record_by_id.reserve(state.knowledge_records.size());
+    for (const auto& record : state.knowledge_records) {
+        record_by_id.emplace(record.id, &record);
+    }
 
     for (const auto& memory : state.agent_memories) {
         require(memory.id > 0U, "memory ids must be non-zero");
@@ -110,7 +120,8 @@ void verify_memory_invariants(const universe::WorldState& state, const universe:
         require(
             memory.source == universe::MemorySource::DirectObservation ||
                 memory.source == universe::MemorySource::Communication ||
-                memory.source == universe::MemorySource::Teaching,
+                memory.source == universe::MemorySource::Teaching ||
+                memory.source == universe::MemorySource::Record,
             "memory source must be recognized");
         require(memory.confidence_per_10k <= 10'000U, "memory confidence must be bounded");
         require(ids.insert(memory.id).second, "memory ids must be unique");
@@ -159,6 +170,20 @@ void verify_memory_invariants(const universe::WorldState& state, const universe:
             require(
                 transmission->speaker_settlement_id == transmission->recipient_settlement_id,
                 "transmissions must be local to same settlement at send time");
+        } else if (memory.source == universe::MemorySource::Record) {
+            const auto access_it = record_access_by_memory.find(memory.id);
+            require(access_it != record_access_by_memory.end(), "record memory must have record-access provenance");
+            const auto* access = access_it->second;
+            require(access->reader_id == memory.owner_id, "record access reader must match memory owner");
+            require(access->read_at == memory.acquired_at, "record access read time must match memory acquired_at");
+            require(access->confidence_per_10k == memory.confidence_per_10k, "record access confidence must match memory confidence");
+
+            const auto record_it = record_by_id.find(access->record_id);
+            require(record_it != record_by_id.end(), "record access must reference existing record");
+            const auto* record = record_it->second;
+            require(record->source_event_id == memory.source_event_id, "record memory must preserve record source event provenance");
+            require(record->settlement_id == access->reader_settlement_id, "record access must remain in record settlement");
+            require(access->read_at.ticks >= record->recorded_at.ticks, "record read time must not predate record creation");
         }
 
         require(
@@ -670,6 +695,41 @@ int main() {
         }
 
         require(stale_propagation_verified, "stale subjective knowledge must be able to propagate by communication");
+    }
+
+    {
+        universe::Simulation record_run{config};
+        record_run.run_years(260);
+        const auto& state = record_run.state();
+
+        require(!state.knowledge_records.empty(), "records milestone run should produce persistent records");
+        require(!state.knowledge_record_accesses.empty(), "records milestone run should produce record reads");
+
+        std::unordered_map<universe::RecordId, const universe::KnowledgeRecord*> record_by_id;
+        record_by_id.reserve(state.knowledge_records.size());
+        for (const auto& record : state.knowledge_records) {
+            record_by_id.emplace(record.id, &record);
+            require(record.id > 0U, "record id must be non-zero");
+            require(record.settlement_id > 0U, "record settlement id must be non-zero");
+            require(record.author_id > 0U, "record author id must be non-zero");
+            require(record.source_memory_id > 0U, "record source memory id must be non-zero");
+            require(record.source_event_id > 0U, "record source event id must be non-zero");
+            require(record.recorded_at.ticks <= state.time.ticks, "recorded time must be within simulation timeline");
+        }
+
+        bool delayed_read_verified = false;
+        for (const auto& access : state.knowledge_record_accesses) {
+            const auto record_it = record_by_id.find(access.record_id);
+            require(record_it != record_by_id.end(), "record access must reference known record");
+            const auto* record = record_it->second;
+            require(record->settlement_id == access.reader_settlement_id, "record access must remain in record settlement");
+            require(access.read_at.ticks <= state.time.ticks, "record access time must be in timeline");
+            if (access.read_at > record->recorded_at) {
+                delayed_read_verified = true;
+            }
+        }
+
+        require(delayed_read_verified, "records should be read in later periods after creation");
     }
 
     {

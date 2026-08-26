@@ -41,6 +41,11 @@ enum class SeedDomain : std::uint64_t {
     CommunicationTeacherSelection = 0x5173E0A5B96274D1ULL,
     CommunicationKnowledgeSelection = 0xAD204B79E3F6C58AULL,
     CommunicationAttempt = 0x38D4A71C20BF96E4ULL,
+    RecordAuthorSelection = 0xC4D71A90E62BF153ULL,
+    RecordKnowledgeSelection = 0x6FA2B851D93CE407ULL,
+    RecordAttempt = 0x2D18A7C5E94B603FULL,
+    RecordReadSelection = 0x8B73D0FA21C9E546ULL,
+    RecordReadAttempt = 0xE10CB59A7642F38DULL,
 };
 
 [[nodiscard]] constexpr std::uint64_t mix_u64(const std::uint64_t value) noexcept {

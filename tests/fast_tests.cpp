@@ -70,6 +70,28 @@ const universe::KnowledgeTransmission* find_transmission_by_recipient_memory(
     return nullptr;
 }
 
+const universe::KnowledgeRecordAccess* find_record_access_by_memory(
+    const universe::WorldState& state,
+    const universe::MemoryId memory_id) {
+    for (const auto& access : state.knowledge_record_accesses) {
+        if (access.reader_memory_id == memory_id) {
+            return &access;
+        }
+    }
+    return nullptr;
+}
+
+const universe::KnowledgeRecord* find_record_by_id(
+    const universe::WorldState& state,
+    const universe::RecordId record_id) {
+    for (const auto& record : state.knowledge_records) {
+        if (record.id == record_id) {
+            return &record;
+        }
+    }
+    return nullptr;
+}
+
 }  // namespace
 
 int main() {
@@ -170,7 +192,8 @@ int main() {
             require(
                 memory.source == universe::MemorySource::DirectObservation ||
                     memory.source == universe::MemorySource::Communication ||
-                    memory.source == universe::MemorySource::Teaching,
+                    memory.source == universe::MemorySource::Teaching ||
+                    memory.source == universe::MemorySource::Record,
                 "memory source must be recognized");
             require(memory.confidence_per_10k <= 10'000U, "memory confidence must be bounded");
             require(memory_ids.insert(memory.id).second, "memory ids must be unique");
@@ -202,8 +225,37 @@ int main() {
                 require(speaker_memory != nullptr, "transmission speaker memory must exist");
                 require(speaker_memory->owner_id == transmission->speaker_id, "transmission speaker must own speaker memory");
                 require(speaker_memory->source_event_id == memory.source_event_id, "transmission must preserve source event");
+            } else if (memory.source == universe::MemorySource::Record) {
+                const auto* access = find_record_access_by_memory(state, memory.id);
+                require(access != nullptr, "record memory must have provenance access");
+                require(access->reader_id == memory.owner_id, "record access reader must match memory owner");
+                require(access->read_at == memory.acquired_at, "record access time must match memory acquisition");
+                require(access->confidence_per_10k == memory.confidence_per_10k, "record access confidence must match memory confidence");
+
+                const auto* record = find_record_by_id(state, access->record_id);
+                require(record != nullptr, "record access must reference existing record");
+                require(record->source_event_id == memory.source_event_id, "record read memory must preserve source event");
+                require(record->settlement_id == access->reader_settlement_id, "record access must stay local to settlement");
+                require(access->read_at.ticks >= record->recorded_at.ticks, "record access time must not predate record creation");
             }
             require(memories.person_remembers_event(memory.owner_id, memory.source_event_id), "person_remembers_event must match stored memory");
+        }
+
+        std::unordered_set<universe::RecordId> record_ids;
+        for (const auto& record : state.knowledge_records) {
+            require(record.id > 0U, "record id must be non-zero");
+            require(record.settlement_id > 0U, "record settlement id must be non-zero");
+            require(record.author_id > 0U, "record author id must be non-zero");
+            require(record.author_household_id > 0U, "record author household id must be non-zero");
+            require(record.source_memory_id > 0U, "record source memory id must be non-zero");
+            require(record.source_event_id > 0U, "record source event id must be non-zero");
+            require(record.confidence_per_10k <= 10'000U, "record confidence must be bounded");
+            require(record_ids.insert(record.id).second, "record ids must be unique");
+
+            const auto* source_memory = find_memory_by_id(state, record.source_memory_id);
+            require(source_memory != nullptr, "record source memory must exist");
+            require(source_memory->owner_id == record.author_id, "record source memory owner must match author");
+            require(source_memory->source_event_id == record.source_event_id, "record source event must match source memory");
         }
 
         for (const auto& transmission : state.knowledge_transmissions) {

@@ -37,6 +37,10 @@ constexpr std::uint32_t kCommunicationChanceSameHouseholdPer10k = 4'200;
 constexpr std::uint32_t kTeachingChanceSameHouseholdPer10k = 6'400;
 constexpr std::uint32_t kCommunicationConfidenceCapPer10k = 7'000;
 constexpr std::uint32_t kTeachingConfidenceCapPer10k = 9'000;
+constexpr std::uint32_t kRecordCreationChancePer10k = 1'200;
+constexpr std::uint32_t kRecordReadChancePer10k = 1'900;
+constexpr std::uint32_t kRecordWriteConfidenceCapPer10k = 9'500;
+constexpr std::uint32_t kRecordReadConfidenceCapPer10k = 8'500;
 
 struct LabourDemandProfile {
     std::int64_t cultivation_labour_demand{};
@@ -295,6 +299,31 @@ std::optional<KnowledgeTransmission> Simulation::transmission_for_memory(const M
         return std::nullopt;
     }
     return state_.knowledge_transmissions[index_it->second];
+}
+
+std::span<const KnowledgeRecord> Simulation::knowledge_records() const noexcept {
+    return state_.knowledge_records;
+}
+
+std::vector<KnowledgeRecord> Simulation::records_for_settlement(const SettlementId settlement_id) const {
+    std::vector<KnowledgeRecord> records;
+    for (const auto& record : state_.knowledge_records) {
+        if (record.settlement_id == settlement_id) {
+            records.push_back(record);
+        }
+    }
+    return records;
+}
+
+std::optional<KnowledgeRecordAccess> Simulation::record_access_for_memory(const MemoryId reader_memory_id) const {
+    const auto index_it = record_access_index_by_memory_.find(reader_memory_id);
+    if (index_it == record_access_index_by_memory_.end()) {
+        return std::nullopt;
+    }
+    if (index_it->second >= state_.knowledge_record_accesses.size()) {
+        return std::nullopt;
+    }
+    return state_.knowledge_record_accesses[index_it->second];
 }
 
 bool Simulation::person_remembers_event(const PersonId person_id, const EventId event_id) const noexcept {
@@ -1518,6 +1547,7 @@ void Simulation::process_demography_period(const std::uint64_t demographic_year)
     process_births(demographic_year);
     process_settlement_restructuring(demographic_year);
     process_communication_teaching(demographic_year);
+    process_records(demographic_year);
     process_occupation_reassignment(demographic_year);
     refresh_population_count();
     refresh_food_aggregates();
@@ -1713,6 +1743,225 @@ void Simulation::process_communication_teaching(const std::uint64_t demographic_
     }
 }
 
+void Simulation::process_records(const std::uint64_t demographic_year) {
+    std::unordered_map<PersonId, const Person*> person_by_id;
+    person_by_id.reserve(state_.people.size());
+    for (const auto& person : state_.people) {
+        person_by_id.emplace(person.id, &person);
+    }
+
+    std::unordered_map<HouseholdId, SettlementId> settlement_by_household;
+    settlement_by_household.reserve(state_.households.size());
+    for (const auto& household : state_.households) {
+        settlement_by_household.emplace(household.id, household.settlement_id);
+    }
+
+    std::vector<SettlementId> settlement_ids;
+    settlement_ids.reserve(state_.settlements.size());
+    for (const auto& settlement : state_.settlements) {
+        if (settlement.active) {
+            settlement_ids.push_back(settlement.id);
+        }
+    }
+    std::sort(settlement_ids.begin(), settlement_ids.end());
+
+    for (const auto settlement_id : settlement_ids) {
+        const auto attempt_seed = derive_seed(
+            settlement_seed(settlement_id),
+            SeedDomain::RecordAttempt,
+            demographic_year);
+        if (!seed_chance_per_10k(attempt_seed, kRecordCreationChancePer10k)) {
+            continue;
+        }
+
+        std::vector<PersonId> author_candidates;
+        for (const auto& person : state_.people) {
+            if (!person.alive || age_years(person) < kAdultAgeYears) {
+                continue;
+            }
+            const auto household_it = settlement_by_household.find(person.household_id);
+            if (household_it == settlement_by_household.end() || household_it->second != settlement_id) {
+                continue;
+            }
+            if (knowledge_count_for_person(person.id) == 0U) {
+                continue;
+            }
+            author_candidates.push_back(person.id);
+        }
+
+        if (author_candidates.empty()) {
+            continue;
+        }
+
+        std::sort(author_candidates.begin(), author_candidates.end());
+        const auto author_seed = derive_seed(
+            settlement_seed(settlement_id),
+            SeedDomain::RecordAuthorSelection,
+            demographic_year);
+        const auto author_index = static_cast<std::size_t>(
+            seed_random_bounded(author_seed, author_candidates.size()));
+        const auto author_id = author_candidates[author_index];
+
+        auto author_knowledge = knowledge_for_person(author_id);
+        if (author_knowledge.empty()) {
+            continue;
+        }
+        std::sort(author_knowledge.begin(), author_knowledge.end(), [](const AgentKnowledge& lhs, const AgentKnowledge& rhs) {
+            return lhs.id < rhs.id;
+        });
+
+        std::vector<AgentKnowledge> recordable_knowledge;
+        recordable_knowledge.reserve(author_knowledge.size());
+        for (const auto& knowledge : author_knowledge) {
+            if (knowledge.source_memory_id == 0U) {
+                continue;
+            }
+            recordable_knowledge.push_back(knowledge);
+        }
+
+        if (recordable_knowledge.empty()) {
+            continue;
+        }
+
+        const auto knowledge_seed = derive_seed(
+            settlement_seed(settlement_id),
+            SeedDomain::RecordKnowledgeSelection,
+            (demographic_year * 1'000'003ULL) ^ author_id);
+        const auto knowledge_index = static_cast<std::size_t>(
+            seed_random_bounded(knowledge_seed, recordable_knowledge.size()));
+        const auto& selected_knowledge = recordable_knowledge[knowledge_index];
+
+        EventId source_event_id = 0U;
+        for (const auto& memory : state_.agent_memories) {
+            if (memory.id == selected_knowledge.source_memory_id) {
+                source_event_id = memory.source_event_id;
+                break;
+            }
+        }
+        if (source_event_id == 0U) {
+            continue;
+        }
+
+        const RecordSemanticKey source_event_key{
+            .settlement_id = settlement_id,
+            .source_event_id = source_event_id,
+        };
+        if (record_semantic_keys_.contains(source_event_key)) {
+            continue;
+        }
+
+        const auto author_it = person_by_id.find(author_id);
+        if (author_it == person_by_id.end() || author_it->second == nullptr) {
+            continue;
+        }
+        const auto author_household_id = author_it->second->household_id;
+        const auto author_settlement_it = settlement_by_household.find(author_household_id);
+        if (author_settlement_it == settlement_by_household.end() || author_settlement_it->second != settlement_id) {
+            continue;
+        }
+
+        append_knowledge_record(KnowledgeRecord{
+            .id = 0,
+            .settlement_id = settlement_id,
+            .author_id = author_id,
+            .author_household_id = author_household_id,
+            .recorded_at = state_.time,
+            .source_memory_id = selected_knowledge.source_memory_id,
+            .source_event_id = source_event_id,
+            .confidence_per_10k = std::min<std::uint32_t>(selected_knowledge.confidence_per_10k, kRecordWriteConfidenceCapPer10k),
+        });
+    }
+
+    std::vector<PersonId> reader_ids;
+    reader_ids.reserve(state_.people.size());
+    for (const auto& person : state_.people) {
+        if (person.alive) {
+            reader_ids.push_back(person.id);
+        }
+    }
+    std::sort(reader_ids.begin(), reader_ids.end());
+
+    for (const auto reader_id : reader_ids) {
+        const auto reader_it = person_by_id.find(reader_id);
+        if (reader_it == person_by_id.end() || reader_it->second == nullptr) {
+            continue;
+        }
+
+        const auto reader = reader_it->second;
+        const auto reader_settlement_it = settlement_by_household.find(reader->household_id);
+        if (reader_settlement_it == settlement_by_household.end()) {
+            continue;
+        }
+        const auto reader_settlement_id = reader_settlement_it->second;
+
+        std::vector<KnowledgeRecord> readable_records;
+        for (const auto& record : state_.knowledge_records) {
+            if (record.settlement_id != reader_settlement_id) {
+                continue;
+            }
+            if (person_remembers_event(reader_id, record.source_event_id)) {
+                continue;
+            }
+
+            const RecordAccessSemanticKey semantic_key{
+                .record_id = record.id,
+                .reader_id = reader_id,
+            };
+            if (record_access_semantic_keys_.contains(semantic_key)) {
+                continue;
+            }
+
+            readable_records.push_back(record);
+        }
+
+        if (readable_records.empty()) {
+            continue;
+        }
+
+        const auto attempt_seed = derive_seed(
+            person_seed(reader_id),
+            SeedDomain::RecordReadAttempt,
+            demographic_year);
+        if (!seed_chance_per_10k(attempt_seed, kRecordReadChancePer10k)) {
+            continue;
+        }
+
+        std::sort(readable_records.begin(), readable_records.end(), [](const KnowledgeRecord& lhs, const KnowledgeRecord& rhs) {
+            return lhs.id < rhs.id;
+        });
+
+        const auto selection_seed = derive_seed(
+            person_seed(reader_id),
+            SeedDomain::RecordReadSelection,
+            (demographic_year * 1'000'003ULL) ^ reader_settlement_id);
+        const auto record_index = static_cast<std::size_t>(
+            seed_random_bounded(selection_seed, readable_records.size()));
+        const auto& selected_record = readable_records[record_index];
+
+        const auto read_confidence = std::min<std::uint32_t>(
+            selected_record.confidence_per_10k,
+            kRecordReadConfidenceCapPer10k);
+        const auto reader_memory_id = append_memory(AgentMemory{
+            .id = 0,
+            .owner_id = reader_id,
+            .acquired_at = state_.time,
+            .source = MemorySource::Record,
+            .source_event_id = selected_record.source_event_id,
+            .confidence_per_10k = read_confidence,
+        });
+
+        append_knowledge_record_access(KnowledgeRecordAccess{
+            .record_id = selected_record.id,
+            .reader_id = reader_id,
+            .reader_household_id = reader->household_id,
+            .reader_settlement_id = reader_settlement_id,
+            .reader_memory_id = reader_memory_id,
+            .read_at = state_.time,
+            .confidence_per_10k = read_confidence,
+        });
+    }
+}
+
 PersonId Simulation::next_person_id() noexcept {
     return next_person_id_++;
 }
@@ -1739,6 +1988,10 @@ KnowledgeId Simulation::next_knowledge_id() noexcept {
 
 CommunicationId Simulation::next_communication_id() noexcept {
     return next_communication_id_++;
+}
+
+RecordId Simulation::next_record_id() noexcept {
+    return next_record_id_++;
 }
 
 SimulationSeed Simulation::root_seed() const noexcept {
@@ -3278,7 +3531,8 @@ MemoryId Simulation::append_memory(AgentMemory memory) {
     }
     if (memory.source != MemorySource::DirectObservation &&
         memory.source != MemorySource::Communication &&
-        memory.source != MemorySource::Teaching) {
+        memory.source != MemorySource::Teaching &&
+        memory.source != MemorySource::Record) {
         throw std::invalid_argument("Agent memory source is invalid");
     }
 
@@ -3386,6 +3640,189 @@ void Simulation::append_knowledge_transmission(KnowledgeTransmission transmissio
     transmission_semantic_keys_.insert(semantic_key);
 }
 
+void Simulation::append_knowledge_record(KnowledgeRecord record) {
+    if (record.settlement_id == 0U ||
+        record.author_id == 0U ||
+        record.author_household_id == 0U ||
+        record.source_memory_id == 0U ||
+        record.source_event_id == 0U) {
+        throw std::invalid_argument("Knowledge record references must be non-zero");
+    }
+    if (record.recorded_at.ticks < 0 || record.recorded_at > state_.time) {
+        throw std::invalid_argument("Knowledge record time is invalid");
+    }
+    if (record.confidence_per_10k > 10'000U) {
+        throw std::invalid_argument("Knowledge record confidence must be <= 10000");
+    }
+
+    const Person* author = nullptr;
+    for (const auto& person : state_.people) {
+        if (person.id == record.author_id) {
+            author = &person;
+            break;
+        }
+    }
+    if (author == nullptr || !author->alive) {
+        throw std::invalid_argument("Knowledge record author must exist and be alive");
+    }
+    if (author->household_id != record.author_household_id) {
+        throw std::invalid_argument("Knowledge record author household mismatch");
+    }
+
+    const Household* author_household = nullptr;
+    for (const auto& household : state_.households) {
+        if (household.id == record.author_household_id) {
+            author_household = &household;
+            break;
+        }
+    }
+    if (author_household == nullptr) {
+        throw std::invalid_argument("Knowledge record author household must exist");
+    }
+    if (author_household->settlement_id != record.settlement_id) {
+        throw std::invalid_argument("Knowledge record settlement mismatch with author household");
+    }
+
+    const AgentMemory* source_memory = nullptr;
+    for (const auto& memory : state_.agent_memories) {
+        if (memory.id == record.source_memory_id) {
+            source_memory = &memory;
+            break;
+        }
+    }
+    if (source_memory == nullptr) {
+        throw std::invalid_argument("Knowledge record source memory must exist");
+    }
+    if (source_memory->owner_id != record.author_id) {
+        throw std::invalid_argument("Knowledge record author must own source memory");
+    }
+    if (source_memory->source_event_id != record.source_event_id) {
+        throw std::invalid_argument("Knowledge record source event mismatch");
+    }
+    if (source_memory->acquired_at > record.recorded_at) {
+        throw std::invalid_argument("Knowledge record must not precede source memory");
+    }
+
+    const RecordSemanticKey semantic_key{
+        .settlement_id = record.settlement_id,
+        .source_event_id = record.source_event_id,
+    };
+    if (record_semantic_keys_.contains(semantic_key)) {
+        throw std::invalid_argument("Duplicate knowledge record semantic key");
+    }
+
+    record.id = next_record_id();
+    state_.knowledge_records.push_back(record);
+    record_semantic_keys_.insert(semantic_key);
+}
+
+void Simulation::append_knowledge_record_access(KnowledgeRecordAccess access) {
+    if (access.record_id == 0U ||
+        access.reader_id == 0U ||
+        access.reader_household_id == 0U ||
+        access.reader_settlement_id == 0U ||
+        access.reader_memory_id == 0U) {
+        throw std::invalid_argument("Knowledge record access references must be non-zero");
+    }
+    if (access.read_at.ticks < 0 || access.read_at > state_.time) {
+        throw std::invalid_argument("Knowledge record access time is invalid");
+    }
+    if (access.confidence_per_10k > 10'000U) {
+        throw std::invalid_argument("Knowledge record access confidence must be <= 10000");
+    }
+
+    const KnowledgeRecord* record = nullptr;
+    for (const auto& candidate : state_.knowledge_records) {
+        if (candidate.id == access.record_id) {
+            record = &candidate;
+            break;
+        }
+    }
+    if (record == nullptr) {
+        throw std::invalid_argument("Knowledge record access must reference existing record");
+    }
+    if (record->settlement_id != access.reader_settlement_id) {
+        throw std::invalid_argument("Knowledge record access must remain within record settlement");
+    }
+    if (access.read_at < record->recorded_at) {
+        throw std::invalid_argument("Knowledge record access must not predate record creation");
+    }
+
+    const Person* reader = nullptr;
+    for (const auto& person : state_.people) {
+        if (person.id == access.reader_id) {
+            reader = &person;
+            break;
+        }
+    }
+    if (reader == nullptr || !reader->alive) {
+        throw std::invalid_argument("Knowledge record reader must exist and be alive");
+    }
+    if (reader->household_id != access.reader_household_id) {
+        throw std::invalid_argument("Knowledge record access reader household mismatch");
+    }
+
+    const Household* reader_household = nullptr;
+    for (const auto& household : state_.households) {
+        if (household.id == access.reader_household_id) {
+            reader_household = &household;
+            break;
+        }
+    }
+    if (reader_household == nullptr) {
+        throw std::invalid_argument("Knowledge record access reader household must exist");
+    }
+    if (reader_household->settlement_id != access.reader_settlement_id) {
+        throw std::invalid_argument("Knowledge record access settlement mismatch with reader household");
+    }
+
+    const AgentMemory* reader_memory = nullptr;
+    for (const auto& memory : state_.agent_memories) {
+        if (memory.id == access.reader_memory_id) {
+            reader_memory = &memory;
+            break;
+        }
+    }
+    if (reader_memory == nullptr) {
+        throw std::invalid_argument("Knowledge record access reader memory must exist");
+    }
+    if (reader_memory->owner_id != access.reader_id) {
+        throw std::invalid_argument("Knowledge record access reader memory owner mismatch");
+    }
+    if (reader_memory->source != MemorySource::Record) {
+        throw std::invalid_argument("Knowledge record access memory must be record-derived");
+    }
+    if (reader_memory->source_event_id != record->source_event_id) {
+        throw std::invalid_argument("Knowledge record access event mismatch");
+    }
+    if (reader_memory->acquired_at != access.read_at) {
+        throw std::invalid_argument("Knowledge record access time must match reader memory time");
+    }
+    if (reader_memory->confidence_per_10k != access.confidence_per_10k) {
+        throw std::invalid_argument("Knowledge record access confidence must match reader memory");
+    }
+
+    const RecordAccessSemanticKey semantic_key{
+        .record_id = access.record_id,
+        .reader_id = access.reader_id,
+    };
+    if (record_access_semantic_keys_.contains(semantic_key)) {
+        throw std::invalid_argument("Duplicate knowledge record access semantic key");
+    }
+    if (record_access_index_by_memory_.contains(access.reader_memory_id)) {
+        throw std::invalid_argument("Knowledge record access memory id must be unique");
+    }
+
+    state_.knowledge_record_accesses.push_back(access);
+    std::sort(state_.knowledge_record_accesses.begin(), state_.knowledge_record_accesses.end(), [](const KnowledgeRecordAccess& lhs, const KnowledgeRecordAccess& rhs) {
+        if (lhs.record_id != rhs.record_id) {
+            return lhs.record_id < rhs.record_id;
+        }
+        return lhs.reader_id < rhs.reader_id;
+    });
+    rebuild_record_indexes();
+}
+
 void Simulation::append_direct_observation_memories(
     const EventId source_event_id,
     std::span<const PersonId> observer_ids,
@@ -3410,7 +3847,8 @@ void Simulation::append_direct_observation_memories(
 void Simulation::derive_knowledge_from_memory(const AgentMemory& memory) {
     if (memory.source != MemorySource::DirectObservation &&
         memory.source != MemorySource::Communication &&
-        memory.source != MemorySource::Teaching) {
+        memory.source != MemorySource::Teaching &&
+        memory.source != MemorySource::Record) {
         return;
     }
 
@@ -3613,6 +4051,31 @@ void Simulation::rebuild_communication_indexes() {
             .recipient_id = transmission.recipient_id,
             .speaker_memory_id = transmission.speaker_memory_id,
         });
+    }
+}
+
+void Simulation::rebuild_record_indexes() {
+    record_semantic_keys_.clear();
+    record_access_semantic_keys_.clear();
+    record_access_index_by_memory_.clear();
+    record_semantic_keys_.reserve(state_.knowledge_records.size());
+    record_access_semantic_keys_.reserve(state_.knowledge_record_accesses.size());
+    record_access_index_by_memory_.reserve(state_.knowledge_record_accesses.size());
+
+    for (const auto& record : state_.knowledge_records) {
+        record_semantic_keys_.insert(RecordSemanticKey{
+            .settlement_id = record.settlement_id,
+            .source_event_id = record.source_event_id,
+        });
+    }
+
+    for (std::size_t index = 0; index < state_.knowledge_record_accesses.size(); ++index) {
+        const auto& access = state_.knowledge_record_accesses[index];
+        record_access_semantic_keys_.insert(RecordAccessSemanticKey{
+            .record_id = access.record_id,
+            .reader_id = access.reader_id,
+        });
+        record_access_index_by_memory_[access.reader_memory_id] = index;
     }
 }
 

@@ -93,7 +93,7 @@ Status: **active**
 - [x] agent memory
 - [x] knowledge graph/state
 - [x] communication/teaching
-- [ ] records
+- [x] records
 - [ ] knowledge loss
 - [ ] basic discoveries
 - [ ] institutions

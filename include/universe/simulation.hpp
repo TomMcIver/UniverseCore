@@ -24,6 +24,7 @@ using EventId = std::uint64_t;
 using MemoryId = std::uint64_t;
 using KnowledgeId = std::uint64_t;
 using CommunicationId = std::uint64_t;
+using RecordId = std::uint64_t;
 
 enum class BiologicalSex : std::uint8_t {
     Female = 0,
@@ -159,6 +160,7 @@ enum class MemorySource : std::uint8_t {
     DirectObservation = 0,
     Communication = 1,
     Teaching = 2,
+    Record = 3,
 };
 
 struct AgentMemory {
@@ -192,6 +194,31 @@ struct KnowledgeTransmission {
     std::uint32_t confidence_per_10k{10'000};
 
     [[nodiscard]] bool operator==(const KnowledgeTransmission& other) const = default;
+};
+
+struct KnowledgeRecord {
+    RecordId id{};
+    SettlementId settlement_id{};
+    PersonId author_id{};
+    HouseholdId author_household_id{};
+    SimulationTime recorded_at{};
+    MemoryId source_memory_id{};
+    EventId source_event_id{};
+    std::uint32_t confidence_per_10k{10'000};
+
+    [[nodiscard]] bool operator==(const KnowledgeRecord& other) const = default;
+};
+
+struct KnowledgeRecordAccess {
+    RecordId record_id{};
+    PersonId reader_id{};
+    HouseholdId reader_household_id{};
+    SettlementId reader_settlement_id{};
+    MemoryId reader_memory_id{};
+    SimulationTime read_at{};
+    std::uint32_t confidence_per_10k{10'000};
+
+    [[nodiscard]] bool operator==(const KnowledgeRecordAccess& other) const = default;
 };
 
 enum class KnownLifeStatus : std::uint8_t {
@@ -332,6 +359,8 @@ struct WorldState {
     std::vector<SimulationEvent> event_log{};
     std::vector<AgentMemory> agent_memories{};
     std::vector<KnowledgeTransmission> knowledge_transmissions{};
+    std::vector<KnowledgeRecord> knowledge_records{};
+    std::vector<KnowledgeRecordAccess> knowledge_record_accesses{};
     std::vector<AgentKnowledge> agent_knowledge{};
 };
 
@@ -346,6 +375,9 @@ public:
     [[nodiscard]] std::span<const KnowledgeTransmission> knowledge_transmissions() const noexcept;
     [[nodiscard]] std::vector<KnowledgeTransmission> transmissions_for_recipient(PersonId person_id) const;
     [[nodiscard]] std::optional<KnowledgeTransmission> transmission_for_memory(MemoryId recipient_memory_id) const;
+    [[nodiscard]] std::span<const KnowledgeRecord> knowledge_records() const noexcept;
+    [[nodiscard]] std::vector<KnowledgeRecord> records_for_settlement(SettlementId settlement_id) const;
+    [[nodiscard]] std::optional<KnowledgeRecordAccess> record_access_for_memory(MemoryId reader_memory_id) const;
     [[nodiscard]] bool person_remembers_event(PersonId person_id, EventId event_id) const noexcept;
     [[nodiscard]] std::uint64_t memory_count_for_person(PersonId person_id) const noexcept;
     [[nodiscard]] std::span<const AgentKnowledge> agent_knowledge() const noexcept;
@@ -368,6 +400,7 @@ private:
     [[nodiscard]] MemoryId next_memory_id() noexcept;
     [[nodiscard]] KnowledgeId next_knowledge_id() noexcept;
     [[nodiscard]] CommunicationId next_communication_id() noexcept;
+    [[nodiscard]] RecordId next_record_id() noexcept;
     [[nodiscard]] SimulationSeed root_seed() const noexcept;
     [[nodiscard]] SimulationSeed person_seed(PersonId person_id) const noexcept;
     [[nodiscard]] SimulationSeed household_seed(HouseholdId household_id) const noexcept;
@@ -395,6 +428,7 @@ private:
     void run_scheduled_systems_until(SimulationTime target_time);
     void process_demography_period(std::uint64_t demographic_year);
     void process_communication_teaching(std::uint64_t demographic_year);
+    void process_records(std::uint64_t demographic_year);
     void process_food_period(std::uint64_t food_period);
     void process_materials_period(std::uint64_t food_period);
     void process_occupation_reassignment(std::uint64_t demographic_year);
@@ -429,6 +463,8 @@ private:
     EventId emit_settlement_extinct_event(SettlementId settlement_id, RegionId region_id);
     [[nodiscard]] MemoryId append_memory(AgentMemory memory);
     void append_knowledge_transmission(KnowledgeTransmission transmission);
+    void append_knowledge_record(KnowledgeRecord record);
+    void append_knowledge_record_access(KnowledgeRecordAccess access);
     void append_direct_observation_memories(EventId source_event_id, std::span<const PersonId> observer_ids, SimulationTime acquired_at);
     void derive_knowledge_from_memory(const AgentMemory& memory);
     void upsert_knowledge(
@@ -442,6 +478,7 @@ private:
         std::uint64_t secondary_subject_id);
     void rebuild_knowledge_indexes();
     void rebuild_communication_indexes();
+    void rebuild_record_indexes();
     void refresh_population_count() noexcept;
 
     struct KnowledgeSemanticKey {
@@ -481,6 +518,7 @@ private:
     MemoryId next_memory_id_{1};
     KnowledgeId next_knowledge_id_{1};
     CommunicationId next_communication_id_{1};
+    RecordId next_record_id_{1};
     SimulationDuration demography_interval_{DemographicCalendarAdapter::year_duration()};
     SimulationTime demography_next_run_{DemographicCalendarAdapter::year_duration().ticks};
     SimulationDuration food_interval_{days(1)};
@@ -510,6 +548,46 @@ private:
 
     std::unordered_map<MemoryId, std::size_t> communication_index_by_recipient_memory_{};
     std::unordered_set<TransmissionSemanticKey, TransmissionSemanticKeyHash> transmission_semantic_keys_{};
+
+    struct RecordSemanticKey {
+        SettlementId settlement_id{};
+        EventId source_event_id{};
+
+        [[nodiscard]] bool operator==(const RecordSemanticKey& other) const noexcept {
+            return settlement_id == other.settlement_id && source_event_id == other.source_event_id;
+        }
+    };
+
+    struct RecordSemanticKeyHash {
+        [[nodiscard]] std::size_t operator()(const RecordSemanticKey& key) const noexcept {
+            const auto mixed =
+                (key.settlement_id * 0x9E3779B97F4A7C15ULL) ^
+                (key.source_event_id * 0xD6E8FEB86659FD93ULL);
+            return static_cast<std::size_t>(mixed);
+        }
+    };
+
+    struct RecordAccessSemanticKey {
+        RecordId record_id{};
+        PersonId reader_id{};
+
+        [[nodiscard]] bool operator==(const RecordAccessSemanticKey& other) const noexcept {
+            return record_id == other.record_id && reader_id == other.reader_id;
+        }
+    };
+
+    struct RecordAccessSemanticKeyHash {
+        [[nodiscard]] std::size_t operator()(const RecordAccessSemanticKey& key) const noexcept {
+            const auto mixed =
+                (key.record_id * 0xA24BAED4963EE407ULL) ^
+                (key.reader_id * 0x94D049BB133111EBULL);
+            return static_cast<std::size_t>(mixed);
+        }
+    };
+
+    std::unordered_set<RecordSemanticKey, RecordSemanticKeyHash> record_semantic_keys_{};
+    std::unordered_set<RecordAccessSemanticKey, RecordAccessSemanticKeyHash> record_access_semantic_keys_{};
+    std::unordered_map<MemoryId, std::size_t> record_access_index_by_memory_{};
 
     friend class SnapshotCodec;
 };

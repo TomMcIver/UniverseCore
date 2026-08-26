@@ -196,6 +196,10 @@ private:
     return id > 0U;
 }
 
+[[nodiscard]] bool is_valid_record_id(const RecordId id) noexcept {
+    return id > 0U;
+}
+
 struct DirectMemoryKey {
     PersonId owner_id{};
     EventId event_id{};
@@ -234,6 +238,42 @@ struct KnowledgeSemanticKeyHash {
             (static_cast<std::uint64_t>(key.kind) * 0xD6E8FEB86659FD93ULL) ^
             (key.primary_subject_id * 0xA24BAED4963EE407ULL) ^
             (key.secondary_subject_id * 0x94D049BB133111EBULL);
+        return static_cast<std::size_t>(mixed);
+    }
+};
+
+struct RecordSemanticKey {
+    SettlementId settlement_id{};
+    EventId source_event_id{};
+
+    [[nodiscard]] bool operator==(const RecordSemanticKey& other) const noexcept {
+        return settlement_id == other.settlement_id && source_event_id == other.source_event_id;
+    }
+};
+
+struct RecordSemanticKeyHash {
+    [[nodiscard]] std::size_t operator()(const RecordSemanticKey& key) const noexcept {
+        const auto mixed =
+            (key.settlement_id * 0x9E3779B97F4A7C15ULL) ^
+            (key.source_event_id * 0xD6E8FEB86659FD93ULL);
+        return static_cast<std::size_t>(mixed);
+    }
+};
+
+struct RecordAccessSemanticKey {
+    RecordId record_id{};
+    PersonId reader_id{};
+
+    [[nodiscard]] bool operator==(const RecordAccessSemanticKey& other) const noexcept {
+        return record_id == other.record_id && reader_id == other.reader_id;
+    }
+};
+
+struct RecordAccessSemanticKeyHash {
+    [[nodiscard]] std::size_t operator()(const RecordAccessSemanticKey& key) const noexcept {
+        const auto mixed =
+            (key.record_id * 0xA24BAED4963EE407ULL) ^
+            (key.reader_id * 0x94D049BB133111EBULL);
         return static_cast<std::size_t>(mixed);
     }
 };
@@ -596,7 +636,53 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
         payload.write_u64(transmission->recipient_memory_id);
         payload.write_u32(transmission->confidence_per_10k);
     }
+
+    std::vector<const KnowledgeRecord*> record_order;
+    record_order.reserve(simulation.state_.knowledge_records.size());
+    for (const auto& record : simulation.state_.knowledge_records) {
+        record_order.push_back(&record);
+    }
+    std::sort(record_order.begin(), record_order.end(), [](const KnowledgeRecord* lhs, const KnowledgeRecord* rhs) {
+        return lhs->id < rhs->id;
+    });
+
+    payload.write_u64(static_cast<std::uint64_t>(record_order.size()));
+    for (const auto* record : record_order) {
+        payload.write_u64(record->id);
+        payload.write_u64(record->settlement_id);
+        payload.write_u64(record->author_id);
+        payload.write_u64(record->author_household_id);
+        payload.write_i64(record->recorded_at.ticks);
+        payload.write_u64(record->source_memory_id);
+        payload.write_u64(record->source_event_id);
+        payload.write_u32(record->confidence_per_10k);
+    }
+
+    std::vector<const KnowledgeRecordAccess*> access_order;
+    access_order.reserve(simulation.state_.knowledge_record_accesses.size());
+    for (const auto& access : simulation.state_.knowledge_record_accesses) {
+        access_order.push_back(&access);
+    }
+    std::sort(access_order.begin(), access_order.end(), [](const KnowledgeRecordAccess* lhs, const KnowledgeRecordAccess* rhs) {
+        if (lhs->record_id != rhs->record_id) {
+            return lhs->record_id < rhs->record_id;
+        }
+        return lhs->reader_id < rhs->reader_id;
+    });
+
+    payload.write_u64(static_cast<std::uint64_t>(access_order.size()));
+    for (const auto* access : access_order) {
+        payload.write_u64(access->record_id);
+        payload.write_u64(access->reader_id);
+        payload.write_u64(access->reader_household_id);
+        payload.write_u64(access->reader_settlement_id);
+        payload.write_u64(access->reader_memory_id);
+        payload.write_i64(access->read_at.ticks);
+        payload.write_u32(access->confidence_per_10k);
+    }
+
     payload.write_u64(simulation.next_communication_id_);
+    payload.write_u64(simulation.next_record_id_);
 
     auto payload_bytes = payload.take();
     const auto payload_hash = fnv1a64(payload_bytes);
@@ -668,6 +754,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     std::uint64_t next_memory_id = 0;
     std::uint64_t next_knowledge_id = 0;
     std::uint64_t next_communication_id = 0;
+    std::uint64_t next_record_id = 0;
     std::int64_t demography_interval_ticks = 0;
     std::int64_t demography_next_run_ticks = 0;
     std::int64_t food_interval_ticks = 0;
@@ -1128,7 +1215,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         if (!is_valid_event_id(memory.source_event_id)) {
             return load_error(SnapshotErrorCode::InvalidReference, "Snapshot memory source event id must be non-zero");
         }
-        if (source_raw > static_cast<std::uint8_t>(MemorySource::Teaching)) {
+        if (source_raw > static_cast<std::uint8_t>(MemorySource::Record)) {
             return load_error(SnapshotErrorCode::InvalidEnum, "Snapshot memory source enum is invalid");
         }
         memory.source = static_cast<MemorySource>(source_raw);
@@ -1473,8 +1560,118 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         restored_state.knowledge_transmissions.push_back(transmission);
     }
 
+    std::uint64_t record_count = 0;
+    if (!payload_reader.read_u64(record_count)) {
+        return load_error(SnapshotErrorCode::TruncatedData, "Snapshot record section is truncated");
+    }
+    if (record_count > payload_reader.remaining() / 56U) {
+        return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot record section has invalid length");
+    }
+
+    restored_state.knowledge_records.clear();
+    restored_state.knowledge_records.reserve(static_cast<std::size_t>(record_count));
+    std::unordered_set<RecordId> record_ids;
+    std::unordered_set<RecordSemanticKey, RecordSemanticKeyHash> record_semantic_keys;
+
+    for (std::uint64_t i = 0; i < record_count; ++i) {
+        KnowledgeRecord record{};
+        if (!payload_reader.read_u64(record.id) ||
+            !payload_reader.read_u64(record.settlement_id) ||
+            !payload_reader.read_u64(record.author_id) ||
+            !payload_reader.read_u64(record.author_household_id) ||
+            !payload_reader.read_i64(record.recorded_at.ticks) ||
+            !payload_reader.read_u64(record.source_memory_id) ||
+            !payload_reader.read_u64(record.source_event_id) ||
+            !payload_reader.read_u32(record.confidence_per_10k)) {
+            return load_error(SnapshotErrorCode::TruncatedData, "Snapshot record entry is truncated");
+        }
+
+        if (!is_valid_record_id(record.id) ||
+            !is_valid_settlement_id(record.settlement_id) ||
+            !is_valid_person_id(record.author_id) ||
+            !is_valid_household_id(record.author_household_id) ||
+            !is_valid_memory_id(record.source_memory_id) ||
+            !is_valid_event_id(record.source_event_id)) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot record entry contains invalid references");
+        }
+        if (record.recorded_at.ticks < 0 || record.recorded_at.ticks > restored_state.time.ticks) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot record time is out of range");
+        }
+        if (record.confidence_per_10k > 10'000U) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot record confidence must be <= 10000");
+        }
+        if (!record_ids.insert(record.id).second) {
+            return load_error(SnapshotErrorCode::DuplicateId, "Snapshot contains duplicate record ids");
+        }
+        const auto inserted_key = record_semantic_keys.insert(RecordSemanticKey{
+            .settlement_id = record.settlement_id,
+            .source_event_id = record.source_event_id,
+        });
+        if (!inserted_key.second) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot duplicate record semantic key");
+        }
+
+        restored_state.knowledge_records.push_back(record);
+    }
+
+    std::uint64_t record_access_count = 0;
+    if (!payload_reader.read_u64(record_access_count)) {
+        return load_error(SnapshotErrorCode::TruncatedData, "Snapshot record access section is truncated");
+    }
+    if (record_access_count > payload_reader.remaining() / 48U) {
+        return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot record access section has invalid length");
+    }
+
+    restored_state.knowledge_record_accesses.clear();
+    restored_state.knowledge_record_accesses.reserve(static_cast<std::size_t>(record_access_count));
+    std::unordered_set<MemoryId> record_access_memory_ids;
+    std::unordered_set<RecordAccessSemanticKey, RecordAccessSemanticKeyHash> record_access_semantic_keys;
+
+    for (std::uint64_t i = 0; i < record_access_count; ++i) {
+        KnowledgeRecordAccess access{};
+        if (!payload_reader.read_u64(access.record_id) ||
+            !payload_reader.read_u64(access.reader_id) ||
+            !payload_reader.read_u64(access.reader_household_id) ||
+            !payload_reader.read_u64(access.reader_settlement_id) ||
+            !payload_reader.read_u64(access.reader_memory_id) ||
+            !payload_reader.read_i64(access.read_at.ticks) ||
+            !payload_reader.read_u32(access.confidence_per_10k)) {
+            return load_error(SnapshotErrorCode::TruncatedData, "Snapshot record access entry is truncated");
+        }
+
+        if (!is_valid_record_id(access.record_id) ||
+            !is_valid_person_id(access.reader_id) ||
+            !is_valid_household_id(access.reader_household_id) ||
+            !is_valid_settlement_id(access.reader_settlement_id) ||
+            !is_valid_memory_id(access.reader_memory_id)) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot record access entry contains invalid references");
+        }
+        if (access.read_at.ticks < 0 || access.read_at.ticks > restored_state.time.ticks) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot record access time is out of range");
+        }
+        if (access.confidence_per_10k > 10'000U) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot record access confidence must be <= 10000");
+        }
+        if (!record_access_memory_ids.insert(access.reader_memory_id).second) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot record access reader memory must be unique");
+        }
+        const auto inserted_key = record_access_semantic_keys.insert(RecordAccessSemanticKey{
+            .record_id = access.record_id,
+            .reader_id = access.reader_id,
+        });
+        if (!inserted_key.second) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot duplicate record access semantic key");
+        }
+
+        restored_state.knowledge_record_accesses.push_back(access);
+    }
+
     if (!payload_reader.read_u64(next_communication_id)) {
         return load_error(SnapshotErrorCode::TruncatedData, "Snapshot next communication id is truncated");
+    }
+
+    if (!payload_reader.read_u64(next_record_id)) {
+        return load_error(SnapshotErrorCode::TruncatedData, "Snapshot next record id is truncated");
     }
 
     if (!payload_reader.fully_consumed()) {
@@ -2103,6 +2300,109 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         return load_error(SnapshotErrorCode::InvalidState, "Snapshot next communication id is inconsistent");
     }
 
+    RecordId expected_record_id = 1;
+    std::unordered_map<RecordId, const KnowledgeRecord*> record_by_id;
+    record_by_id.reserve(restored_state.knowledge_records.size());
+    std::unordered_set<RecordSemanticKey, RecordSemanticKeyHash> validated_record_semantic_keys;
+    for (const auto& record : restored_state.knowledge_records) {
+        if (record.id != expected_record_id) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot record ids must be contiguous");
+        }
+        ++expected_record_id;
+
+        if (!person_by_id.contains(record.author_id)) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot record author references unknown person");
+        }
+        if (!household_by_id.contains(record.author_household_id)) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot record author household references unknown household");
+        }
+        if (!settlement_by_id.contains(record.settlement_id)) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot record settlement references unknown settlement");
+        }
+
+        const auto source_memory_it = memory_by_id.find(record.source_memory_id);
+        if (source_memory_it == memory_by_id.end()) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot record source memory references unknown memory");
+        }
+        const auto* source_memory = source_memory_it->second;
+        if (source_memory->owner_id != record.author_id) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot record source memory owner mismatch");
+        }
+        if (source_memory->source_event_id != record.source_event_id) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot record source event mismatch");
+        }
+        if (source_memory->acquired_at > record.recorded_at) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot record cannot predate source memory");
+        }
+
+        const auto inserted = validated_record_semantic_keys.insert(RecordSemanticKey{
+            .settlement_id = record.settlement_id,
+            .source_event_id = record.source_event_id,
+        });
+        if (!inserted.second) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot duplicate record semantic key");
+        }
+        record_by_id.emplace(record.id, &record);
+    }
+
+    if (next_record_id != expected_record_id) {
+        return load_error(SnapshotErrorCode::InvalidState, "Snapshot next record id is inconsistent");
+    }
+
+    std::unordered_set<RecordAccessSemanticKey, RecordAccessSemanticKeyHash> validated_record_access_semantic_keys;
+    std::unordered_set<MemoryId> validated_record_access_memory_ids;
+    for (const auto& access : restored_state.knowledge_record_accesses) {
+        if (!record_by_id.contains(access.record_id)) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot record access references unknown record");
+        }
+        if (!person_by_id.contains(access.reader_id) || !household_by_id.contains(access.reader_household_id)) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot record access references unknown reader entities");
+        }
+        if (!settlement_by_id.contains(access.reader_settlement_id)) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot record access references unknown settlement");
+        }
+
+        const auto* record = record_by_id.at(access.record_id);
+        if (record->settlement_id != access.reader_settlement_id) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot record access must remain within record settlement");
+        }
+        if (access.read_at < record->recorded_at) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot record access cannot predate record creation");
+        }
+
+        const auto reader_memory_it = memory_by_id.find(access.reader_memory_id);
+        if (reader_memory_it == memory_by_id.end()) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot record access reader memory references unknown memory");
+        }
+        const auto* reader_memory = reader_memory_it->second;
+        if (reader_memory->owner_id != access.reader_id) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot record access reader memory owner mismatch");
+        }
+        if (reader_memory->source != MemorySource::Record) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot record access reader memory must be record-derived");
+        }
+        if (reader_memory->source_event_id != record->source_event_id) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot record access source event mismatch");
+        }
+        if (reader_memory->acquired_at != access.read_at) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot record access read time must match reader memory time");
+        }
+        if (reader_memory->confidence_per_10k != access.confidence_per_10k) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot record access confidence must match reader memory");
+        }
+
+        const auto access_inserted = validated_record_access_semantic_keys.insert(RecordAccessSemanticKey{
+            .record_id = access.record_id,
+            .reader_id = access.reader_id,
+        });
+        if (!access_inserted.second) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot duplicate record access semantic key");
+        }
+        if (!validated_record_access_memory_ids.insert(access.reader_memory_id).second) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot duplicate record access reader memory");
+        }
+    }
+
     std::unordered_set<KnowledgeSemanticKey, KnowledgeSemanticKeyHash> knowledge_semantic_keys;
     KnowledgeId expected_knowledge_id = 1;
     for (const auto& knowledge : restored_state.agent_knowledge) {
@@ -2393,6 +2693,15 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     std::sort(restored_state.knowledge_transmissions.begin(), restored_state.knowledge_transmissions.end(), [](const KnowledgeTransmission& lhs, const KnowledgeTransmission& rhs) {
         return lhs.id < rhs.id;
     });
+    std::sort(restored_state.knowledge_records.begin(), restored_state.knowledge_records.end(), [](const KnowledgeRecord& lhs, const KnowledgeRecord& rhs) {
+        return lhs.id < rhs.id;
+    });
+    std::sort(restored_state.knowledge_record_accesses.begin(), restored_state.knowledge_record_accesses.end(), [](const KnowledgeRecordAccess& lhs, const KnowledgeRecordAccess& rhs) {
+        if (lhs.record_id != rhs.record_id) {
+            return lhs.record_id < rhs.record_id;
+        }
+        return lhs.reader_id < rhs.reader_id;
+    });
 
     std::unordered_map<PersonId, std::vector<std::size_t>> rebuilt_knowledge_indices_by_owner;
     std::unordered_map<Simulation::KnowledgeSemanticKey, std::size_t, Simulation::KnowledgeSemanticKeyHash> rebuilt_knowledge_index_by_semantic_key;
@@ -2435,6 +2744,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     destination.next_memory_id_ = next_memory_id;
     destination.next_knowledge_id_ = next_knowledge_id;
     destination.next_communication_id_ = next_communication_id;
+    destination.next_record_id_ = next_record_id;
     destination.demography_interval_ = SimulationDuration{demography_interval_ticks};
     destination.demography_next_run_ = SimulationTime{demography_next_run_ticks};
     destination.food_interval_ = SimulationDuration{food_interval_ticks};
@@ -2442,6 +2752,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     destination.knowledge_indices_by_owner_ = std::move(rebuilt_knowledge_indices_by_owner);
     destination.knowledge_index_by_semantic_key_ = std::move(rebuilt_knowledge_index_by_semantic_key);
     destination.rebuild_communication_indexes();
+    destination.rebuild_record_indexes();
 
     return SnapshotLoadResult{.ok = true, .code = SnapshotErrorCode::None, .message = ""};
 }
