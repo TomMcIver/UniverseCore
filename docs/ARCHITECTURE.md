@@ -307,6 +307,7 @@ Current implementation status:
 - deterministic typed `AgentKnowledge` stores each person's current structured state derived from memory/event provenance
 - deterministic local communication/teaching can create non-omniscient transmitted memories with explicit speaker/recipient provenance
 - deterministic settlement-local records can persist authored memory-derived claims and later produce record-read memories with explicit record/read provenance
+- deterministic long-horizon knowledge loss decays stale confidence and can soft-forget low-confidence facts without mutating objective world truth
 - canonical knowledge fact scope currently includes person life status, person birth-household knowledge, and settlement status
 - knowledge upsert semantics enforce one current fact per semantic key (owner + fact kind + subject)
 - no omniscience: world truth never auto-populates agent knowledge without memory evidence (direct, transmitted, or record-derived)

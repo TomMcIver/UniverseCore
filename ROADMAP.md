@@ -94,7 +94,7 @@ Status: **active**
 - [x] knowledge graph/state
 - [x] communication/teaching
 - [x] records
-- [ ] knowledge loss
+- [x] knowledge loss
 - [ ] basic discoveries
 - [ ] institutions
 

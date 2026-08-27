@@ -27,6 +27,7 @@ The project deliberately starts without Unreal Engine. The initial objective is 
 - Canonical deterministic agent knowledge state foundation (typed per-person structured facts derived from observed memories with provenance)
 - Canonical deterministic communication/teaching transmission (local same-settlement propagation with provenance-preserving memory chains)
 - Canonical deterministic persistent records (settlement-local authored record artifacts with deterministic delayed reading provenance)
+- Canonical deterministic long-horizon knowledge loss (confidence decay and soft forgetting for stale knowledge)
 - Versioned deterministic canonical snapshots
 - Deterministic household food production/storage/consumption
 - Deterministic regional environment resources (finite productive capacity + renewable wild stock)

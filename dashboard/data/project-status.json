@@ -2,13 +2,13 @@
   "project": "UniverseCore",
   "as_of": "2026-08-26",
   "current_phase": "Milestone 2: Civilization systems (active)",
-  "current_task": "Milestone 2 knowledge loss foundation",
-  "next_task": "Milestone 2 basic discoveries foundation",
+  "current_task": "Milestone 2 basic discoveries foundation",
+  "next_task": "Milestone 2 institutions foundation",
   "build": {
     "canonical_workflow": "podman scripts/container-test.sh",
     "last_verified": "2026-08-26",
     "status": "passing",
-    "notes": "Verified in universecore-dev container with canonical build/test plus UI smoke coverage (container and native Windows UI); re-verified after Milestone 2 records foundation with snapshot schema v13"
+    "notes": "Verified in universecore-dev container with canonical build/test plus UI smoke coverage (container and native Windows UI); re-verified after Milestone 2 knowledge-loss foundation with snapshot schema v13"
   },
   "progress": {
     "simulation_foundation_percent": 99,
@@ -82,7 +82,7 @@
       "id": "M2",
       "name": "Civilization Systems",
       "status": "in-progress",
-      "percent": 62
+      "percent": 74
     },
     {
       "id": "UE",
@@ -108,12 +108,13 @@
       "Milestone 2 knowledge graph/state foundation",
       "Milestone 2 communication/teaching foundation",
       "Milestone 2 records foundation",
+      "Milestone 2 knowledge loss foundation",
       "Snapshot schema v13 and validation",
       "Canonical Podman build/test workflow",
       "Development dashboard + deployment workflow"
     ],
     "active": [
-      "Milestone 2 knowledge loss foundation"
+      "Milestone 2 basic discoveries foundation"
     ],
     "planned": [
       "Milestone 1 migration implementation (designed/deferred)",

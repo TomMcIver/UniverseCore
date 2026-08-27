@@ -733,6 +733,48 @@ int main() {
     }
 
     {
+        universe::Simulation loss_run{config};
+        loss_run.run_years(260);
+
+        const auto baseline_state = loss_run.state();
+        std::unordered_map<universe::KnowledgeId, std::uint32_t> old_knowledge_confidence;
+        for (const auto& knowledge : baseline_state.agent_knowledge) {
+            const auto stale_ticks = baseline_state.time.ticks - knowledge.updated_at.ticks;
+            const auto stale_years = static_cast<std::uint64_t>(
+                stale_ticks / universe::DemographicCalendarAdapter::year_duration().ticks);
+            if (stale_years >= 185U) {
+                old_knowledge_confidence.emplace(knowledge.id, knowledge.confidence_per_10k);
+            }
+        }
+
+        require(!old_knowledge_confidence.empty(), "knowledge-loss scenario requires stale knowledge candidates");
+
+        loss_run.run_years(120);
+        const auto& decayed_state = loss_run.state();
+
+        std::unordered_map<universe::KnowledgeId, std::uint32_t> confidence_after;
+        confidence_after.reserve(decayed_state.agent_knowledge.size());
+        for (const auto& knowledge : decayed_state.agent_knowledge) {
+            confidence_after.emplace(knowledge.id, knowledge.confidence_per_10k);
+        }
+
+        bool decay_or_forget_observed = false;
+        for (const auto& [knowledge_id, old_confidence] : old_knowledge_confidence) {
+            const auto it = confidence_after.find(knowledge_id);
+            if (it == confidence_after.end()) {
+                decay_or_forget_observed = true;
+                break;
+            }
+            if (it->second < old_confidence) {
+                decay_or_forget_observed = true;
+                break;
+            }
+        }
+
+        require(decay_or_forget_observed, "stale knowledge should decay or be forgotten over long horizons");
+    }
+
+    {
         auto durability_config = config;
         durability_config.initial_population = 280;
         durability_config.initial_region_count = 2;

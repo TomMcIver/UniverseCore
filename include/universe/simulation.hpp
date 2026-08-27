@@ -429,6 +429,7 @@ private:
     void process_demography_period(std::uint64_t demographic_year);
     void process_communication_teaching(std::uint64_t demographic_year);
     void process_records(std::uint64_t demographic_year);
+    void process_knowledge_loss(std::uint64_t demographic_year);
     void process_food_period(std::uint64_t food_period);
     void process_materials_period(std::uint64_t food_period);
     void process_occupation_reassignment(std::uint64_t demographic_year);

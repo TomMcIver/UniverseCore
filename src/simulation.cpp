@@ -41,6 +41,12 @@ constexpr std::uint32_t kRecordCreationChancePer10k = 1'200;
 constexpr std::uint32_t kRecordReadChancePer10k = 1'900;
 constexpr std::uint32_t kRecordWriteConfidenceCapPer10k = 9'500;
 constexpr std::uint32_t kRecordReadConfidenceCapPer10k = 8'500;
+constexpr std::uint32_t kKnowledgeDecayDirectPerYearPer10k = 120;
+constexpr std::uint32_t kKnowledgeDecayTeachingPerYearPer10k = 260;
+constexpr std::uint32_t kKnowledgeDecayRecordPerYearPer10k = 320;
+constexpr std::uint32_t kKnowledgeDecayCommunicationPerYearPer10k = 420;
+constexpr std::uint32_t kKnowledgeForgetThresholdPer10k = 1'200;
+constexpr std::uint64_t kKnowledgeDecayGraceYears = 180;
 
 struct LabourDemandProfile {
     std::int64_t cultivation_labour_demand{};
@@ -396,6 +402,9 @@ std::vector<AgentKnowledge> Simulation::knowledge_for_person(const PersonId pers
         if (index >= state_.agent_knowledge.size()) {
             continue;
         }
+        if (state_.agent_knowledge[index].confidence_per_10k == 0U) {
+            continue;
+        }
         facts.push_back(state_.agent_knowledge[index]);
     }
     return facts;
@@ -406,7 +415,17 @@ std::uint64_t Simulation::knowledge_count_for_person(const PersonId person_id) c
     if (owner_it == knowledge_indices_by_owner_.end()) {
         return 0U;
     }
-    return static_cast<std::uint64_t>(owner_it->second.size());
+    std::uint64_t count = 0U;
+    for (const auto index : owner_it->second) {
+        if (index >= state_.agent_knowledge.size()) {
+            continue;
+        }
+        if (state_.agent_knowledge[index].confidence_per_10k == 0U) {
+            continue;
+        }
+        ++count;
+    }
+    return count;
 }
 
 std::optional<KnownLifeStatus> Simulation::known_life_status(
@@ -420,6 +439,9 @@ std::optional<KnownLifeStatus> Simulation::known_life_status(
     };
     const auto key_it = knowledge_index_by_semantic_key_.find(key);
     if (key_it == knowledge_index_by_semantic_key_.end() || key_it->second >= state_.agent_knowledge.size()) {
+        return std::nullopt;
+    }
+    if (state_.agent_knowledge[key_it->second].confidence_per_10k == 0U) {
         return std::nullopt;
     }
 
@@ -444,6 +466,9 @@ std::optional<HouseholdId> Simulation::known_household_for_person(
     if (key_it == knowledge_index_by_semantic_key_.end() || key_it->second >= state_.agent_knowledge.size()) {
         return std::nullopt;
     }
+    if (state_.agent_knowledge[key_it->second].confidence_per_10k == 0U) {
+        return std::nullopt;
+    }
 
     const auto* fact = std::get_if<PersonHouseholdKnowledgeFact>(&state_.agent_knowledge[key_it->second].fact);
     if (fact == nullptr) {
@@ -464,6 +489,9 @@ std::optional<SettlementStatusKnowledgeFact> Simulation::known_settlement_status
     };
     const auto key_it = knowledge_index_by_semantic_key_.find(key);
     if (key_it == knowledge_index_by_semantic_key_.end() || key_it->second >= state_.agent_knowledge.size()) {
+        return std::nullopt;
+    }
+    if (state_.agent_knowledge[key_it->second].confidence_per_10k == 0U) {
         return std::nullopt;
     }
 
@@ -1548,6 +1576,7 @@ void Simulation::process_demography_period(const std::uint64_t demographic_year)
     process_settlement_restructuring(demographic_year);
     process_communication_teaching(demographic_year);
     process_records(demographic_year);
+    process_knowledge_loss(demographic_year);
     process_occupation_reassignment(demographic_year);
     refresh_population_count();
     refresh_food_aggregates();
@@ -1959,6 +1988,71 @@ void Simulation::process_records(const std::uint64_t demographic_year) {
             .read_at = state_.time,
             .confidence_per_10k = read_confidence,
         });
+    }
+}
+
+void Simulation::process_knowledge_loss(const std::uint64_t demographic_year) {
+    std::unordered_map<MemoryId, const AgentMemory*> memory_by_id;
+    memory_by_id.reserve(state_.agent_memories.size());
+    for (const auto& memory : state_.agent_memories) {
+        memory_by_id.emplace(memory.id, &memory);
+    }
+
+    for (auto& knowledge : state_.agent_knowledge) {
+        if (knowledge.updated_at >= state_.time) {
+            continue;
+        }
+
+        const auto stale_duration_ticks = state_.time.ticks - knowledge.updated_at.ticks;
+        const auto stale_years = static_cast<std::uint64_t>(
+            stale_duration_ticks / DemographicCalendarAdapter::year_duration().ticks);
+        if (stale_years < kKnowledgeDecayGraceYears) {
+            continue;
+        }
+
+        const auto source_memory_it = memory_by_id.find(knowledge.source_memory_id);
+        if (source_memory_it == memory_by_id.end() || source_memory_it->second == nullptr) {
+            continue;
+        }
+
+        const auto* source_memory = source_memory_it->second;
+        std::uint32_t decay = kKnowledgeDecayDirectPerYearPer10k;
+        if (source_memory->source == MemorySource::Communication) {
+            decay = kKnowledgeDecayCommunicationPerYearPer10k;
+        } else if (source_memory->source == MemorySource::Teaching) {
+            decay = kKnowledgeDecayTeachingPerYearPer10k;
+        } else if (source_memory->source == MemorySource::Record) {
+            decay = kKnowledgeDecayRecordPerYearPer10k;
+        }
+
+        if (knowledge.confidence_per_10k <= decay) {
+            knowledge.confidence_per_10k = 0U;
+        } else {
+            knowledge.confidence_per_10k -= decay;
+        }
+
+        if (knowledge.confidence_per_10k > kKnowledgeForgetThresholdPer10k) {
+            continue;
+        }
+
+        const auto forget_seed = derive_seed(
+            person_seed(knowledge.owner_id),
+            SeedDomain::KnowledgeForgetAttempt,
+            (knowledge.id * 1'000'003ULL) ^ demographic_year);
+        const auto roll_seed = derive_seed(
+            forget_seed,
+            SeedDomain::KnowledgeForgetRoll,
+            knowledge.source_memory_id);
+
+        const auto deficit = kKnowledgeForgetThresholdPer10k - knowledge.confidence_per_10k;
+        const auto forget_chance = std::min<std::uint32_t>(
+            10'000U,
+            2'000U + (deficit * 6U));
+        if (!seed_chance_per_10k(roll_seed, forget_chance)) {
+            continue;
+        }
+
+        knowledge.confidence_per_10k = 0U;
     }
 }
 

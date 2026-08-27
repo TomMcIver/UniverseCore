@@ -46,6 +46,8 @@ enum class SeedDomain : std::uint64_t {
     RecordAttempt = 0x2D18A7C5E94B603FULL,
     RecordReadSelection = 0x8B73D0FA21C9E546ULL,
     RecordReadAttempt = 0xE10CB59A7642F38DULL,
+    KnowledgeForgetAttempt = 0x4A7E19C3B5D8F260ULL,
+    KnowledgeForgetRoll = 0xD3F64A9E17BC8052ULL,
 };
 
 [[nodiscard]] constexpr std::uint64_t mix_u64(const std::uint64_t value) noexcept {
