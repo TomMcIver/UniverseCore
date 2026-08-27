@@ -25,6 +25,7 @@ using MemoryId = std::uint64_t;
 using KnowledgeId = std::uint64_t;
 using CommunicationId = std::uint64_t;
 using RecordId = std::uint64_t;
+using InstitutionId = std::uint64_t;
 
 enum class BiologicalSex : std::uint8_t {
     Female = 0,
@@ -110,6 +111,8 @@ enum class EventType : std::uint8_t {
     Death = 1,
     SettlementFounded = 2,
     SettlementExtinct = 3,
+    DiscoveryMade = 4,
+    InstitutionFounded = 5,
 };
 
 struct BirthEventPayload {
@@ -143,11 +146,34 @@ struct SettlementExtinctEventPayload {
     [[nodiscard]] bool operator==(const SettlementExtinctEventPayload& other) const = default;
 };
 
+struct DiscoveryMadeEventPayload {
+    std::uint32_t discovery_key{};
+    PersonId discoverer_id{};
+    SettlementId settlement_id{};
+
+    [[nodiscard]] bool operator==(const DiscoveryMadeEventPayload& other) const = default;
+};
+
+enum class InstitutionKind : std::uint8_t {
+    KnowledgeKeeper = 0,
+};
+
+struct InstitutionFoundedEventPayload {
+    InstitutionId institution_id{};
+    InstitutionKind kind{InstitutionKind::KnowledgeKeeper};
+    SettlementId settlement_id{};
+    PersonId founder_id{};
+
+    [[nodiscard]] bool operator==(const InstitutionFoundedEventPayload& other) const = default;
+};
+
 using SimulationEventPayload = std::variant<
     BirthEventPayload,
     DeathEventPayload,
     SettlementFoundedEventPayload,
-    SettlementExtinctEventPayload>;
+    SettlementExtinctEventPayload,
+    DiscoveryMadeEventPayload,
+    InstitutionFoundedEventPayload>;
 
 struct SimulationEvent {
     EventId id{};
@@ -221,6 +247,20 @@ struct KnowledgeRecordAccess {
     [[nodiscard]] bool operator==(const KnowledgeRecordAccess& other) const = default;
 };
 
+struct Institution {
+    InstitutionId id{};
+    InstitutionKind kind{InstitutionKind::KnowledgeKeeper};
+    SettlementId settlement_id{};
+    PersonId founder_id{};
+    SimulationTime founded_at{};
+    bool active{true};
+    std::vector<PersonId> member_ids{};
+    std::vector<RecordId> preserved_record_ids{};
+    std::vector<std::uint32_t> preserved_discovery_keys{};
+
+    [[nodiscard]] bool operator==(const Institution& other) const = default;
+};
+
 enum class KnownLifeStatus : std::uint8_t {
     Alive = 0,
     Dead = 1,
@@ -230,6 +270,7 @@ enum class KnowledgeFactKind : std::uint8_t {
     PersonLifeStatus = 0,
     PersonHousehold = 1,
     SettlementStatus = 2,
+    BasicDiscovery = 3,
 };
 
 struct PersonLifeStatusKnowledgeFact {
@@ -254,10 +295,17 @@ struct SettlementStatusKnowledgeFact {
     [[nodiscard]] bool operator==(const SettlementStatusKnowledgeFact& other) const = default;
 };
 
+struct BasicDiscoveryKnowledgeFact {
+    std::uint32_t discovery_key{};
+
+    [[nodiscard]] bool operator==(const BasicDiscoveryKnowledgeFact& other) const = default;
+};
+
 using KnowledgeFact = std::variant<
     PersonLifeStatusKnowledgeFact,
     PersonHouseholdKnowledgeFact,
-    SettlementStatusKnowledgeFact>;
+    SettlementStatusKnowledgeFact,
+    BasicDiscoveryKnowledgeFact>;
 
 enum class KnowledgeSource : std::uint8_t {
     MemoryDerived = 0,
@@ -362,6 +410,7 @@ struct WorldState {
     std::vector<KnowledgeRecord> knowledge_records{};
     std::vector<KnowledgeRecordAccess> knowledge_record_accesses{};
     std::vector<AgentKnowledge> agent_knowledge{};
+    std::vector<Institution> institutions{};
 };
 
 class Simulation {
@@ -377,6 +426,8 @@ public:
     [[nodiscard]] std::optional<KnowledgeTransmission> transmission_for_memory(MemoryId recipient_memory_id) const;
     [[nodiscard]] std::span<const KnowledgeRecord> knowledge_records() const noexcept;
     [[nodiscard]] std::vector<KnowledgeRecord> records_for_settlement(SettlementId settlement_id) const;
+    [[nodiscard]] std::span<const Institution> institutions() const noexcept;
+    [[nodiscard]] std::vector<Institution> institutions_for_settlement(SettlementId settlement_id) const;
     [[nodiscard]] std::optional<KnowledgeRecordAccess> record_access_for_memory(MemoryId reader_memory_id) const;
     [[nodiscard]] bool person_remembers_event(PersonId person_id, EventId event_id) const noexcept;
     [[nodiscard]] std::uint64_t memory_count_for_person(PersonId person_id) const noexcept;
@@ -386,6 +437,7 @@ public:
     [[nodiscard]] std::optional<KnownLifeStatus> known_life_status(PersonId knower_id, PersonId subject_id) const noexcept;
     [[nodiscard]] std::optional<HouseholdId> known_household_for_person(PersonId knower_id, PersonId subject_id) const noexcept;
     [[nodiscard]] std::optional<SettlementStatusKnowledgeFact> known_settlement_status(PersonId knower_id, SettlementId settlement_id) const noexcept;
+    [[nodiscard]] bool knows_basic_discovery(PersonId knower_id, std::uint32_t discovery_key) const noexcept;
     [[nodiscard]] std::vector<std::byte> save_snapshot() const;
     [[nodiscard]] static SnapshotLoadResult load_snapshot(std::span<const std::byte> data, Simulation& destination);
     void advance(SimulationDuration duration);
@@ -401,6 +453,7 @@ private:
     [[nodiscard]] KnowledgeId next_knowledge_id() noexcept;
     [[nodiscard]] CommunicationId next_communication_id() noexcept;
     [[nodiscard]] RecordId next_record_id() noexcept;
+    [[nodiscard]] InstitutionId next_institution_id() noexcept;
     [[nodiscard]] SimulationSeed root_seed() const noexcept;
     [[nodiscard]] SimulationSeed person_seed(PersonId person_id) const noexcept;
     [[nodiscard]] SimulationSeed household_seed(HouseholdId household_id) const noexcept;
@@ -427,8 +480,10 @@ private:
     [[nodiscard]] std::uint64_t current_food_period() const noexcept;
     void run_scheduled_systems_until(SimulationTime target_time);
     void process_demography_period(std::uint64_t demographic_year);
+    void process_basic_discoveries(std::uint64_t demographic_year);
     void process_communication_teaching(std::uint64_t demographic_year);
     void process_records(std::uint64_t demographic_year);
+    void process_institutions(std::uint64_t demographic_year);
     void process_knowledge_loss(std::uint64_t demographic_year);
     void process_food_period(std::uint64_t food_period);
     void process_materials_period(std::uint64_t food_period);
@@ -462,6 +517,8 @@ private:
     EventId emit_birth_event(PersonId child_id, HouseholdId household_id, PersonId mother_id, std::optional<PersonId> father_id);
     EventId emit_settlement_founded_event(SettlementId settlement_id, RegionId region_id, std::optional<SettlementId> source_settlement_id);
     EventId emit_settlement_extinct_event(SettlementId settlement_id, RegionId region_id);
+    EventId emit_discovery_made_event(std::uint32_t discovery_key, PersonId discoverer_id, SettlementId settlement_id);
+    EventId emit_institution_founded_event(InstitutionId institution_id, InstitutionKind kind, SettlementId settlement_id, PersonId founder_id);
     [[nodiscard]] MemoryId append_memory(AgentMemory memory);
     void append_knowledge_transmission(KnowledgeTransmission transmission);
     void append_knowledge_record(KnowledgeRecord record);
@@ -520,6 +577,7 @@ private:
     KnowledgeId next_knowledge_id_{1};
     CommunicationId next_communication_id_{1};
     RecordId next_record_id_{1};
+    InstitutionId next_institution_id_{1};
     SimulationDuration demography_interval_{DemographicCalendarAdapter::year_duration()};
     SimulationTime demography_next_run_{DemographicCalendarAdapter::year_duration().ticks};
     SimulationDuration food_interval_{days(1)};

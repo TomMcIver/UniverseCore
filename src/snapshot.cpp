@@ -200,6 +200,10 @@ private:
     return id > 0U;
 }
 
+[[nodiscard]] bool is_valid_institution_id(const InstitutionId id) noexcept {
+    return id > 0U;
+}
+
 struct DirectMemoryKey {
     PersonId owner_id{};
     EventId event_id{};
@@ -514,6 +518,23 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
             }
             payload.write_u64(payload_data->settlement_id);
             payload.write_u64(payload_data->region_id);
+        } else if (event->type == EventType::DiscoveryMade) {
+            const auto* payload_data = std::get_if<DiscoveryMadeEventPayload>(&event->payload);
+            if (payload_data == nullptr) {
+                throw std::invalid_argument("DiscoveryMade event payload mismatch");
+            }
+            payload.write_u32(payload_data->discovery_key);
+            payload.write_u64(payload_data->discoverer_id);
+            payload.write_u64(payload_data->settlement_id);
+        } else if (event->type == EventType::InstitutionFounded) {
+            const auto* payload_data = std::get_if<InstitutionFoundedEventPayload>(&event->payload);
+            if (payload_data == nullptr) {
+                throw std::invalid_argument("InstitutionFounded event payload mismatch");
+            }
+            payload.write_u64(payload_data->institution_id);
+            payload.write_u8(static_cast<std::uint8_t>(payload_data->kind));
+            payload.write_u64(payload_data->settlement_id);
+            payload.write_u64(payload_data->founder_id);
         } else {
             throw std::invalid_argument("Unknown event type");
         }
@@ -569,6 +590,9 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
             payload.write_u64(settlement->settlement_id);
             payload.write_u64(settlement->region_id);
             payload.write_bool(settlement->active);
+        } else if (const auto* discovery = std::get_if<BasicDiscoveryKnowledgeFact>(&knowledge->fact); discovery != nullptr) {
+            payload.write_u8(static_cast<std::uint8_t>(KnowledgeFactKind::BasicDiscovery));
+            payload.write_u32(discovery->discovery_key);
         } else {
             throw std::invalid_argument("Knowledge fact payload mismatch");
         }
@@ -681,8 +705,52 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
         payload.write_u32(access->confidence_per_10k);
     }
 
+    std::vector<const Institution*> institution_order;
+    institution_order.reserve(simulation.state_.institutions.size());
+    for (const auto& institution : simulation.state_.institutions) {
+        institution_order.push_back(&institution);
+    }
+    std::sort(institution_order.begin(), institution_order.end(), [](const Institution* lhs, const Institution* rhs) {
+        return lhs->id < rhs->id;
+    });
+
+    payload.write_u64(static_cast<std::uint64_t>(institution_order.size()));
+    for (const auto* institution : institution_order) {
+        payload.write_u64(institution->id);
+        payload.write_u8(static_cast<std::uint8_t>(institution->kind));
+        payload.write_u64(institution->settlement_id);
+        payload.write_u64(institution->founder_id);
+        payload.write_i64(institution->founded_at.ticks);
+        payload.write_bool(institution->active);
+
+        std::vector<PersonId> members = institution->member_ids;
+        std::sort(members.begin(), members.end());
+        members.erase(std::unique(members.begin(), members.end()), members.end());
+        payload.write_u64(static_cast<std::uint64_t>(members.size()));
+        for (const auto member_id : members) {
+            payload.write_u64(member_id);
+        }
+
+        std::vector<RecordId> preserved_records = institution->preserved_record_ids;
+        std::sort(preserved_records.begin(), preserved_records.end());
+        preserved_records.erase(std::unique(preserved_records.begin(), preserved_records.end()), preserved_records.end());
+        payload.write_u64(static_cast<std::uint64_t>(preserved_records.size()));
+        for (const auto record_id : preserved_records) {
+            payload.write_u64(record_id);
+        }
+
+        std::vector<std::uint32_t> preserved_discoveries = institution->preserved_discovery_keys;
+        std::sort(preserved_discoveries.begin(), preserved_discoveries.end());
+        preserved_discoveries.erase(std::unique(preserved_discoveries.begin(), preserved_discoveries.end()), preserved_discoveries.end());
+        payload.write_u64(static_cast<std::uint64_t>(preserved_discoveries.size()));
+        for (const auto discovery_key : preserved_discoveries) {
+            payload.write_u32(discovery_key);
+        }
+    }
+
     payload.write_u64(simulation.next_communication_id_);
     payload.write_u64(simulation.next_record_id_);
+    payload.write_u64(simulation.next_institution_id_);
 
     auto payload_bytes = payload.take();
     const auto payload_hash = fnv1a64(payload_bytes);
@@ -755,6 +823,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     std::uint64_t next_knowledge_id = 0;
     std::uint64_t next_communication_id = 0;
     std::uint64_t next_record_id = 0;
+    std::uint64_t next_institution_id = 0;
     std::int64_t demography_interval_ticks = 0;
     std::int64_t demography_next_run_ticks = 0;
     std::int64_t food_interval_ticks = 0;
@@ -1112,7 +1181,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
             return load_error(SnapshotErrorCode::TruncatedData, "Snapshot event record is truncated");
         }
 
-        if (type_raw > 3U) {
+        if (type_raw > 5U) {
             return load_error(SnapshotErrorCode::InvalidEnum, "Snapshot event type is invalid");
         }
         event.type = static_cast<EventType>(type_raw);
@@ -1165,6 +1234,28 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
                 !payload_reader.read_u64(payload_data.region_id)) {
                 return load_error(SnapshotErrorCode::TruncatedData, "Snapshot extinct event payload is truncated");
             }
+            event.payload = payload_data;
+        } else if (event.type == EventType::DiscoveryMade) {
+            DiscoveryMadeEventPayload payload_data{};
+            if (!payload_reader.read_u32(payload_data.discovery_key) ||
+                !payload_reader.read_u64(payload_data.discoverer_id) ||
+                !payload_reader.read_u64(payload_data.settlement_id)) {
+                return load_error(SnapshotErrorCode::TruncatedData, "Snapshot discovery event payload is truncated");
+            }
+            event.payload = payload_data;
+        } else if (event.type == EventType::InstitutionFounded) {
+            InstitutionFoundedEventPayload payload_data{};
+            std::uint8_t kind_raw = 0;
+            if (!payload_reader.read_u64(payload_data.institution_id) ||
+                !payload_reader.read_u8(kind_raw) ||
+                !payload_reader.read_u64(payload_data.settlement_id) ||
+                !payload_reader.read_u64(payload_data.founder_id)) {
+                return load_error(SnapshotErrorCode::TruncatedData, "Snapshot institution founded event payload is truncated");
+            }
+            if (kind_raw > static_cast<std::uint8_t>(InstitutionKind::KnowledgeKeeper)) {
+                return load_error(SnapshotErrorCode::InvalidEnum, "Snapshot institution founded event kind is invalid");
+            }
+            payload_data.kind = static_cast<InstitutionKind>(kind_raw);
             event.payload = payload_data;
         }
 
@@ -1314,6 +1405,12 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
                 !payload_reader.read_u64(fact.region_id) ||
                 !payload_reader.read_bool(fact.active)) {
                 return load_error(SnapshotErrorCode::TruncatedData, "Snapshot settlement-status knowledge payload is truncated");
+            }
+            knowledge.fact = fact;
+        } else if (fact_kind_raw == static_cast<std::uint8_t>(KnowledgeFactKind::BasicDiscovery)) {
+            BasicDiscoveryKnowledgeFact fact{};
+            if (!payload_reader.read_u32(fact.discovery_key)) {
+                return load_error(SnapshotErrorCode::TruncatedData, "Snapshot basic-discovery knowledge payload is truncated");
             }
             knowledge.fact = fact;
         } else {
@@ -1666,12 +1763,122 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         restored_state.knowledge_record_accesses.push_back(access);
     }
 
+    std::uint64_t institution_count = 0;
+    if (!payload_reader.read_u64(institution_count)) {
+        return load_error(SnapshotErrorCode::TruncatedData, "Snapshot institution section is truncated");
+    }
+    if (institution_count > payload_reader.remaining() / 39U) {
+        return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot institution section has invalid length");
+    }
+
+    restored_state.institutions.clear();
+    restored_state.institutions.reserve(static_cast<std::size_t>(institution_count));
+    std::unordered_set<InstitutionId> institution_ids;
+
+    for (std::uint64_t i = 0; i < institution_count; ++i) {
+        Institution institution{};
+        std::uint8_t kind_raw = 0;
+        std::uint64_t member_count = 0;
+        std::uint64_t preserved_record_count = 0;
+        std::uint64_t preserved_discovery_count = 0;
+
+        if (!payload_reader.read_u64(institution.id) ||
+            !payload_reader.read_u8(kind_raw) ||
+            !payload_reader.read_u64(institution.settlement_id) ||
+            !payload_reader.read_u64(institution.founder_id) ||
+            !payload_reader.read_i64(institution.founded_at.ticks) ||
+            !payload_reader.read_bool(institution.active) ||
+            !payload_reader.read_u64(member_count)) {
+            return load_error(SnapshotErrorCode::TruncatedData, "Snapshot institution record is truncated");
+        }
+
+        if (!is_valid_institution_id(institution.id)) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot institution id must be non-zero");
+        }
+        if (kind_raw > static_cast<std::uint8_t>(InstitutionKind::KnowledgeKeeper)) {
+            return load_error(SnapshotErrorCode::InvalidEnum, "Snapshot institution kind enum is invalid");
+        }
+        institution.kind = static_cast<InstitutionKind>(kind_raw);
+        if (!institution_ids.insert(institution.id).second) {
+            return load_error(SnapshotErrorCode::DuplicateId, "Snapshot contains duplicate institution ids");
+        }
+        if (member_count > payload_reader.remaining() / 8U) {
+            return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot institution member list length is invalid");
+        }
+
+        std::unordered_set<PersonId> member_ids;
+        institution.member_ids.reserve(static_cast<std::size_t>(member_count));
+        for (std::uint64_t j = 0; j < member_count; ++j) {
+            PersonId member_id = 0;
+            if (!payload_reader.read_u64(member_id)) {
+                return load_error(SnapshotErrorCode::TruncatedData, "Snapshot institution member is truncated");
+            }
+            if (!is_valid_person_id(member_id)) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot institution member id must be non-zero");
+            }
+            if (!member_ids.insert(member_id).second) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot institution has duplicate members");
+            }
+            institution.member_ids.push_back(member_id);
+        }
+
+        if (!payload_reader.read_u64(preserved_record_count)) {
+            return load_error(SnapshotErrorCode::TruncatedData, "Snapshot institution preserved-record count is truncated");
+        }
+        if (preserved_record_count > payload_reader.remaining() / 8U) {
+            return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot institution preserved-record list length is invalid");
+        }
+        std::unordered_set<RecordId> preserved_record_ids;
+        institution.preserved_record_ids.reserve(static_cast<std::size_t>(preserved_record_count));
+        for (std::uint64_t j = 0; j < preserved_record_count; ++j) {
+            RecordId record_id = 0;
+            if (!payload_reader.read_u64(record_id)) {
+                return load_error(SnapshotErrorCode::TruncatedData, "Snapshot institution preserved record id is truncated");
+            }
+            if (!is_valid_record_id(record_id)) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot institution preserved record id must be non-zero");
+            }
+            if (!preserved_record_ids.insert(record_id).second) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot institution has duplicate preserved records");
+            }
+            institution.preserved_record_ids.push_back(record_id);
+        }
+
+        if (!payload_reader.read_u64(preserved_discovery_count)) {
+            return load_error(SnapshotErrorCode::TruncatedData, "Snapshot institution preserved-discovery count is truncated");
+        }
+        if (preserved_discovery_count > payload_reader.remaining() / 4U) {
+            return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot institution preserved-discovery list length is invalid");
+        }
+        std::unordered_set<std::uint32_t> preserved_discoveries;
+        institution.preserved_discovery_keys.reserve(static_cast<std::size_t>(preserved_discovery_count));
+        for (std::uint64_t j = 0; j < preserved_discovery_count; ++j) {
+            std::uint32_t discovery_key = 0;
+            if (!payload_reader.read_u32(discovery_key)) {
+                return load_error(SnapshotErrorCode::TruncatedData, "Snapshot institution preserved discovery key is truncated");
+            }
+            if (discovery_key == 0U) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot institution preserved discovery key must be non-zero");
+            }
+            if (!preserved_discoveries.insert(discovery_key).second) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot institution has duplicate preserved discovery keys");
+            }
+            institution.preserved_discovery_keys.push_back(discovery_key);
+        }
+
+        restored_state.institutions.push_back(std::move(institution));
+    }
+
     if (!payload_reader.read_u64(next_communication_id)) {
         return load_error(SnapshotErrorCode::TruncatedData, "Snapshot next communication id is truncated");
     }
 
     if (!payload_reader.read_u64(next_record_id)) {
         return load_error(SnapshotErrorCode::TruncatedData, "Snapshot next record id is truncated");
+    }
+
+    if (!payload_reader.read_u64(next_institution_id)) {
+        return load_error(SnapshotErrorCode::TruncatedData, "Snapshot next institution id is truncated");
     }
 
     if (!payload_reader.fully_consumed()) {
@@ -2165,6 +2372,54 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
                 return load_error(SnapshotErrorCode::InvalidState, "Snapshot settlement has duplicate extinct events");
             }
             extinct_event_id_by_settlement.emplace(payload_data.settlement_id, event.id);
+        } else if (event.type == EventType::DiscoveryMade) {
+            if (!std::holds_alternative<DiscoveryMadeEventPayload>(event.payload)) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot event payload does not match discovery made type");
+            }
+
+            const auto& payload_data = std::get<DiscoveryMadeEventPayload>(event.payload);
+            if (!is_valid_person_id(payload_data.discoverer_id) || !is_valid_settlement_id(payload_data.settlement_id)) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot discovery event must include discoverer and settlement ids");
+            }
+            if (!person_by_id.contains(payload_data.discoverer_id)) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot discovery event references unknown discoverer");
+            }
+            if (!settlement_by_id.contains(payload_data.settlement_id)) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot discovery event references unknown settlement");
+            }
+
+            const auto* discoverer = person_by_id.at(payload_data.discoverer_id);
+            const auto* settlement = settlement_by_id.at(payload_data.settlement_id);
+            if (discoverer->household_id == 0U) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot discovery event discoverer household is invalid");
+            }
+            if (!household_by_id.contains(discoverer->household_id)) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot discovery event discoverer household is unknown");
+            }
+            const auto* household = household_by_id.at(discoverer->household_id);
+            if (household->settlement_id != payload_data.settlement_id || settlement->id != payload_data.settlement_id) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot discovery event discoverer/settlement mismatch");
+            }
+        } else if (event.type == EventType::InstitutionFounded) {
+            if (!std::holds_alternative<InstitutionFoundedEventPayload>(event.payload)) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot event payload does not match institution founded type");
+            }
+
+            const auto& payload_data = std::get<InstitutionFoundedEventPayload>(event.payload);
+            if (!is_valid_institution_id(payload_data.institution_id) ||
+                !is_valid_settlement_id(payload_data.settlement_id) ||
+                !is_valid_person_id(payload_data.founder_id)) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot institution founded event references must be non-zero");
+            }
+            if (payload_data.kind != InstitutionKind::KnowledgeKeeper) {
+                return load_error(SnapshotErrorCode::InvalidEnum, "Snapshot institution founded event kind is invalid");
+            }
+            if (!settlement_by_id.contains(payload_data.settlement_id)) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot institution founded event references unknown settlement");
+            }
+            if (!person_by_id.contains(payload_data.founder_id)) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot institution founded event references unknown founder");
+            }
         }
     }
 
@@ -2403,6 +2658,101 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         }
     }
 
+    std::unordered_map<InstitutionId, const InstitutionFoundedEventPayload*> founded_event_by_institution;
+    for (const auto& event : restored_state.event_log) {
+        if (event.type != EventType::InstitutionFounded) {
+            continue;
+        }
+        const auto& payload = std::get<InstitutionFoundedEventPayload>(event.payload);
+        if (founded_event_by_institution.contains(payload.institution_id)) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot institution has duplicate founded events");
+        }
+        founded_event_by_institution.emplace(payload.institution_id, &payload);
+    }
+
+    InstitutionId expected_institution_id = 1;
+    for (const auto& institution : restored_state.institutions) {
+        if (institution.id != expected_institution_id) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot institution ids must be contiguous");
+        }
+        ++expected_institution_id;
+
+        if (institution.kind != InstitutionKind::KnowledgeKeeper) {
+            return load_error(SnapshotErrorCode::InvalidEnum, "Snapshot institution kind is invalid");
+        }
+        if (!settlement_by_id.contains(institution.settlement_id)) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot institution references unknown settlement");
+        }
+        if (!person_by_id.contains(institution.founder_id)) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot institution founder references unknown person");
+        }
+        if (institution.founded_at.ticks < 0 || institution.founded_at.ticks > restored_state.time.ticks) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot institution founding time is out of range");
+        }
+
+        std::unordered_set<PersonId> unique_members;
+        for (const auto member_id : institution.member_ids) {
+            if (!is_valid_person_id(member_id)) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot institution member id must be non-zero");
+            }
+            if (!unique_members.insert(member_id).second) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot institution has duplicate member ids");
+            }
+            const auto person_it = person_by_id.find(member_id);
+            if (person_it == person_by_id.end() || person_it->second == nullptr || !person_it->second->alive) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot institution member must reference alive person");
+            }
+            const auto household_it = household_by_id.find(person_it->second->household_id);
+            if (household_it == household_by_id.end() || household_it->second == nullptr) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot institution member household is invalid");
+            }
+            if (household_it->second->settlement_id != institution.settlement_id) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot institution member must be local to institution settlement");
+            }
+        }
+
+        std::unordered_set<RecordId> unique_records;
+        for (const auto record_id : institution.preserved_record_ids) {
+            if (!is_valid_record_id(record_id)) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot institution preserved record id must be non-zero");
+            }
+            if (!unique_records.insert(record_id).second) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot institution has duplicate preserved record ids");
+            }
+            const auto record_it = record_by_id.find(record_id);
+            if (record_it == record_by_id.end() || record_it->second == nullptr) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot institution preserved record references unknown record");
+            }
+            if (record_it->second->settlement_id != institution.settlement_id) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot institution preserved record must match institution settlement");
+            }
+        }
+
+        std::unordered_set<std::uint32_t> unique_discoveries;
+        for (const auto discovery_key : institution.preserved_discovery_keys) {
+            if (discovery_key == 0U) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot institution preserved discovery key must be non-zero");
+            }
+            if (!unique_discoveries.insert(discovery_key).second) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot institution has duplicate preserved discovery keys");
+            }
+        }
+
+        if (!founded_event_by_institution.contains(institution.id)) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot institution must have InstitutionFounded event");
+        }
+        const auto* founded_payload = founded_event_by_institution.at(institution.id);
+        if (founded_payload->kind != institution.kind ||
+            founded_payload->settlement_id != institution.settlement_id ||
+            founded_payload->founder_id != institution.founder_id) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot institution founded event payload mismatch");
+        }
+    }
+
+    if (next_institution_id != expected_institution_id) {
+        return load_error(SnapshotErrorCode::InvalidState, "Snapshot next institution id is inconsistent");
+    }
+
     std::unordered_set<KnowledgeSemanticKey, KnowledgeSemanticKeyHash> knowledge_semantic_keys;
     KnowledgeId expected_knowledge_id = 1;
     for (const auto& knowledge : restored_state.agent_knowledge) {
@@ -2524,6 +2874,17 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
                 if (source_payload.settlement_id != settlement_fact->settlement_id || source_payload.region_id != settlement_fact->region_id) {
                     return load_error(SnapshotErrorCode::InvalidState, "Settlement extinct knowledge subject/event mismatch");
                 }
+            }
+        } else if (const auto* discovery_fact = std::get_if<BasicDiscoveryKnowledgeFact>(&knowledge.fact); discovery_fact != nullptr) {
+            semantic_key.kind = KnowledgeFactKind::BasicDiscovery;
+            semantic_key.primary_subject_id = discovery_fact->discovery_key;
+
+            if (source_event->type != EventType::DiscoveryMade) {
+                return load_error(SnapshotErrorCode::InvalidState, "Basic discovery knowledge must derive from DiscoveryMade event");
+            }
+            const auto& source_payload = std::get<DiscoveryMadeEventPayload>(source_event->payload);
+            if (source_payload.discovery_key != discovery_fact->discovery_key) {
+                return load_error(SnapshotErrorCode::InvalidState, "Basic discovery knowledge subject/event mismatch");
             }
         } else {
             return load_error(SnapshotErrorCode::InvalidState, "Snapshot knowledge fact variant is invalid");
@@ -2702,6 +3063,14 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         }
         return lhs.reader_id < rhs.reader_id;
     });
+    std::sort(restored_state.institutions.begin(), restored_state.institutions.end(), [](const Institution& lhs, const Institution& rhs) {
+        return lhs.id < rhs.id;
+    });
+    for (auto& institution : restored_state.institutions) {
+        std::sort(institution.member_ids.begin(), institution.member_ids.end());
+        std::sort(institution.preserved_record_ids.begin(), institution.preserved_record_ids.end());
+        std::sort(institution.preserved_discovery_keys.begin(), institution.preserved_discovery_keys.end());
+    }
 
     std::unordered_map<PersonId, std::vector<std::size_t>> rebuilt_knowledge_indices_by_owner;
     std::unordered_map<Simulation::KnowledgeSemanticKey, std::size_t, Simulation::KnowledgeSemanticKeyHash> rebuilt_knowledge_index_by_semantic_key;
@@ -2722,6 +3091,9 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         } else if (const auto* settlement_fact = std::get_if<SettlementStatusKnowledgeFact>(&knowledge.fact); settlement_fact != nullptr) {
             semantic_key.fact_kind = KnowledgeFactKind::SettlementStatus;
             semantic_key.primary_subject_id = settlement_fact->settlement_id;
+        } else if (const auto* discovery_fact = std::get_if<BasicDiscoveryKnowledgeFact>(&knowledge.fact); discovery_fact != nullptr) {
+            semantic_key.fact_kind = KnowledgeFactKind::BasicDiscovery;
+            semantic_key.primary_subject_id = discovery_fact->discovery_key;
         } else {
             return load_error(SnapshotErrorCode::InvalidState, "Snapshot knowledge fact variant is invalid for index rebuild");
         }
@@ -2745,6 +3117,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     destination.next_knowledge_id_ = next_knowledge_id;
     destination.next_communication_id_ = next_communication_id;
     destination.next_record_id_ = next_record_id;
+    destination.next_institution_id_ = next_institution_id;
     destination.demography_interval_ = SimulationDuration{demography_interval_ticks};
     destination.demography_next_run_ = SimulationTime{demography_next_run_ticks};
     destination.food_interval_ = SimulationDuration{food_interval_ticks};

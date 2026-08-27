@@ -116,7 +116,7 @@ Current implementation status:
 - append-only canonical `event_log` in `WorldState`
 - stable deterministic `EventId` assignment
 - strongly typed event payload model (no unstructured optional-field bag)
-- canonical event emission currently includes `Birth`, `Death`, `SettlementFounded`, and `SettlementExtinct`
+- canonical event emission currently includes `Birth`, `Death`, `SettlementFounded`, `SettlementExtinct`, `DiscoveryMade`, and `InstitutionFounded`
 - canonical event metadata includes deterministic ID + canonical simulation timestamp (`SimulationTime`)
 - deterministic ordering derived from deterministic system update order
 - canonical per-person agent memory state stores direct observations with deterministic `MemoryId`, owner, source `EventId`, acquisition time, and confidence
@@ -308,7 +308,9 @@ Current implementation status:
 - deterministic local communication/teaching can create non-omniscient transmitted memories with explicit speaker/recipient provenance
 - deterministic settlement-local records can persist authored memory-derived claims and later produce record-read memories with explicit record/read provenance
 - deterministic long-horizon knowledge loss decays stale confidence and can soft-forget low-confidence facts without mutating objective world truth
-- canonical knowledge fact scope currently includes person life status, person birth-household knowledge, and settlement status
+- deterministic basic discoveries can originate in-settlement and enter agent memory/knowledge via discovery events with canonical provenance
+- deterministic institutions can found settlement-local teaching/preservation groups with deterministic membership and explicit event provenance
+- canonical knowledge fact scope currently includes person life status, person birth-household knowledge, settlement status, and basic discovery keys
 - knowledge upsert semantics enforce one current fact per semantic key (owner + fact kind + subject)
 - no omniscience: world truth never auto-populates agent knowledge without memory evidence (direct, transmitted, or record-derived)
 
@@ -352,7 +354,7 @@ Current implementation status:
 - fixed-width little-endian encoding for all persisted primitives
 - canonical collection ordering during serialization (people/households/events by stable ID, household members by person ID)
 - explicit load validation for malformed/truncated data, enum validity, ID uniqueness, references and scheduler invariants
-- snapshot schema v12 is the canonical persistence baseline for typed event journal + material/tool state + agent memory + agent knowledge + knowledge transmission provenance
+- snapshot schema v15 is the canonical persistence baseline for typed event journal + material/tool/environment state + agent memory + agent knowledge + knowledge transmission + records + institutions provenance
 
 Snapshot invariants:
 

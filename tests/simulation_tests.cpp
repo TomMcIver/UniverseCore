@@ -474,6 +474,7 @@ void verify_person_health_invariants(const universe::WorldState& state) {
 void verify_event_log_invariants(const universe::WorldState& state) {
     std::uint64_t birth_events = 0;
     std::uint64_t death_events = 0;
+    std::unordered_set<std::uint32_t> discovery_keys;
     std::unordered_map<universe::SettlementId, std::uint64_t> founded_events_by_settlement;
     std::unordered_map<universe::SettlementId, std::uint64_t> extinct_events_by_settlement;
     universe::EventId expected_event_id = 1;
@@ -545,6 +546,33 @@ void verify_event_log_invariants(const universe::WorldState& state) {
                 find_settlement(state, payload.settlement_id) != nullptr,
                 "settlement extinct event settlement id must reference existing settlement");
             extinct_events_by_settlement[payload.settlement_id] += 1U;
+        } else if (event.type == universe::EventType::DiscoveryMade) {
+            require(
+                std::holds_alternative<universe::DiscoveryMadeEventPayload>(event.payload),
+                "discovery event payload must match type");
+            const auto& payload = std::get<universe::DiscoveryMadeEventPayload>(event.payload);
+            require(payload.discovery_key > 0U, "discovery event key must be non-zero");
+            require(payload.discoverer_id > 0U, "discovery event discoverer id must be non-zero");
+            require(payload.settlement_id > 0U, "discovery event settlement id must be non-zero");
+            const auto* discoverer = find_person(state, payload.discoverer_id);
+            const auto* settlement = find_settlement(state, payload.settlement_id);
+            require(discoverer != nullptr, "discovery event discoverer must exist");
+            require(settlement != nullptr, "discovery event settlement must exist");
+            const auto* discoverer_household = find_household(state, discoverer->household_id);
+            require(discoverer_household != nullptr, "discovery event discoverer household must exist");
+            require(discoverer_household->settlement_id == payload.settlement_id, "discovery event discoverer must belong to event settlement");
+            require(discovery_keys.insert(payload.discovery_key).second, "discovery event keys must be globally unique");
+        } else if (event.type == universe::EventType::InstitutionFounded) {
+            require(
+                std::holds_alternative<universe::InstitutionFoundedEventPayload>(event.payload),
+                "institution founded event payload must match type");
+            const auto& payload = std::get<universe::InstitutionFoundedEventPayload>(event.payload);
+            require(payload.institution_id > 0U, "institution founded event id must be non-zero");
+            require(payload.settlement_id > 0U, "institution founded settlement id must be non-zero");
+            require(payload.founder_id > 0U, "institution founded founder id must be non-zero");
+            require(payload.kind == universe::InstitutionKind::KnowledgeKeeper, "institution founded kind must be knowledge keeper");
+            require(find_settlement(state, payload.settlement_id) != nullptr, "institution founded settlement must exist");
+            require(find_person(state, payload.founder_id) != nullptr, "institution founded founder must exist");
         }
     }
 
@@ -664,6 +692,12 @@ void verify_event_log_invariants(const universe::WorldState& state) {
         if (source_event->type == universe::EventType::SettlementExtinct) {
             require(false, "settlement extinction should not create direct memories in current model");
         }
+        if (source_event->type == universe::EventType::DiscoveryMade) {
+            const auto& payload = std::get<universe::DiscoveryMadeEventPayload>(source_event->payload);
+            if (memory.source == universe::MemorySource::DirectObservation) {
+                require(memory.owner_id == payload.discoverer_id, "discovery direct memory must belong to discoverer");
+            }
+        }
     }
 
     struct KnowledgeSemanticKey {
@@ -751,6 +785,16 @@ void verify_event_log_invariants(const universe::WorldState& state) {
                     .primary_subject_id = fact->settlement_id,
                 }).second,
                 "knowledge semantic key owner+settlement-status+subject must be unique");
+        } else if (const auto* fact = std::get_if<universe::BasicDiscoveryKnowledgeFact>(&knowledge.fact); fact != nullptr) {
+            require(fact->discovery_key > 0U, "basic-discovery knowledge key must be non-zero");
+
+            require(
+                semantic_keys.insert(KnowledgeSemanticKey{
+                    .owner_id = knowledge.owner_id,
+                    .fact_kind = universe::KnowledgeFactKind::BasicDiscovery,
+                    .primary_subject_id = fact->discovery_key,
+                }).second,
+                "knowledge semantic key owner+basic-discovery+subject must be unique");
         } else {
             require(false, "knowledge fact variant must be recognized");
         }
@@ -825,6 +869,7 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
     require(lhs.knowledge_records.size() == rhs.knowledge_records.size(), context);
     require(lhs.knowledge_record_accesses.size() == rhs.knowledge_record_accesses.size(), context);
     require(lhs.agent_knowledge.size() == rhs.agent_knowledge.size(), context);
+    require(lhs.institutions.size() == rhs.institutions.size(), context);
 
     for (std::size_t i = 0; i < lhs.people.size(); ++i) {
         const auto& a = lhs.people[i];
@@ -979,6 +1024,20 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
         require(a.source_memory_id == b.source_memory_id, context);
         require(a.fact == b.fact, context);
         require(a.confidence_per_10k == b.confidence_per_10k, context);
+    }
+
+    for (std::size_t i = 0; i < lhs.institutions.size(); ++i) {
+        const auto& a = lhs.institutions[i];
+        const auto& b = rhs.institutions[i];
+        require(a.id == b.id, context);
+        require(a.kind == b.kind, context);
+        require(a.settlement_id == b.settlement_id, context);
+        require(a.founder_id == b.founder_id, context);
+        require(a.founded_at == b.founded_at, context);
+        require(a.active == b.active, context);
+        require(a.member_ids == b.member_ids, context);
+        require(a.preserved_record_ids == b.preserved_record_ids, context);
+        require(a.preserved_discovery_keys == b.preserved_discovery_keys, context);
     }
 }
 
@@ -1153,6 +1212,10 @@ EventSectionInfo locate_event_section(const universe::WorldState& state) {
             }
         } else if (type == universe::EventType::SettlementExtinct) {
             cursor += 16U;
+        } else if (type == universe::EventType::DiscoveryMade) {
+            cursor += 20U;
+        } else if (type == universe::EventType::InstitutionFounded) {
+            cursor += 25U;
         }
 
         info.payload_discriminator_offsets.push_back(discriminator_offset);
@@ -1244,12 +1307,15 @@ KnowledgeSectionInfo locate_knowledge_section(const universe::WorldState& state)
             info.fact_kinds.push_back(universe::KnowledgeFactKind::PersonHousehold);
             cursor += 8U; // person id
             cursor += 8U; // household id
-        } else {
-            (void)kind_offset;
+        } else if (std::holds_alternative<universe::SettlementStatusKnowledgeFact>(knowledge->fact)) {
             info.fact_kinds.push_back(universe::KnowledgeFactKind::SettlementStatus);
             cursor += 8U; // settlement id
             cursor += 8U; // region id
             cursor += 1U; // active
+        } else {
+            (void)kind_offset;
+            info.fact_kinds.push_back(universe::KnowledgeFactKind::BasicDiscovery);
+            cursor += 4U; // discovery key
         }
 
         cursor += 4U;   // confidence

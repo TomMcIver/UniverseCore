@@ -256,6 +256,10 @@ std::span<const KnowledgeRecord> SimulationController::knowledge_records() const
     return simulation_.knowledge_records();
 }
 
+std::span<const Institution> SimulationController::institutions() const noexcept {
+    return simulation_.institutions();
+}
+
 std::vector<AgentMemory> SimulationController::memories_for_person(const PersonId person_id) const {
     return simulation_.memories_for_person(person_id);
 }

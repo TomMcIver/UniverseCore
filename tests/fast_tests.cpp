@@ -174,6 +174,10 @@ int main() {
                 require(std::holds_alternative<universe::SettlementFoundedEventPayload>(event.payload), "founded payload must match event type");
             } else if (event.type == universe::EventType::SettlementExtinct) {
                 require(std::holds_alternative<universe::SettlementExtinctEventPayload>(event.payload), "extinct payload must match event type");
+            } else if (event.type == universe::EventType::DiscoveryMade) {
+                require(std::holds_alternative<universe::DiscoveryMadeEventPayload>(event.payload), "discovery payload must match event type");
+            } else if (event.type == universe::EventType::InstitutionFounded) {
+                require(std::holds_alternative<universe::InstitutionFoundedEventPayload>(event.payload), "institution founded payload must match event type");
             }
         }
     }
@@ -389,8 +393,50 @@ int main() {
                         .primary_subject_id = fact->settlement_id,
                     }).second,
                     "owner+settlement-status+settlement semantic key must be unique");
+            } else if (const auto* fact = std::get_if<universe::BasicDiscoveryKnowledgeFact>(&knowledge.fact); fact != nullptr) {
+                require(fact->discovery_key > 0U, "basic discovery key must be non-zero");
+                require(
+                    semantic_keys.insert(KnowledgeSemanticKey{
+                        .owner_id = knowledge.owner_id,
+                        .fact_kind = universe::KnowledgeFactKind::BasicDiscovery,
+                        .primary_subject_id = fact->discovery_key,
+                    }).second,
+                    "owner+basic-discovery+key semantic key must be unique");
             } else {
                 require(false, "knowledge fact variant must be recognized");
+            }
+        }
+    }
+
+    {
+        universe::Simulation institutions{config};
+        institutions.run_years(320);
+        const auto& state = institutions.state();
+
+        for (const auto& institution : state.institutions) {
+            require(institution.id > 0U, "institution id must be non-zero");
+            require(institution.kind == universe::InstitutionKind::KnowledgeKeeper, "institution kind must be knowledge keeper");
+            require(institution.settlement_id > 0U, "institution settlement id must be non-zero");
+            require(institution.founder_id > 0U, "institution founder id must be non-zero");
+
+            std::unordered_set<universe::PersonId> member_ids;
+            for (const auto member_id : institution.member_ids) {
+                require(member_ids.insert(member_id).second, "institution members must be unique");
+                const auto* member = find_person_by_id(state, member_id);
+                require(member != nullptr, "institution member must exist");
+                require(member->alive, "institution members must be alive");
+            }
+
+            std::unordered_set<universe::RecordId> record_ids;
+            for (const auto record_id : institution.preserved_record_ids) {
+                require(record_id > 0U, "institution preserved record id must be non-zero");
+                require(record_ids.insert(record_id).second, "institution preserved records must be unique");
+            }
+
+            std::unordered_set<std::uint32_t> discovery_keys;
+            for (const auto discovery_key : institution.preserved_discovery_keys) {
+                require(discovery_key > 0U, "institution preserved discovery key must be non-zero");
+                require(discovery_keys.insert(discovery_key).second, "institution preserved discovery keys must be unique");
             }
         }
     }

@@ -3,6 +3,7 @@
 #include "universe/snapshot.hpp"
 
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <stdexcept>
 #include <unordered_map>
@@ -47,6 +48,13 @@ constexpr std::uint32_t kKnowledgeDecayRecordPerYearPer10k = 320;
 constexpr std::uint32_t kKnowledgeDecayCommunicationPerYearPer10k = 420;
 constexpr std::uint32_t kKnowledgeForgetThresholdPer10k = 1'200;
 constexpr std::uint64_t kKnowledgeDecayGraceYears = 180;
+constexpr std::uint32_t kDiscoveryAttemptPerSettlementPer10k = 1'800;
+constexpr std::uint32_t kInstitutionFoundingChancePerSettlementPer10k = 1'000;
+constexpr std::uint64_t kInstitutionMinimumSettlementPopulation = 24;
+constexpr std::uint64_t kInstitutionMinimumMembers = 3;
+constexpr std::uint64_t kInstitutionTargetMembers = 6;
+constexpr std::uint32_t kInstitutionTeachingConfidenceCapPer10k = 9'200;
+constexpr std::array<std::uint32_t, 3> kBasicDiscoveryKeys{1U, 2U, 3U};
 
 struct LabourDemandProfile {
     std::int64_t cultivation_labour_demand{};
@@ -206,6 +214,10 @@ std::int64_t environment_class_wild_capacity_units_per_area(const EnvironmentCla
             return std::holds_alternative<SettlementFoundedEventPayload>(event.payload);
         case EventType::SettlementExtinct:
             return std::holds_alternative<SettlementExtinctEventPayload>(event.payload);
+        case EventType::DiscoveryMade:
+            return std::holds_alternative<DiscoveryMadeEventPayload>(event.payload);
+        case EventType::InstitutionFounded:
+            return std::holds_alternative<InstitutionFoundedEventPayload>(event.payload);
     }
     return false;
 }
@@ -321,6 +333,20 @@ std::vector<KnowledgeRecord> Simulation::records_for_settlement(const Settlement
     return records;
 }
 
+std::span<const Institution> Simulation::institutions() const noexcept {
+    return state_.institutions;
+}
+
+std::vector<Institution> Simulation::institutions_for_settlement(const SettlementId settlement_id) const {
+    std::vector<Institution> institutions;
+    for (const auto& institution : state_.institutions) {
+        if (institution.settlement_id == settlement_id) {
+            institutions.push_back(institution);
+        }
+    }
+    return institutions;
+}
+
 std::optional<KnowledgeRecordAccess> Simulation::record_access_for_memory(const MemoryId reader_memory_id) const {
     const auto index_it = record_access_index_by_memory_.find(reader_memory_id);
     if (index_it == record_access_index_by_memory_.end()) {
@@ -369,6 +395,14 @@ struct KnowledgeFactDescriptor {
         return KnowledgeFactDescriptor{
             .kind = KnowledgeFactKind::SettlementStatus,
             .primary_subject_id = settlement->settlement_id,
+            .secondary_subject_id = 0U,
+        };
+    }
+
+    if (const auto* discovery = std::get_if<BasicDiscoveryKnowledgeFact>(&fact); discovery != nullptr) {
+        return KnowledgeFactDescriptor{
+            .kind = KnowledgeFactKind::BasicDiscovery,
+            .primary_subject_id = discovery->discovery_key,
             .secondary_subject_id = 0U,
         };
     }
@@ -501,6 +535,32 @@ std::optional<SettlementStatusKnowledgeFact> Simulation::known_settlement_status
     }
 
     return *fact;
+}
+
+bool Simulation::knows_basic_discovery(const PersonId knower_id, const std::uint32_t discovery_key) const noexcept {
+    if (discovery_key == 0U) {
+        return false;
+    }
+
+    const KnowledgeSemanticKey key{
+        .owner_id = knower_id,
+        .fact_kind = KnowledgeFactKind::BasicDiscovery,
+        .primary_subject_id = discovery_key,
+        .secondary_subject_id = 0U,
+    };
+    const auto key_it = knowledge_index_by_semantic_key_.find(key);
+    if (key_it == knowledge_index_by_semantic_key_.end() || key_it->second >= state_.agent_knowledge.size()) {
+        return false;
+    }
+    if (state_.agent_knowledge[key_it->second].confidence_per_10k == 0U) {
+        return false;
+    }
+
+    const auto* fact = std::get_if<BasicDiscoveryKnowledgeFact>(&state_.agent_knowledge[key_it->second].fact);
+    if (fact == nullptr) {
+        return false;
+    }
+    return fact->discovery_key == discovery_key;
 }
 
 std::vector<std::byte> Simulation::save_snapshot() const {
@@ -1574,14 +1634,112 @@ void Simulation::process_demography_period(const std::uint64_t demographic_year)
     process_mortality(demographic_year);
     process_births(demographic_year);
     process_settlement_restructuring(demographic_year);
+    process_basic_discoveries(demographic_year);
     process_communication_teaching(demographic_year);
     process_records(demographic_year);
+    process_institutions(demographic_year);
     process_knowledge_loss(demographic_year);
     process_occupation_reassignment(demographic_year);
     refresh_population_count();
     refresh_food_aggregates();
     refresh_labour_aggregates();
     refresh_material_aggregates();
+}
+
+void Simulation::process_basic_discoveries(const std::uint64_t demographic_year) {
+    std::unordered_set<std::uint32_t> discovered_keys;
+    discovered_keys.reserve(kBasicDiscoveryKeys.size());
+    for (const auto& event : state_.event_log) {
+        if (event.type != EventType::DiscoveryMade) {
+            continue;
+        }
+        const auto* payload = std::get_if<DiscoveryMadeEventPayload>(&event.payload);
+        if (payload == nullptr || payload->discovery_key == 0U) {
+            continue;
+        }
+        discovered_keys.insert(payload->discovery_key);
+    }
+
+    if (discovered_keys.size() >= kBasicDiscoveryKeys.size()) {
+        return;
+    }
+
+    std::unordered_map<HouseholdId, SettlementId> settlement_by_household;
+    settlement_by_household.reserve(state_.households.size());
+    for (const auto& household : state_.households) {
+        settlement_by_household.emplace(household.id, household.settlement_id);
+    }
+
+    std::vector<SettlementId> settlement_ids;
+    settlement_ids.reserve(state_.settlements.size());
+    for (const auto& settlement : state_.settlements) {
+        if (settlement.active) {
+            settlement_ids.push_back(settlement.id);
+        }
+    }
+    std::sort(settlement_ids.begin(), settlement_ids.end());
+
+    for (const auto settlement_id : settlement_ids) {
+        if (discovered_keys.size() >= kBasicDiscoveryKeys.size()) {
+            break;
+        }
+
+        const auto attempt_seed = derive_seed(
+            settlement_seed(settlement_id),
+            SeedDomain::DiscoveryAttempt,
+            demographic_year);
+        if (!seed_chance_per_10k(attempt_seed, kDiscoveryAttemptPerSettlementPer10k)) {
+            continue;
+        }
+
+        std::vector<std::uint32_t> undiscovered_keys;
+        undiscovered_keys.reserve(kBasicDiscoveryKeys.size());
+        for (const auto key : kBasicDiscoveryKeys) {
+            if (!discovered_keys.contains(key)) {
+                undiscovered_keys.push_back(key);
+            }
+        }
+        if (undiscovered_keys.empty()) {
+            continue;
+        }
+
+        const auto key_seed = derive_seed(
+            settlement_seed(settlement_id),
+            SeedDomain::DiscoveryKeySelection,
+            demographic_year);
+        const auto key_index = static_cast<std::size_t>(seed_random_bounded(key_seed, undiscovered_keys.size()));
+        const auto discovery_key = undiscovered_keys[key_index];
+
+        std::vector<PersonId> discoverer_candidates;
+        for (const auto& person : state_.people) {
+            if (!person.alive || age_years(person) < kAdultAgeYears) {
+                continue;
+            }
+            const auto settlement_it = settlement_by_household.find(person.household_id);
+            if (settlement_it == settlement_by_household.end() || settlement_it->second != settlement_id) {
+                continue;
+            }
+            discoverer_candidates.push_back(person.id);
+        }
+
+        if (discoverer_candidates.empty()) {
+            continue;
+        }
+
+        std::sort(discoverer_candidates.begin(), discoverer_candidates.end());
+        const auto discoverer_seed = derive_seed(
+            settlement_seed(settlement_id),
+            SeedDomain::DiscoveryPersonSelection,
+            demographic_year ^ discovery_key);
+        const auto discoverer_index = static_cast<std::size_t>(
+            seed_random_bounded(discoverer_seed, discoverer_candidates.size()));
+        const auto discoverer_id = discoverer_candidates[discoverer_index];
+
+        const auto event_id = emit_discovery_made_event(discovery_key, discoverer_id, settlement_id);
+        const std::array<PersonId, 1> observer_ids{discoverer_id};
+        append_direct_observation_memories(event_id, observer_ids, state_.time);
+        discovered_keys.insert(discovery_key);
+    }
 }
 
 void Simulation::process_communication_teaching(const std::uint64_t demographic_year) {
@@ -1991,6 +2149,557 @@ void Simulation::process_records(const std::uint64_t demographic_year) {
     }
 }
 
+void Simulation::process_institutions(const std::uint64_t demographic_year) {
+    std::unordered_map<HouseholdId, SettlementId> settlement_by_household;
+    settlement_by_household.reserve(state_.households.size());
+    for (const auto& household : state_.households) {
+        settlement_by_household.emplace(household.id, household.settlement_id);
+    }
+
+    std::unordered_map<PersonId, const Person*> person_by_id;
+    person_by_id.reserve(state_.people.size());
+    for (const auto& person : state_.people) {
+        person_by_id.emplace(person.id, &person);
+    }
+
+    std::unordered_map<HouseholdId, const Household*> household_by_id;
+    household_by_id.reserve(state_.households.size());
+    for (const auto& household : state_.households) {
+        household_by_id.emplace(household.id, &household);
+    }
+
+    std::unordered_map<RecordId, const KnowledgeRecord*> record_by_id;
+    record_by_id.reserve(state_.knowledge_records.size());
+    for (const auto& record : state_.knowledge_records) {
+        record_by_id.emplace(record.id, &record);
+    }
+
+    std::unordered_map<EventId, const SimulationEvent*> event_by_id;
+    event_by_id.reserve(state_.event_log.size());
+    for (const auto& event : state_.event_log) {
+        event_by_id.emplace(event.id, &event);
+    }
+
+    std::unordered_map<MemoryId, const AgentMemory*> memory_by_id;
+    memory_by_id.reserve(state_.agent_memories.size());
+    for (const auto& memory : state_.agent_memories) {
+        memory_by_id.emplace(memory.id, &memory);
+    }
+
+    std::vector<SettlementId> active_settlement_ids;
+    active_settlement_ids.reserve(state_.settlements.size());
+    for (const auto& settlement : state_.settlements) {
+        if (settlement.active) {
+            active_settlement_ids.push_back(settlement.id);
+        }
+    }
+    std::sort(active_settlement_ids.begin(), active_settlement_ids.end());
+
+    for (const auto settlement_id : active_settlement_ids) {
+        bool has_active_institution = false;
+        for (const auto& institution : state_.institutions) {
+            if (institution.settlement_id == settlement_id && institution.active) {
+                has_active_institution = true;
+                break;
+            }
+        }
+        if (has_active_institution) {
+            continue;
+        }
+
+        std::vector<PersonId> local_alive_people;
+        std::vector<PersonId> founder_candidates;
+        std::unordered_set<std::uint32_t> local_discovery_keys;
+        bool has_local_record = false;
+
+        for (const auto& record : state_.knowledge_records) {
+            if (record.settlement_id == settlement_id) {
+                has_local_record = true;
+                break;
+            }
+        }
+
+        for (const auto& person : state_.people) {
+            if (!person.alive || person.household_id == 0U) {
+                continue;
+            }
+
+            const auto household_it = settlement_by_household.find(person.household_id);
+            if (household_it == settlement_by_household.end() || household_it->second != settlement_id) {
+                continue;
+            }
+
+            local_alive_people.push_back(person.id);
+            if (age_years(person) < kAdultAgeYears) {
+                continue;
+            }
+
+            auto person_knowledge = knowledge_for_person(person.id);
+            if (person_knowledge.empty()) {
+                continue;
+            }
+
+            bool knows_local_discovery = false;
+            for (const auto& knowledge : person_knowledge) {
+                if (knowledge.confidence_per_10k == 0U) {
+                    continue;
+                }
+                const auto* discovery_fact = std::get_if<BasicDiscoveryKnowledgeFact>(&knowledge.fact);
+                if (discovery_fact == nullptr || discovery_fact->discovery_key == 0U) {
+                    continue;
+                }
+                local_discovery_keys.insert(discovery_fact->discovery_key);
+                knows_local_discovery = true;
+            }
+
+            if (knows_local_discovery) {
+                founder_candidates.push_back(person.id);
+            }
+        }
+
+        if (local_alive_people.size() < kInstitutionMinimumSettlementPopulation ||
+            founder_candidates.empty() ||
+            local_discovery_keys.empty() ||
+            !has_local_record) {
+            continue;
+        }
+
+        const auto founding_attempt_seed = derive_seed(
+            settlement_seed(settlement_id),
+            SeedDomain::InstitutionFoundingAttempt,
+            demographic_year);
+        if (!seed_chance_per_10k(founding_attempt_seed, kInstitutionFoundingChancePerSettlementPer10k)) {
+            continue;
+        }
+
+        std::sort(founder_candidates.begin(), founder_candidates.end());
+        const auto founder_seed = derive_seed(
+            settlement_seed(settlement_id),
+            SeedDomain::InstitutionFounderSelection,
+            demographic_year);
+        const auto founder_index = static_cast<std::size_t>(seed_random_bounded(founder_seed, founder_candidates.size()));
+        const auto founder_id = founder_candidates[founder_index];
+
+        std::vector<PersonId> member_candidates;
+        for (const auto& person : state_.people) {
+            if (!person.alive || person.household_id == 0U) {
+                continue;
+            }
+            const auto household_it = settlement_by_household.find(person.household_id);
+            if (household_it == settlement_by_household.end() || household_it->second != settlement_id) {
+                continue;
+            }
+            if (knowledge_count_for_person(person.id) == 0U) {
+                continue;
+            }
+            member_candidates.push_back(person.id);
+        }
+
+        std::sort(member_candidates.begin(), member_candidates.end());
+        std::vector<PersonId> initial_members;
+        if (!member_candidates.empty()) {
+            struct ScoredMember {
+                std::uint64_t score{};
+                PersonId person_id{};
+            };
+            std::vector<ScoredMember> scored_members;
+            scored_members.reserve(member_candidates.size());
+            for (const auto person_id : member_candidates) {
+                const auto member_seed = derive_seed(
+                    settlement_seed(settlement_id),
+                    SeedDomain::InstitutionMemberSelection,
+                    demographic_year ^ person_id);
+                scored_members.push_back(ScoredMember{.score = member_seed.value, .person_id = person_id});
+            }
+            std::sort(scored_members.begin(), scored_members.end(), [](const ScoredMember& lhs, const ScoredMember& rhs) {
+                if (lhs.score != rhs.score) {
+                    return lhs.score < rhs.score;
+                }
+                return lhs.person_id < rhs.person_id;
+            });
+
+            for (const auto& scored_member : scored_members) {
+                initial_members.push_back(scored_member.person_id);
+                if (initial_members.size() >= kInstitutionTargetMembers) {
+                    break;
+                }
+            }
+        }
+
+        if (std::find(initial_members.begin(), initial_members.end(), founder_id) == initial_members.end()) {
+            initial_members.push_back(founder_id);
+        }
+        std::sort(initial_members.begin(), initial_members.end());
+        initial_members.erase(std::unique(initial_members.begin(), initial_members.end()), initial_members.end());
+        if (initial_members.size() < kInstitutionMinimumMembers) {
+            continue;
+        }
+
+        std::vector<RecordId> preserved_record_ids;
+        for (const auto& record : state_.knowledge_records) {
+            if (record.settlement_id == settlement_id) {
+                preserved_record_ids.push_back(record.id);
+            }
+        }
+        std::sort(preserved_record_ids.begin(), preserved_record_ids.end());
+        preserved_record_ids.erase(std::unique(preserved_record_ids.begin(), preserved_record_ids.end()), preserved_record_ids.end());
+
+        std::vector<std::uint32_t> preserved_discovery_keys;
+        preserved_discovery_keys.reserve(local_discovery_keys.size());
+        for (const auto key : local_discovery_keys) {
+            if (key > 0U) {
+                preserved_discovery_keys.push_back(key);
+            }
+        }
+        std::sort(preserved_discovery_keys.begin(), preserved_discovery_keys.end());
+        preserved_discovery_keys.erase(
+            std::unique(preserved_discovery_keys.begin(), preserved_discovery_keys.end()),
+            preserved_discovery_keys.end());
+
+        const auto institution_id = next_institution_id();
+        state_.institutions.push_back(Institution{
+            .id = institution_id,
+            .kind = InstitutionKind::KnowledgeKeeper,
+            .settlement_id = settlement_id,
+            .founder_id = founder_id,
+            .founded_at = state_.time,
+            .active = true,
+            .member_ids = initial_members,
+            .preserved_record_ids = preserved_record_ids,
+            .preserved_discovery_keys = preserved_discovery_keys,
+        });
+
+        const auto event_id = emit_institution_founded_event(
+            institution_id,
+            InstitutionKind::KnowledgeKeeper,
+            settlement_id,
+            founder_id);
+        append_direct_observation_memories(event_id, initial_members, state_.time);
+    }
+
+    std::sort(state_.institutions.begin(), state_.institutions.end(), [](const Institution& lhs, const Institution& rhs) {
+        return lhs.id < rhs.id;
+    });
+
+    for (auto& institution : state_.institutions) {
+        const auto* settlement = find_settlement(institution.settlement_id);
+        if (settlement == nullptr || !settlement->active) {
+            institution.active = false;
+            institution.member_ids.clear();
+            continue;
+        }
+
+        std::vector<PersonId> valid_members;
+        valid_members.reserve(institution.member_ids.size());
+        for (const auto member_id : institution.member_ids) {
+            const auto person_it = person_by_id.find(member_id);
+            if (person_it == person_by_id.end() || person_it->second == nullptr || !person_it->second->alive) {
+                continue;
+            }
+            const auto household_it = household_by_id.find(person_it->second->household_id);
+            if (household_it == household_by_id.end() || household_it->second == nullptr) {
+                continue;
+            }
+            if (household_it->second->settlement_id != institution.settlement_id) {
+                continue;
+            }
+            valid_members.push_back(member_id);
+        }
+        std::sort(valid_members.begin(), valid_members.end());
+        valid_members.erase(std::unique(valid_members.begin(), valid_members.end()), valid_members.end());
+        institution.member_ids = std::move(valid_members);
+
+        if (institution.member_ids.size() < kInstitutionTargetMembers) {
+            std::unordered_set<PersonId> existing_members;
+            existing_members.reserve(institution.member_ids.size());
+            for (const auto member_id : institution.member_ids) {
+                existing_members.insert(member_id);
+            }
+
+            struct ScoredCandidate {
+                std::uint64_t score{};
+                PersonId person_id{};
+            };
+            std::vector<ScoredCandidate> add_candidates;
+            for (const auto& person : state_.people) {
+                if (!person.alive || person.household_id == 0U) {
+                    continue;
+                }
+                const auto household_it = settlement_by_household.find(person.household_id);
+                if (household_it == settlement_by_household.end() || household_it->second != institution.settlement_id) {
+                    continue;
+                }
+                if (existing_members.contains(person.id) || knowledge_count_for_person(person.id) == 0U) {
+                    continue;
+                }
+
+                const auto member_seed = derive_seed(
+                    settlement_seed(institution.settlement_id),
+                    SeedDomain::InstitutionMemberSelection,
+                    (demographic_year * 1'000'003ULL) ^ institution.id ^ person.id);
+                add_candidates.push_back(ScoredCandidate{.score = member_seed.value, .person_id = person.id});
+            }
+
+            std::sort(add_candidates.begin(), add_candidates.end(), [](const ScoredCandidate& lhs, const ScoredCandidate& rhs) {
+                if (lhs.score != rhs.score) {
+                    return lhs.score < rhs.score;
+                }
+                return lhs.person_id < rhs.person_id;
+            });
+
+            for (const auto& candidate : add_candidates) {
+                if (institution.member_ids.size() >= kInstitutionTargetMembers) {
+                    break;
+                }
+                institution.member_ids.push_back(candidate.person_id);
+            }
+
+            std::sort(institution.member_ids.begin(), institution.member_ids.end());
+            institution.member_ids.erase(std::unique(institution.member_ids.begin(), institution.member_ids.end()), institution.member_ids.end());
+        }
+
+        institution.active = institution.member_ids.size() >= kInstitutionMinimumMembers;
+        if (!institution.active) {
+            continue;
+        }
+
+        for (const auto& record : state_.knowledge_records) {
+            if (record.settlement_id != institution.settlement_id) {
+                continue;
+            }
+            institution.preserved_record_ids.push_back(record.id);
+        }
+        std::sort(institution.preserved_record_ids.begin(), institution.preserved_record_ids.end());
+        institution.preserved_record_ids.erase(
+            std::unique(institution.preserved_record_ids.begin(), institution.preserved_record_ids.end()),
+            institution.preserved_record_ids.end());
+
+        std::unordered_set<std::uint32_t> discovered_keys;
+
+        for (const auto member_id : institution.member_ids) {
+            auto member_knowledge = knowledge_for_person(member_id);
+            for (const auto& knowledge : member_knowledge) {
+                if (knowledge.confidence_per_10k == 0U) {
+                    continue;
+                }
+                const auto* discovery_fact = std::get_if<BasicDiscoveryKnowledgeFact>(&knowledge.fact);
+                if (discovery_fact != nullptr && discovery_fact->discovery_key > 0U) {
+                    discovered_keys.insert(discovery_fact->discovery_key);
+                }
+            }
+        }
+
+        for (const auto record_id : institution.preserved_record_ids) {
+            const auto record_it = record_by_id.find(record_id);
+            if (record_it == record_by_id.end() || record_it->second == nullptr) {
+                continue;
+            }
+            const auto event_it = event_by_id.find(record_it->second->source_event_id);
+            if (event_it == event_by_id.end() || event_it->second == nullptr) {
+                continue;
+            }
+            if (event_it->second->type != EventType::DiscoveryMade) {
+                continue;
+            }
+
+            const auto* discovery_payload = std::get_if<DiscoveryMadeEventPayload>(&event_it->second->payload);
+            if (discovery_payload != nullptr && discovery_payload->discovery_key > 0U) {
+                discovered_keys.insert(discovery_payload->discovery_key);
+            }
+        }
+
+        institution.preserved_discovery_keys.clear();
+        institution.preserved_discovery_keys.reserve(discovered_keys.size());
+        for (const auto key : discovered_keys) {
+            institution.preserved_discovery_keys.push_back(key);
+        }
+        std::sort(institution.preserved_discovery_keys.begin(), institution.preserved_discovery_keys.end());
+
+        std::unordered_set<EventId> preserved_record_source_events;
+        for (const auto record_id : institution.preserved_record_ids) {
+            const auto record_it = record_by_id.find(record_id);
+            if (record_it != record_by_id.end() && record_it->second != nullptr) {
+                preserved_record_source_events.insert(record_it->second->source_event_id);
+            }
+        }
+
+        struct InstitutionSourceCandidate {
+            PersonId speaker_id{};
+            MemoryId speaker_memory_id{};
+            EventId source_event_id{};
+            std::uint32_t confidence_per_10k{};
+            std::optional<std::uint32_t> discovery_key{};
+        };
+
+        std::vector<InstitutionSourceCandidate> source_candidates;
+        for (const auto member_id : institution.member_ids) {
+            auto member_knowledge = knowledge_for_person(member_id);
+            std::sort(member_knowledge.begin(), member_knowledge.end(), [](const AgentKnowledge& lhs, const AgentKnowledge& rhs) {
+                return lhs.id < rhs.id;
+            });
+
+            for (const auto& knowledge : member_knowledge) {
+                if (knowledge.confidence_per_10k == 0U || knowledge.source_memory_id == 0U) {
+                    continue;
+                }
+
+                const auto source_memory_it = memory_by_id.find(knowledge.source_memory_id);
+                if (source_memory_it == memory_by_id.end() || source_memory_it->second == nullptr) {
+                    continue;
+                }
+                const auto* source_memory = source_memory_it->second;
+                if (source_memory->owner_id != member_id || source_memory->source_event_id == 0U) {
+                    continue;
+                }
+
+                bool include = false;
+                std::optional<std::uint32_t> discovery_key = std::nullopt;
+                if (const auto* discovery_fact = std::get_if<BasicDiscoveryKnowledgeFact>(&knowledge.fact); discovery_fact != nullptr) {
+                    if (std::binary_search(
+                            institution.preserved_discovery_keys.begin(),
+                            institution.preserved_discovery_keys.end(),
+                            discovery_fact->discovery_key)) {
+                        include = true;
+                        discovery_key = discovery_fact->discovery_key;
+                    }
+                }
+
+                if (!include && preserved_record_source_events.contains(source_memory->source_event_id)) {
+                    include = true;
+                }
+
+                if (!include) {
+                    continue;
+                }
+
+                source_candidates.push_back(InstitutionSourceCandidate{
+                    .speaker_id = member_id,
+                    .speaker_memory_id = knowledge.source_memory_id,
+                    .source_event_id = source_memory->source_event_id,
+                    .confidence_per_10k = knowledge.confidence_per_10k,
+                    .discovery_key = discovery_key,
+                });
+            }
+        }
+
+        if (source_candidates.empty()) {
+            continue;
+        }
+
+        std::sort(source_candidates.begin(), source_candidates.end(), [](const InstitutionSourceCandidate& lhs, const InstitutionSourceCandidate& rhs) {
+            if (lhs.speaker_memory_id != rhs.speaker_memory_id) {
+                return lhs.speaker_memory_id < rhs.speaker_memory_id;
+            }
+            return lhs.speaker_id < rhs.speaker_id;
+        });
+        source_candidates.erase(
+            std::unique(source_candidates.begin(), source_candidates.end(), [](const InstitutionSourceCandidate& lhs, const InstitutionSourceCandidate& rhs) {
+                return lhs.speaker_memory_id == rhs.speaker_memory_id && lhs.speaker_id == rhs.speaker_id;
+            }),
+            source_candidates.end());
+
+        std::unordered_set<PersonId> member_ids;
+        member_ids.reserve(institution.member_ids.size());
+        for (const auto member_id : institution.member_ids) {
+            member_ids.insert(member_id);
+        }
+
+        std::vector<PersonId> recipient_candidates;
+        for (const auto& person : state_.people) {
+            if (!person.alive || person.household_id == 0U || member_ids.contains(person.id)) {
+                continue;
+            }
+
+            const auto household_it = settlement_by_household.find(person.household_id);
+            if (household_it == settlement_by_household.end() || household_it->second != institution.settlement_id) {
+                continue;
+            }
+            recipient_candidates.push_back(person.id);
+        }
+
+        if (recipient_candidates.empty()) {
+            continue;
+        }
+        std::sort(recipient_candidates.begin(), recipient_candidates.end());
+
+        const auto source_seed = derive_seed(
+            settlement_seed(institution.settlement_id),
+            SeedDomain::InstitutionTeachingSourceSelection,
+            demographic_year ^ institution.id);
+        const auto source_index = static_cast<std::size_t>(seed_random_bounded(source_seed, source_candidates.size()));
+        const auto& selected_source = source_candidates[source_index];
+
+        std::vector<PersonId> eligible_recipients;
+        eligible_recipients.reserve(recipient_candidates.size());
+        for (const auto recipient_id : recipient_candidates) {
+            if (selected_source.discovery_key.has_value() &&
+                knows_basic_discovery(recipient_id, *selected_source.discovery_key)) {
+                continue;
+            }
+
+            if (transmission_semantic_keys_.contains(TransmissionSemanticKey{
+                    .recipient_id = recipient_id,
+                    .speaker_memory_id = selected_source.speaker_memory_id,
+                })) {
+                continue;
+            }
+            eligible_recipients.push_back(recipient_id);
+        }
+
+        if (eligible_recipients.empty()) {
+            continue;
+        }
+
+        const auto recipient_seed = derive_seed(
+            settlement_seed(institution.settlement_id),
+            SeedDomain::InstitutionTeachingRecipientSelection,
+            (demographic_year * 1'000'003ULL) ^ institution.id ^ selected_source.speaker_memory_id);
+        const auto recipient_index = static_cast<std::size_t>(seed_random_bounded(recipient_seed, eligible_recipients.size()));
+        const auto recipient_id = eligible_recipients[recipient_index];
+
+        const auto speaker_it = person_by_id.find(selected_source.speaker_id);
+        const auto recipient_it = person_by_id.find(recipient_id);
+        if (speaker_it == person_by_id.end() || recipient_it == person_by_id.end() ||
+            speaker_it->second == nullptr || recipient_it->second == nullptr) {
+            continue;
+        }
+
+        const auto speaker_household_it = household_by_id.find(speaker_it->second->household_id);
+        const auto recipient_household_it = household_by_id.find(recipient_it->second->household_id);
+        if (speaker_household_it == household_by_id.end() || recipient_household_it == household_by_id.end() ||
+            speaker_household_it->second == nullptr || recipient_household_it->second == nullptr) {
+            continue;
+        }
+
+        const auto confidence = std::min<std::uint32_t>(
+            selected_source.confidence_per_10k,
+            kInstitutionTeachingConfidenceCapPer10k);
+        const auto recipient_memory_id = append_memory(AgentMemory{
+            .id = 0,
+            .owner_id = recipient_id,
+            .acquired_at = state_.time,
+            .source = MemorySource::Teaching,
+            .source_event_id = selected_source.source_event_id,
+            .confidence_per_10k = confidence,
+        });
+
+        append_knowledge_transmission(KnowledgeTransmission{
+            .id = 0,
+            .speaker_id = selected_source.speaker_id,
+            .recipient_id = recipient_id,
+            .speaker_household_id = speaker_household_it->second->id,
+            .recipient_household_id = recipient_household_it->second->id,
+            .speaker_settlement_id = institution.settlement_id,
+            .recipient_settlement_id = institution.settlement_id,
+            .transmitted_at = state_.time,
+            .method = CommunicationMethod::Teaching,
+            .speaker_memory_id = selected_source.speaker_memory_id,
+            .recipient_memory_id = recipient_memory_id,
+            .confidence_per_10k = confidence,
+        });
+    }
+}
+
 void Simulation::process_knowledge_loss(const std::uint64_t demographic_year) {
     std::unordered_map<MemoryId, const AgentMemory*> memory_by_id;
     memory_by_id.reserve(state_.agent_memories.size());
@@ -2086,6 +2795,10 @@ CommunicationId Simulation::next_communication_id() noexcept {
 
 RecordId Simulation::next_record_id() noexcept {
     return next_record_id_++;
+}
+
+InstitutionId Simulation::next_institution_id() noexcept {
+    return next_institution_id_++;
 }
 
 SimulationSeed Simulation::root_seed() const noexcept {
@@ -3610,6 +4323,42 @@ EventId Simulation::emit_settlement_extinct_event(const SettlementId settlement_
     return event_id;
 }
 
+EventId Simulation::emit_discovery_made_event(
+    const std::uint32_t discovery_key,
+    const PersonId discoverer_id,
+    const SettlementId settlement_id) {
+    const auto event_id = append_event(SimulationEvent{
+        .id = 0,
+        .timestamp = state_.time,
+        .type = EventType::DiscoveryMade,
+        .payload = DiscoveryMadeEventPayload{
+            .discovery_key = discovery_key,
+            .discoverer_id = discoverer_id,
+            .settlement_id = settlement_id,
+        },
+    });
+    return event_id;
+}
+
+EventId Simulation::emit_institution_founded_event(
+    const InstitutionId institution_id,
+    const InstitutionKind kind,
+    const SettlementId settlement_id,
+    const PersonId founder_id) {
+    const auto event_id = append_event(SimulationEvent{
+        .id = 0,
+        .timestamp = state_.time,
+        .type = EventType::InstitutionFounded,
+        .payload = InstitutionFoundedEventPayload{
+            .institution_id = institution_id,
+            .kind = kind,
+            .settlement_id = settlement_id,
+            .founder_id = founder_id,
+        },
+    });
+    return event_id;
+}
+
 MemoryId Simulation::append_memory(AgentMemory memory) {
     if (memory.owner_id == 0U || memory.source_event_id == 0U) {
         throw std::invalid_argument("Agent memory owner and source event ids must be non-zero");
@@ -4034,6 +4783,22 @@ void Simulation::derive_knowledge_from_memory(const AgentMemory& memory) {
             }},
             KnowledgeFactKind::SettlementStatus,
             payload.settlement_id,
+            0U);
+        return;
+    }
+
+    if (source_event.type == EventType::DiscoveryMade) {
+        const auto& payload = std::get<DiscoveryMadeEventPayload>(source_event.payload);
+        upsert_knowledge(
+            memory.owner_id,
+            memory.acquired_at,
+            memory.id,
+            memory.confidence_per_10k,
+            KnowledgeFact{BasicDiscoveryKnowledgeFact{
+                .discovery_key = payload.discovery_key,
+            }},
+            KnowledgeFactKind::BasicDiscovery,
+            payload.discovery_key,
             0U);
         return;
     }

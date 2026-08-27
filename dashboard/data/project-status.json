@@ -1,18 +1,18 @@
 {
   "project": "UniverseCore",
-  "as_of": "2026-08-26",
-  "current_phase": "Milestone 2: Civilization systems (active)",
-  "current_task": "Milestone 2 basic discoveries foundation",
-  "next_task": "Milestone 2 institutions foundation",
+  "as_of": "2026-08-27",
+  "current_phase": "Milestone 3 planning (active)",
+  "current_task": "Milestone 3 planning",
+  "next_task": "Milestone 3 economy and settlement growth",
   "build": {
     "canonical_workflow": "podman scripts/container-test.sh",
-    "last_verified": "2026-08-26",
+    "last_verified": "2026-08-27",
     "status": "passing",
-    "notes": "Verified in universecore-dev container with canonical build/test plus UI smoke coverage (container and native Windows UI); re-verified after Milestone 2 knowledge-loss foundation with snapshot schema v13"
+    "notes": "Verified in universecore-dev container with canonical build/test plus UI smoke coverage (container and native Windows UI); re-verified after Milestone 2 institutions foundation with snapshot schema v15"
   },
   "progress": {
-    "simulation_foundation_percent": 99,
-    "bronze_age_simulator_percent": 40,
+    "simulation_foundation_percent": 100,
+    "bronze_age_simulator_percent": 45,
     "playable_vertical_slice_percent": 7,
     "full_game_vision_percent": 1,
     "note": "Percentages are approximate planning estimates, not objective measurements."
@@ -81,8 +81,8 @@
     {
       "id": "M2",
       "name": "Civilization Systems",
-      "status": "in-progress",
-      "percent": 74
+      "status": "complete",
+      "percent": 100
     },
     {
       "id": "UE",
@@ -109,17 +109,18 @@
       "Milestone 2 communication/teaching foundation",
       "Milestone 2 records foundation",
       "Milestone 2 knowledge loss foundation",
-      "Snapshot schema v13 and validation",
+      "Milestone 2 basic discoveries foundation",
+      "Milestone 2 institutions foundation",
+      "Snapshot schema v15 and validation",
       "Canonical Podman build/test workflow",
       "Development dashboard + deployment workflow"
     ],
     "active": [
-      "Milestone 2 basic discoveries foundation"
+      "Milestone 3 planning"
     ],
     "planned": [
       "Milestone 1 migration implementation (designed/deferred)",
       "Milestone 1 long-horizon viability extension (deferred follow-up)",
-      "Milestone 2 persistent history and knowledge systems",
       "Milestone 3 economy and settlement growth"
     ]
   },

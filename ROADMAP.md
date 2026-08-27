@@ -87,7 +87,7 @@ Status: **complete**
 
 ## Milestone 2: Persistent history and knowledge
 
-Status: **active**
+Status: **complete**
 
 - [x] event journal
 - [x] agent memory
@@ -95,8 +95,8 @@ Status: **active**
 - [x] communication/teaching
 - [x] records
 - [x] knowledge loss
-- [ ] basic discoveries
-- [ ] institutions
+- [x] basic discoveries
+- [x] institutions
 
 Exit criteria: a discovery can originate with one person, spread through part of a population, survive or disappear, and be traced historically.
 

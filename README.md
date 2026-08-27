@@ -22,12 +22,14 @@ The project deliberately starts without Unreal Engine. The initial objective is 
 - Age-dependent mortality/fertility
 - Scheduled yearly demography on canonical time boundaries
 - Timestamped canonical append-only event journal
-- Typed event payloads for `Birth`, `Death`, `SettlementFounded`, and `SettlementExtinct`
+- Typed event payloads for `Birth`, `Death`, `SettlementFounded`, `SettlementExtinct`, and `DiscoveryMade`
 - Canonical deterministic agent memory foundation (person-specific direct observation with event provenance)
 - Canonical deterministic agent knowledge state foundation (typed per-person structured facts derived from observed memories with provenance)
 - Canonical deterministic communication/teaching transmission (local same-settlement propagation with provenance-preserving memory chains)
 - Canonical deterministic persistent records (settlement-local authored record artifacts with deterministic delayed reading provenance)
 - Canonical deterministic long-horizon knowledge loss (confidence decay and soft forgetting for stale knowledge)
+- Canonical deterministic basic discoveries (settlement-local discovery events with memory/knowledge provenance)
+- Canonical deterministic institutions (settlement-local founding/membership/preservation/teaching with provenance)
 - Versioned deterministic canonical snapshots
 - Deterministic household food production/storage/consumption
 - Deterministic regional environment resources (finite productive capacity + renewable wild stock)
@@ -43,7 +45,7 @@ The project deliberately starts without Unreal Engine. The initial objective is 
 - Optional SDL3 + Dear ImGui simulation inspector (`UNIVERSECORE_BUILD_UI=ON`)
 - UI command/query adapter over canonical simulation state
 - UI smoke test validating deterministic advance/save/load behavior
-- Snapshot schema v13 with deterministic typed-event/material/environment/inventory/tool-durability/agent-memory/agent-knowledge/knowledge-transmission/record persistence/validation
+- Snapshot schema v15 with deterministic typed-event/material/environment/inventory/tool-durability/agent-memory/agent-knowledge/knowledge-transmission/record/institution persistence/validation
 - Reproducibility tests
 - No engine dependency
 

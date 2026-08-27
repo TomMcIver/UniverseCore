@@ -148,6 +148,7 @@ public:
     [[nodiscard]] std::span<const AgentMemory> agent_memories() const noexcept;
     [[nodiscard]] std::span<const KnowledgeTransmission> knowledge_transmissions() const noexcept;
     [[nodiscard]] std::span<const KnowledgeRecord> knowledge_records() const noexcept;
+    [[nodiscard]] std::span<const Institution> institutions() const noexcept;
     [[nodiscard]] std::vector<AgentMemory> memories_for_person(PersonId person_id) const;
     [[nodiscard]] std::vector<KnowledgeTransmission> transmissions_for_recipient(PersonId person_id) const;
     [[nodiscard]] std::optional<KnowledgeTransmission> transmission_for_memory(MemoryId recipient_memory_id) const;

@@ -82,6 +82,8 @@ struct UiState {
     bool show_death_events{true};
     bool show_settlement_founded_events{true};
     bool show_settlement_extinct_events{true};
+    bool show_discovery_events{true};
+    bool show_institution_founded_events{true};
 
     UiHistory history{};
 };
@@ -140,6 +142,10 @@ struct UiState {
             return "SettlementFounded";
         case EventType::SettlementExtinct:
             return "SettlementExtinct";
+        case EventType::DiscoveryMade:
+            return "DiscoveryMade";
+        case EventType::InstitutionFounded:
+            return "InstitutionFounded";
     }
     return "Unknown";
 }
@@ -202,6 +208,8 @@ struct UiState {
             return "PersonHousehold";
         case KnowledgeFactKind::SettlementStatus:
             return "SettlementStatus";
+        case KnowledgeFactKind::BasicDiscovery:
+            return "BasicDiscovery";
     }
     return "Unknown";
 }
@@ -215,6 +223,9 @@ struct UiState {
     }
     if (std::holds_alternative<universe::SettlementStatusKnowledgeFact>(fact)) {
         return KnowledgeFactKind::SettlementStatus;
+    }
+    if (std::holds_alternative<universe::BasicDiscoveryKnowledgeFact>(fact)) {
+        return KnowledgeFactKind::BasicDiscovery;
     }
     throw std::invalid_argument("Unknown knowledge fact variant");
 }
@@ -543,6 +554,7 @@ int main(int argc, char** argv) {
         const auto people = controller.people();
         const auto events = controller.events();
         const auto memories = controller.agent_memories();
+        const auto institutions = controller.institutions();
 
         std::unordered_map<MemoryId, const AgentMemory*> memory_by_id;
         memory_by_id.reserve(memories.size());
@@ -874,6 +886,9 @@ int main(int argc, char** argv) {
                         } else if (const auto* settlement = std::get_if<universe::SettlementStatusKnowledgeFact>(&knowledge.fact); settlement != nullptr) {
                             subject = "Settlement #" + std::to_string(settlement->settlement_id);
                             state_label = "Region #" + std::to_string(settlement->region_id) + (settlement->active ? " Active" : " Inactive");
+                        } else if (const auto* discovery = std::get_if<universe::BasicDiscoveryKnowledgeFact>(&knowledge.fact); discovery != nullptr) {
+                            subject = "Discovery #" + std::to_string(discovery->discovery_key);
+                            state_label = "Known";
                         }
 
                         ImGui::TableNextRow();
@@ -930,6 +945,26 @@ int main(int argc, char** argv) {
         ImGui::Columns(1);
         ImGui::EndChild();
 
+        ImGui::BeginChild("institutions", ImVec2(0, 170), true);
+        ImGui::Text("Institutions");
+        if (institutions.empty()) {
+            ImGui::TextUnformatted("None");
+        } else {
+            for (const auto& institution : institutions) {
+                ImGui::Separator();
+                ImGui::Text("Institution #%llu", static_cast<unsigned long long>(institution.id));
+                ImGui::Text("Type: %s", institution.kind == universe::InstitutionKind::KnowledgeKeeper ? "Knowledge Keeper" : "Unknown");
+                ImGui::Text("Settlement: #%llu", static_cast<unsigned long long>(institution.settlement_id));
+                ImGui::Text("Founder: Person #%llu", static_cast<unsigned long long>(institution.founder_id));
+                ImGui::Text("Founded: Year %llu", static_cast<unsigned long long>(universe::DemographicCalendarAdapter::demographic_year(institution.founded_at)));
+                ImGui::Text("State: %s", institution.active ? "active" : "inactive");
+                ImGui::Text("Members: %llu", static_cast<unsigned long long>(institution.member_ids.size()));
+                ImGui::Text("Preserved Records: %llu", static_cast<unsigned long long>(institution.preserved_record_ids.size()));
+                ImGui::Text("Preserved Discoveries: %llu", static_cast<unsigned long long>(institution.preserved_discovery_keys.size()));
+            }
+        }
+        ImGui::EndChild();
+
         ImGui::BeginChild("events", ImVec2(0, 190), true);
         ImGui::Text("Event Log");
         ImGui::Checkbox("Birth", &ui.show_birth_events);
@@ -939,6 +974,10 @@ int main(int argc, char** argv) {
         ImGui::Checkbox("SettlementFounded", &ui.show_settlement_founded_events);
         ImGui::SameLine();
         ImGui::Checkbox("SettlementExtinct", &ui.show_settlement_extinct_events);
+        ImGui::SameLine();
+        ImGui::Checkbox("DiscoveryMade", &ui.show_discovery_events);
+        ImGui::SameLine();
+        ImGui::Checkbox("InstitutionFounded", &ui.show_institution_founded_events);
 
         if (ImGui::BeginTable("event_table", 6, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY, ImVec2(0, 140))) {
             ImGui::TableSetupColumn("EventId");
@@ -961,6 +1000,12 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 if (event.type == universe::EventType::SettlementExtinct && !ui.show_settlement_extinct_events) {
+                    continue;
+                }
+                if (event.type == universe::EventType::DiscoveryMade && !ui.show_discovery_events) {
+                    continue;
+                }
+                if (event.type == universe::EventType::InstitutionFounded && !ui.show_institution_founded_events) {
                     continue;
                 }
 
@@ -993,6 +1038,16 @@ int main(int argc, char** argv) {
                     if (ImGui::SmallButton(("S " + std::to_string(payload.settlement_id) + "##evt" + std::to_string(event.id)).c_str())) {
                         ui.selected_settlement = payload.settlement_id;
                     }
+                } else if (event.type == universe::EventType::DiscoveryMade) {
+                    const auto& payload = std::get<universe::DiscoveryMadeEventPayload>(event.payload);
+                    if (ImGui::SmallButton(("Person " + std::to_string(payload.discoverer_id) + "##evt" + std::to_string(event.id)).c_str())) {
+                        ui.selected_person = payload.discoverer_id;
+                    }
+                } else if (event.type == universe::EventType::InstitutionFounded) {
+                    const auto& payload = std::get<universe::InstitutionFoundedEventPayload>(event.payload);
+                    if (ImGui::SmallButton(("Person " + std::to_string(payload.founder_id) + "##evt" + std::to_string(event.id)).c_str())) {
+                        ui.selected_person = payload.founder_id;
+                    }
                 }
 
                 ImGui::TableSetColumnIndex(4);
@@ -1005,6 +1060,16 @@ int main(int argc, char** argv) {
                     const auto& payload = std::get<universe::DeathEventPayload>(event.payload);
                     if (ImGui::SmallButton(("H " + std::to_string(payload.household_id) + "##evt" + std::to_string(event.id)).c_str())) {
                         ui.selected_household = payload.household_id;
+                    }
+                } else if (event.type == universe::EventType::DiscoveryMade) {
+                    const auto& payload = std::get<universe::DiscoveryMadeEventPayload>(event.payload);
+                    if (ImGui::SmallButton(("S " + std::to_string(payload.settlement_id) + "##evt" + std::to_string(event.id)).c_str())) {
+                        ui.selected_settlement = payload.settlement_id;
+                    }
+                } else if (event.type == universe::EventType::InstitutionFounded) {
+                    const auto& payload = std::get<universe::InstitutionFoundedEventPayload>(event.payload);
+                    if (ImGui::SmallButton(("S " + std::to_string(payload.settlement_id) + "##evt" + std::to_string(event.id)).c_str())) {
+                        ui.selected_settlement = payload.settlement_id;
                     }
                 }
 
@@ -1024,6 +1089,12 @@ int main(int argc, char** argv) {
                 } else if (event.type == universe::EventType::SettlementExtinct) {
                     const auto& payload = std::get<universe::SettlementExtinctEventPayload>(event.payload);
                     ImGui::TextUnformatted(("region=" + std::to_string(payload.region_id)).c_str());
+                } else if (event.type == universe::EventType::DiscoveryMade) {
+                    const auto& payload = std::get<universe::DiscoveryMadeEventPayload>(event.payload);
+                    ImGui::TextUnformatted(("discovery=" + std::to_string(payload.discovery_key)).c_str());
+                } else if (event.type == universe::EventType::InstitutionFounded) {
+                    const auto& payload = std::get<universe::InstitutionFoundedEventPayload>(event.payload);
+                    ImGui::TextUnformatted(("institution=" + std::to_string(payload.institution_id)).c_str());
                 }
             }
 

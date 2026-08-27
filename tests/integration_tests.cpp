@@ -28,10 +28,37 @@ const universe::Person* find_person(const universe::WorldState& state, const uni
     return nullptr;
 }
 
+const universe::Household* find_household(const universe::WorldState& state, const universe::HouseholdId id) {
+    for (const auto& household : state.households) {
+        if (household.id == id) {
+            return &household;
+        }
+    }
+    return nullptr;
+}
+
 const universe::SimulationEvent* find_event(const universe::WorldState& state, const universe::EventId id) {
     for (const auto& event : state.event_log) {
         if (event.id == id) {
             return &event;
+        }
+    }
+    return nullptr;
+}
+
+const universe::KnowledgeRecord* find_record_by_id(const universe::WorldState& state, const universe::RecordId id) {
+    for (const auto& record : state.knowledge_records) {
+        if (record.id == id) {
+            return &record;
+        }
+    }
+    return nullptr;
+}
+
+const universe::Institution* find_institution(const universe::WorldState& state, const universe::InstitutionId id) {
+    for (const auto& institution : state.institutions) {
+        if (institution.id == id) {
+            return &institution;
         }
     }
     return nullptr;
@@ -205,6 +232,10 @@ void verify_event_payload_types(const universe::WorldState& state) {
             require(std::holds_alternative<universe::SettlementFoundedEventPayload>(event.payload), "founded payload must match event type");
         } else if (event.type == universe::EventType::SettlementExtinct) {
             require(std::holds_alternative<universe::SettlementExtinctEventPayload>(event.payload), "extinct payload must match event type");
+        } else if (event.type == universe::EventType::DiscoveryMade) {
+            require(std::holds_alternative<universe::DiscoveryMadeEventPayload>(event.payload), "discovery payload must match event type");
+        } else if (event.type == universe::EventType::InstitutionFounded) {
+            require(std::holds_alternative<universe::InstitutionFoundedEventPayload>(event.payload), "institution founded payload must match event type");
         }
     }
 }
@@ -772,6 +803,239 @@ int main() {
         }
 
         require(decay_or_forget_observed, "stale knowledge should decay or be forgotten over long horizons");
+    }
+
+    {
+        universe::Simulation discovery_run{config};
+        discovery_run.run_years(260);
+
+        const auto& state = discovery_run.state();
+        std::unordered_set<std::uint32_t> discovered_keys;
+        std::uint64_t discovery_event_count = 0;
+        bool settlement_locality_verified = false;
+
+        for (const auto& event : state.event_log) {
+            if (event.type != universe::EventType::DiscoveryMade) {
+                continue;
+            }
+
+            ++discovery_event_count;
+            const auto& payload = std::get<universe::DiscoveryMadeEventPayload>(event.payload);
+            require(payload.discovery_key > 0U, "discovery event key must be non-zero");
+            require(payload.discoverer_id > 0U, "discovery discoverer id must be non-zero");
+            require(payload.settlement_id > 0U, "discovery settlement id must be non-zero");
+            require(discovered_keys.insert(payload.discovery_key).second, "discovery keys must be globally unique");
+
+            const auto* discoverer = find_person(state, payload.discoverer_id);
+            require(discoverer != nullptr, "discovery discoverer must exist");
+            const auto* household = find_household(state, discoverer->household_id);
+            require(household != nullptr, "discovery discoverer household must exist");
+            require(household->settlement_id == payload.settlement_id, "discovery discoverer must belong to event settlement");
+
+            require(
+                discovery_run.person_remembers_event(payload.discoverer_id, event.id),
+                "discoverer must directly remember own discovery event");
+
+            settlement_locality_verified = true;
+        }
+
+        require(discovery_event_count > 0U, "basic discoveries milestone should produce at least one discovery event");
+        require(settlement_locality_verified, "discovery events must preserve discoverer settlement locality");
+    }
+
+    {
+        universe::Simulation institutions_a{config};
+        universe::Simulation institutions_b{config};
+        institutions_a.run_years(320);
+        institutions_b.run_years(320);
+
+        const auto& a = institutions_a.state();
+        const auto& b = institutions_b.state();
+        require(!a.institutions.empty(), "institutions milestone should produce at least one institution");
+        require(a.institutions == b.institutions, "same-seed institution state must be deterministic");
+
+        std::unordered_map<universe::InstitutionId, const universe::InstitutionFoundedEventPayload*> founded_event_by_institution;
+        for (const auto& event : a.event_log) {
+            if (event.type != universe::EventType::InstitutionFounded) {
+                continue;
+            }
+            const auto& payload = std::get<universe::InstitutionFoundedEventPayload>(event.payload);
+            founded_event_by_institution.emplace(payload.institution_id, &payload);
+        }
+
+        bool nonlocal_membership_verified = false;
+        bool dead_member_pruned_verified = false;
+        bool stale_knowledge_transfer_verified = false;
+
+        for (const auto& institution : a.institutions) {
+            require(institution.id > 0U, "institution id must be non-zero");
+            require(institution.kind == universe::InstitutionKind::KnowledgeKeeper, "institution kind must be knowledge keeper");
+            require(institution.settlement_id > 0U, "institution settlement id must be non-zero");
+            require(institution.founder_id > 0U, "institution founder must be non-zero");
+            require(institution.founded_at.ticks <= a.time.ticks, "institution founded time must be in timeline");
+
+            const auto founded_it = founded_event_by_institution.find(institution.id);
+            require(founded_it != founded_event_by_institution.end(), "institution must have founded event");
+            require(founded_it->second->settlement_id == institution.settlement_id, "institution founded event settlement must match institution");
+            require(founded_it->second->founder_id == institution.founder_id, "institution founded event founder must match institution");
+
+            std::unordered_set<universe::PersonId> member_ids;
+            for (const auto member_id : institution.member_ids) {
+                require(member_ids.insert(member_id).second, "institution members must be unique");
+                const auto* member = find_person(a, member_id);
+                require(member != nullptr, "institution member must exist");
+                require(member->alive, "institution active members must be alive");
+                const auto* household = find_household(a, member->household_id);
+                require(household != nullptr, "institution member household must exist");
+                require(household->settlement_id == institution.settlement_id, "institution members must remain local to institution settlement");
+                nonlocal_membership_verified = true;
+            }
+
+            if (institution.active) {
+                require(institution.member_ids.size() >= 3U, "active institution should keep minimum membership");
+            }
+
+            if (!institution.preserved_record_ids.empty()) {
+                for (const auto record_id : institution.preserved_record_ids) {
+                    const auto* record = find_record_by_id(a, record_id);
+                    require(record != nullptr, "institution preserved record must exist");
+                    require(record->settlement_id == institution.settlement_id, "institution preserved record must be local to settlement");
+                }
+            }
+
+            for (const auto discovery_key : institution.preserved_discovery_keys) {
+                require(discovery_key > 0U, "institution preserved discovery key must be non-zero");
+
+                bool has_member_provenance = false;
+                for (const auto member_id : institution.member_ids) {
+                    if (institutions_a.knows_basic_discovery(member_id, discovery_key)) {
+                        has_member_provenance = true;
+                        break;
+                    }
+                }
+
+                bool has_record_provenance = false;
+                for (const auto record_id : institution.preserved_record_ids) {
+                    const auto* record = find_record_by_id(a, record_id);
+                    if (record == nullptr) {
+                        continue;
+                    }
+                    const auto* source_event = find_event(a, record->source_event_id);
+                    if (source_event == nullptr || source_event->type != universe::EventType::DiscoveryMade) {
+                        continue;
+                    }
+                    const auto& payload = std::get<universe::DiscoveryMadeEventPayload>(source_event->payload);
+                    if (payload.discovery_key == discovery_key) {
+                        has_record_provenance = true;
+                        break;
+                    }
+                }
+
+                require(
+                    has_member_provenance || has_record_provenance,
+                    "institution preserved discoveries must come from local member knowledge or preserved records, not world omniscience");
+            }
+        }
+
+        std::unordered_set<universe::PersonId> dead_people;
+        for (const auto& person : a.people) {
+            if (!person.alive) {
+                dead_people.insert(person.id);
+            }
+        }
+        for (const auto& institution : a.institutions) {
+            for (const auto member_id : institution.member_ids) {
+                require(!dead_people.contains(member_id), "dead people must not remain active institution members");
+                dead_member_pruned_verified = true;
+            }
+        }
+
+        for (const auto& transmission : a.knowledge_transmissions) {
+            if (transmission.method != universe::CommunicationMethod::Teaching) {
+                continue;
+            }
+
+            const auto* speaker = find_person(a, transmission.speaker_id);
+            const auto* recipient = find_person(a, transmission.recipient_id);
+            if (speaker == nullptr || recipient == nullptr) {
+                continue;
+            }
+
+            const auto* speaker_household = find_household(a, speaker->household_id);
+            const auto* recipient_household = find_household(a, recipient->household_id);
+            if (speaker_household == nullptr || recipient_household == nullptr) {
+                continue;
+            }
+
+            if (speaker_household->settlement_id != recipient_household->settlement_id) {
+                continue;
+            }
+
+            bool institution_member_speaker = false;
+            for (const auto& institution : a.institutions) {
+                if (!institution.active || institution.settlement_id != speaker_household->settlement_id) {
+                    continue;
+                }
+                if (std::find(institution.member_ids.begin(), institution.member_ids.end(), speaker->id) != institution.member_ids.end()) {
+                    institution_member_speaker = true;
+                    break;
+                }
+            }
+            if (!institution_member_speaker) {
+                continue;
+            }
+
+            const auto* recipient_memory = find_memory(a, transmission.recipient_memory_id);
+            const auto* source_event = recipient_memory == nullptr ? nullptr : find_event(a, recipient_memory->source_event_id);
+            if (source_event == nullptr || source_event->type != universe::EventType::Birth) {
+                continue;
+            }
+
+            const auto& birth_payload = std::get<universe::BirthEventPayload>(source_event->payload);
+            const universe::SimulationEvent* death_event = nullptr;
+            for (const auto& event : a.event_log) {
+                if (event.type != universe::EventType::Death) {
+                    continue;
+                }
+                const auto& death_payload = std::get<universe::DeathEventPayload>(event.payload);
+                if (death_payload.person_id == birth_payload.child_id) {
+                    death_event = &event;
+                    break;
+                }
+            }
+            if (death_event == nullptr || death_event->timestamp >= transmission.transmitted_at) {
+                continue;
+            }
+
+            if (institutions_a.person_remembers_event(transmission.speaker_id, death_event->id)) {
+                continue;
+            }
+
+            const auto speaker_view = institutions_a.known_life_status(transmission.speaker_id, birth_payload.child_id);
+            const auto recipient_view = institutions_a.known_life_status(transmission.recipient_id, birth_payload.child_id);
+            if (speaker_view.has_value() && recipient_view.has_value() &&
+                *speaker_view == universe::KnownLifeStatus::Alive &&
+                *recipient_view == universe::KnownLifeStatus::Alive) {
+                stale_knowledge_transfer_verified = true;
+                break;
+            }
+        }
+
+        require(nonlocal_membership_verified, "institution membership locality should be verified");
+        require(dead_member_pruned_verified, "institution membership pruning on death should be verified");
+        require(stale_knowledge_transfer_verified, "institution teaching should be able to preserve/transfer stale subjective knowledge");
+
+        const auto snapshot = institutions_a.save_snapshot();
+        universe::Simulation resumed{universe::SimulationConfig{.seed = 999U, .initial_population = 10U}};
+        const auto load_result = universe::Simulation::load_snapshot(snapshot, resumed);
+        require(load_result.ok, "institution snapshot should load");
+        resumed.run_years(40);
+
+        universe::Simulation continuous{config};
+        continuous.run_years(360);
+        require(
+            resumed.save_snapshot() == continuous.save_snapshot(),
+            "institution save/load continuation must remain deterministic and free of duplicate canonical artifacts");
     }
 
     {
