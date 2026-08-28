@@ -27,6 +27,7 @@ using CommunicationId = std::uint64_t;
 using RecordId = std::uint64_t;
 using InstitutionId = std::uint64_t;
 using BuildingId = std::uint64_t;
+using CohortId = std::uint64_t;
 
 enum class BiologicalSex : std::uint8_t {
     Female = 0,
@@ -40,6 +41,60 @@ enum class Occupation : std::uint8_t {
     WoodGatherer = 3,
     StoneExtractor = 4,
     CraftWorker = 5,
+};
+
+enum class SimulationDetailLevel : std::uint8_t {
+    Detailed = 0,
+    SettlementAggregate = 1,
+    RegionalCohort = 2,
+};
+
+enum class CohortAgeBand : std::uint8_t {
+    Child = 0,
+    YoungAdult = 1,
+    Adult = 2,
+    Senior = 3,
+};
+
+enum class CohortOccupationGroup : std::uint8_t {
+    Unspecified = 0,
+    Food = 1,
+    Materials = 2,
+    Craft = 3,
+};
+
+enum class CohortHealthBand : std::uint8_t {
+    Low = 0,
+    Medium = 1,
+    High = 2,
+};
+
+enum class CohortWealthBand : std::uint8_t {
+    Low = 0,
+    Medium = 1,
+    High = 2,
+};
+
+struct RegionLodState {
+    RegionId region_id{};
+    SimulationDetailLevel detail_level{SimulationDetailLevel::Detailed};
+
+    [[nodiscard]] bool operator==(const RegionLodState& other) const = default;
+};
+
+struct PopulationCohort {
+    CohortId id{};
+    RegionId region_id{};
+    SettlementId settlement_id{};
+    CohortAgeBand age_band{CohortAgeBand::Adult};
+    BiologicalSex sex{BiologicalSex::Female};
+    CohortOccupationGroup occupation_group{CohortOccupationGroup::Unspecified};
+    CohortHealthBand health_band{CohortHealthBand::Medium};
+    CohortWealthBand wealth_band{CohortWealthBand::Medium};
+    std::uint32_t knowledge_profile_id{};
+    std::uint64_t population{};
+
+    [[nodiscard]] bool operator==(const PopulationCohort& other) const = default;
 };
 
 struct Person {
@@ -457,6 +512,9 @@ struct WorldState {
     std::uint64_t active_projects{};
     std::int64_t total_exchange_volume{};
     std::int64_t total_transfer_volume{};
+    SimulationDetailLevel detail_level{SimulationDetailLevel::Detailed};
+    std::vector<RegionLodState> region_lod_states{};
+    std::vector<PopulationCohort> population_cohorts{};
     std::vector<Person> people{};
     std::vector<Household> households{};
     std::vector<RegionEnvironmentState> regions{};
@@ -643,6 +701,7 @@ private:
     RecordId next_record_id_{1};
     InstitutionId next_institution_id_{1};
     BuildingId next_building_id_{1};
+    CohortId next_cohort_id_{1};
     SimulationDuration demography_interval_{DemographicCalendarAdapter::year_duration()};
     SimulationTime demography_next_run_{DemographicCalendarAdapter::year_duration().ticks};
     SimulationDuration food_interval_{days(1)};

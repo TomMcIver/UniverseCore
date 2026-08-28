@@ -1057,6 +1057,9 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
     require(lhs.active_projects == rhs.active_projects, context);
     require(lhs.total_exchange_volume == rhs.total_exchange_volume, context);
     require(lhs.total_transfer_volume == rhs.total_transfer_volume, context);
+    require(lhs.detail_level == rhs.detail_level, context);
+    require(lhs.region_lod_states.size() == rhs.region_lod_states.size(), context);
+    require(lhs.population_cohorts.size() == rhs.population_cohorts.size(), context);
     require(lhs.people.size() == rhs.people.size(), context);
     require(lhs.households.size() == rhs.households.size(), context);
     require(lhs.regions.size() == rhs.regions.size(), context);
@@ -1069,6 +1072,28 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
     require(lhs.knowledge_record_accesses.size() == rhs.knowledge_record_accesses.size(), context);
     require(lhs.agent_knowledge.size() == rhs.agent_knowledge.size(), context);
     require(lhs.institutions.size() == rhs.institutions.size(), context);
+
+    for (std::size_t i = 0; i < lhs.region_lod_states.size(); ++i) {
+        const auto& a = lhs.region_lod_states[i];
+        const auto& b = rhs.region_lod_states[i];
+        require(a.region_id == b.region_id, context);
+        require(a.detail_level == b.detail_level, context);
+    }
+
+    for (std::size_t i = 0; i < lhs.population_cohorts.size(); ++i) {
+        const auto& a = lhs.population_cohorts[i];
+        const auto& b = rhs.population_cohorts[i];
+        require(a.id == b.id, context);
+        require(a.region_id == b.region_id, context);
+        require(a.settlement_id == b.settlement_id, context);
+        require(a.age_band == b.age_band, context);
+        require(a.sex == b.sex, context);
+        require(a.occupation_group == b.occupation_group, context);
+        require(a.health_band == b.health_band, context);
+        require(a.wealth_band == b.wealth_band, context);
+        require(a.knowledge_profile_id == b.knowledge_profile_id, context);
+        require(a.population == b.population, context);
+    }
 
     for (std::size_t i = 0; i < lhs.people.size(); ++i) {
         const auto& a = lhs.people[i];
@@ -2717,6 +2742,27 @@ int main() {
             malformed_lengths,
             universe::SnapshotErrorCode::InvalidStructure,
             "malformed collection lengths must be rejected");
+
+        constexpr std::size_t lod_tail_size = 25U;
+        require(valid.size() > lod_tail_size, "snapshot must include M4A LOD trailing fields");
+        const auto lod_next_cohort_id_offset = valid.size() - lod_tail_size;
+        const auto lod_detail_level_offset = lod_next_cohort_id_offset + 8U;
+
+        auto invalid_lod_detail_level = clone_bytes(valid);
+        invalid_lod_detail_level[lod_detail_level_offset] = std::byte{9};
+        refresh_snapshot_payload_hash(invalid_lod_detail_level);
+        require_snapshot_load_fails(
+            invalid_lod_detail_level,
+            universe::SnapshotErrorCode::InvalidEnum,
+            "invalid world LOD detail enum must be rejected");
+
+        auto invalid_next_cohort_id = clone_bytes(valid);
+        write_u64_le(invalid_next_cohort_id, lod_next_cohort_id_offset, 0U);
+        refresh_snapshot_payload_hash(invalid_next_cohort_id);
+        require_snapshot_load_fails(
+            invalid_next_cohort_id,
+            universe::SnapshotErrorCode::InvalidState,
+            "invalid next cohort id must be rejected");
     }
 
     {

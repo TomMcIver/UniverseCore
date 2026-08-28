@@ -31,7 +31,7 @@ struct SnapshotLoadResult {
 
 class SnapshotCodec {
 public:
-    static constexpr std::uint16_t kSchemaVersion = 16;
+    static constexpr std::uint16_t kSchemaVersion = 17;
 
     [[nodiscard]] static std::vector<std::byte> serialize(const Simulation& simulation);
     [[nodiscard]] static SnapshotLoadResult deserialize(std::span<const std::byte> data, Simulation& destination);

@@ -211,6 +211,10 @@ private:
     return id > 0U;
 }
 
+[[nodiscard]] bool is_valid_cohort_id(const CohortId id) noexcept {
+    return id > 0U;
+}
+
 struct DirectMemoryKey {
     PersonId owner_id{};
     EventId event_id{};
@@ -827,6 +831,56 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
         }
     }
 
+    payload.write_u64(simulation.next_cohort_id_);
+    payload.write_u8(static_cast<std::uint8_t>(simulation.state_.detail_level));
+
+    std::vector<const RegionLodState*> region_lod_order;
+    region_lod_order.reserve(simulation.state_.region_lod_states.size());
+    for (const auto& region_lod : simulation.state_.region_lod_states) {
+        region_lod_order.push_back(&region_lod);
+    }
+    std::sort(region_lod_order.begin(), region_lod_order.end(), [](const RegionLodState* lhs, const RegionLodState* rhs) {
+        if (lhs->region_id != rhs->region_id) {
+            return lhs->region_id < rhs->region_id;
+        }
+        return static_cast<std::uint8_t>(lhs->detail_level) < static_cast<std::uint8_t>(rhs->detail_level);
+    });
+
+    payload.write_u64(static_cast<std::uint64_t>(region_lod_order.size()));
+    for (const auto* region_lod : region_lod_order) {
+        payload.write_u64(region_lod->region_id);
+        payload.write_u8(static_cast<std::uint8_t>(region_lod->detail_level));
+    }
+
+    std::vector<const PopulationCohort*> cohort_order;
+    cohort_order.reserve(simulation.state_.population_cohorts.size());
+    for (const auto& cohort : simulation.state_.population_cohorts) {
+        cohort_order.push_back(&cohort);
+    }
+    std::sort(cohort_order.begin(), cohort_order.end(), [](const PopulationCohort* lhs, const PopulationCohort* rhs) {
+        if (lhs->region_id != rhs->region_id) {
+            return lhs->region_id < rhs->region_id;
+        }
+        if (lhs->settlement_id != rhs->settlement_id) {
+            return lhs->settlement_id < rhs->settlement_id;
+        }
+        return lhs->id < rhs->id;
+    });
+
+    payload.write_u64(static_cast<std::uint64_t>(cohort_order.size()));
+    for (const auto* cohort : cohort_order) {
+        payload.write_u64(cohort->id);
+        payload.write_u64(cohort->region_id);
+        payload.write_u64(cohort->settlement_id);
+        payload.write_u8(static_cast<std::uint8_t>(cohort->age_band));
+        payload.write_u8(static_cast<std::uint8_t>(cohort->sex));
+        payload.write_u8(static_cast<std::uint8_t>(cohort->occupation_group));
+        payload.write_u8(static_cast<std::uint8_t>(cohort->health_band));
+        payload.write_u8(static_cast<std::uint8_t>(cohort->wealth_band));
+        payload.write_u32(cohort->knowledge_profile_id);
+        payload.write_u64(cohort->population);
+    }
+
     auto payload_bytes = payload.take();
     const auto payload_hash = fnv1a64(payload_bytes);
 
@@ -900,6 +954,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     std::uint64_t next_record_id = 0;
     std::uint64_t next_institution_id = 0;
     std::uint64_t next_building_id = 0;
+    std::uint64_t next_cohort_id = 0;
     std::int64_t demography_interval_ticks = 0;
     std::int64_t demography_next_run_ticks = 0;
     std::int64_t food_interval_ticks = 0;
@@ -2204,6 +2259,113 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         restored_state.buildings.push_back(std::move(building));
     }
 
+    std::uint8_t detail_level_raw = 0;
+    if (!payload_reader.read_u64(next_cohort_id) ||
+        !payload_reader.read_u8(detail_level_raw)) {
+        return load_error(SnapshotErrorCode::TruncatedData, "Snapshot LOD fixed section is truncated");
+    }
+    if (detail_level_raw > static_cast<std::uint8_t>(SimulationDetailLevel::RegionalCohort)) {
+        return load_error(SnapshotErrorCode::InvalidEnum, "Snapshot world detail level is invalid");
+    }
+    restored_state.detail_level = static_cast<SimulationDetailLevel>(detail_level_raw);
+
+    std::uint64_t region_lod_count = 0;
+    if (!payload_reader.read_u64(region_lod_count)) {
+        return load_error(SnapshotErrorCode::TruncatedData, "Snapshot region LOD section is truncated");
+    }
+    if (region_lod_count > payload_reader.remaining() / 9U) {
+        return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot region LOD section length is invalid");
+    }
+
+    restored_state.region_lod_states.clear();
+    restored_state.region_lod_states.reserve(static_cast<std::size_t>(region_lod_count));
+    std::unordered_set<RegionId> region_lod_ids;
+    for (std::uint64_t i = 0; i < region_lod_count; ++i) {
+        RegionLodState region_lod{};
+        std::uint8_t region_detail_level_raw = 0;
+        if (!payload_reader.read_u64(region_lod.region_id) ||
+            !payload_reader.read_u8(region_detail_level_raw)) {
+            return load_error(SnapshotErrorCode::TruncatedData, "Snapshot region LOD record is truncated");
+        }
+        if (region_detail_level_raw > static_cast<std::uint8_t>(SimulationDetailLevel::RegionalCohort)) {
+            return load_error(SnapshotErrorCode::InvalidEnum, "Snapshot region detail level is invalid");
+        }
+        if (!region_ids.contains(region_lod.region_id)) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot region LOD references unknown region");
+        }
+        if (!region_lod_ids.insert(region_lod.region_id).second) {
+            return load_error(SnapshotErrorCode::DuplicateId, "Snapshot region LOD contains duplicate region ids");
+        }
+        region_lod.detail_level = static_cast<SimulationDetailLevel>(region_detail_level_raw);
+        restored_state.region_lod_states.push_back(region_lod);
+    }
+
+    std::uint64_t cohort_count = 0;
+    if (!payload_reader.read_u64(cohort_count)) {
+        return load_error(SnapshotErrorCode::TruncatedData, "Snapshot cohort section is truncated");
+    }
+    if (cohort_count > payload_reader.remaining() / 41U) {
+        return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot cohort section length is invalid");
+    }
+
+    restored_state.population_cohorts.clear();
+    restored_state.population_cohorts.reserve(static_cast<std::size_t>(cohort_count));
+    std::unordered_set<CohortId> cohort_ids;
+    for (std::uint64_t i = 0; i < cohort_count; ++i) {
+        PopulationCohort cohort{};
+        std::uint8_t age_band_raw = 0;
+        std::uint8_t sex_raw = 0;
+        std::uint8_t occupation_group_raw = 0;
+        std::uint8_t health_band_raw = 0;
+        std::uint8_t wealth_band_raw = 0;
+
+        if (!payload_reader.read_u64(cohort.id) ||
+            !payload_reader.read_u64(cohort.region_id) ||
+            !payload_reader.read_u64(cohort.settlement_id) ||
+            !payload_reader.read_u8(age_band_raw) ||
+            !payload_reader.read_u8(sex_raw) ||
+            !payload_reader.read_u8(occupation_group_raw) ||
+            !payload_reader.read_u8(health_band_raw) ||
+            !payload_reader.read_u8(wealth_band_raw) ||
+            !payload_reader.read_u32(cohort.knowledge_profile_id) ||
+            !payload_reader.read_u64(cohort.population)) {
+            return load_error(SnapshotErrorCode::TruncatedData, "Snapshot cohort record is truncated");
+        }
+
+        if (!is_valid_cohort_id(cohort.id)) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot cohort id must be non-zero");
+        }
+        if (!cohort_ids.insert(cohort.id).second) {
+            return load_error(SnapshotErrorCode::DuplicateId, "Snapshot contains duplicate cohort ids");
+        }
+        if (!region_ids.contains(cohort.region_id)) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot cohort references unknown region");
+        }
+        if (!settlement_mutable_by_id.contains(cohort.settlement_id)) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot cohort references unknown settlement");
+        }
+        if (settlement_mutable_by_id.at(cohort.settlement_id)->region_id != cohort.region_id) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot cohort settlement/region mismatch");
+        }
+        if (cohort.population == 0U) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot cohort population must be non-zero");
+        }
+        if (age_band_raw > static_cast<std::uint8_t>(CohortAgeBand::Senior) ||
+            sex_raw > static_cast<std::uint8_t>(BiologicalSex::Male) ||
+            occupation_group_raw > static_cast<std::uint8_t>(CohortOccupationGroup::Craft) ||
+            health_band_raw > static_cast<std::uint8_t>(CohortHealthBand::High) ||
+            wealth_band_raw > static_cast<std::uint8_t>(CohortWealthBand::High)) {
+            return load_error(SnapshotErrorCode::InvalidEnum, "Snapshot cohort enum value is invalid");
+        }
+
+        cohort.age_band = static_cast<CohortAgeBand>(age_band_raw);
+        cohort.sex = static_cast<BiologicalSex>(sex_raw);
+        cohort.occupation_group = static_cast<CohortOccupationGroup>(occupation_group_raw);
+        cohort.health_band = static_cast<CohortHealthBand>(health_band_raw);
+        cohort.wealth_band = static_cast<CohortWealthBand>(wealth_band_raw);
+        restored_state.population_cohorts.push_back(cohort);
+    }
+
     if (!payload_reader.fully_consumed()) {
         return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot payload has trailing undecoded bytes");
     }
@@ -2239,6 +2401,21 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
 
     if (food_interval_ticks != days(1).ticks) {
         return load_error(SnapshotErrorCode::InvalidState, "Snapshot food interval is incompatible with this runtime");
+    }
+
+    if (!is_valid_cohort_id(next_cohort_id)) {
+        return load_error(SnapshotErrorCode::InvalidState, "Snapshot next cohort id must be non-zero");
+    }
+
+    CohortId max_cohort_id = 0;
+    for (const auto& cohort : restored_state.population_cohorts) {
+        if (cohort.id > max_cohort_id) {
+            max_cohort_id = cohort.id;
+        }
+    }
+    const auto expected_next_cohort_id = max_cohort_id + 1U;
+    if (next_cohort_id != expected_next_cohort_id) {
+        return load_error(SnapshotErrorCode::InvalidState, "Snapshot next cohort id is inconsistent");
     }
 
     if (restored_config.food_system_enabled && food_next_run_ticks <= restored_state.time.ticks) {
@@ -2563,8 +2740,31 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
 
     }
 
-    if (restored_state.population != alive_count) {
-        return load_error(SnapshotErrorCode::InvalidState, "Snapshot population does not match alive person count");
+    std::uint64_t cohort_population = 0;
+    for (const auto& cohort : restored_state.population_cohorts) {
+        if (cohort_population > (std::numeric_limits<std::uint64_t>::max() - cohort.population)) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot cohort population sum overflow");
+        }
+        cohort_population += cohort.population;
+    }
+
+    if (restored_state.detail_level == SimulationDetailLevel::Detailed) {
+        if (!restored_state.population_cohorts.empty()) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot detailed mode must not contain aggregate cohorts");
+        }
+        if (!restored_state.region_lod_states.empty()) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot detailed mode must not contain region LOD overrides");
+        }
+        if (restored_state.population != alive_count) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot population does not match alive person count");
+        }
+    } else {
+        if (alive_count > (std::numeric_limits<std::uint64_t>::max() - cohort_population)) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot total represented population overflow");
+        }
+        if (restored_state.population != (alive_count + cohort_population)) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot population does not match detailed plus cohort representation");
+        }
     }
 
     const auto expected_next_person_id = (max_person_id == 0U) ? 1U : (max_person_id + 1U);
@@ -3533,6 +3733,18 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     std::sort(restored_state.institutions.begin(), restored_state.institutions.end(), [](const Institution& lhs, const Institution& rhs) {
         return lhs.id < rhs.id;
     });
+    std::sort(restored_state.region_lod_states.begin(), restored_state.region_lod_states.end(), [](const RegionLodState& lhs, const RegionLodState& rhs) {
+        return lhs.region_id < rhs.region_id;
+    });
+    std::sort(restored_state.population_cohorts.begin(), restored_state.population_cohorts.end(), [](const PopulationCohort& lhs, const PopulationCohort& rhs) {
+        if (lhs.region_id != rhs.region_id) {
+            return lhs.region_id < rhs.region_id;
+        }
+        if (lhs.settlement_id != rhs.settlement_id) {
+            return lhs.settlement_id < rhs.settlement_id;
+        }
+        return lhs.id < rhs.id;
+    });
     for (auto& institution : restored_state.institutions) {
         std::sort(institution.member_ids.begin(), institution.member_ids.end());
         std::sort(institution.preserved_record_ids.begin(), institution.preserved_record_ids.end());
@@ -3586,6 +3798,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     destination.next_record_id_ = next_record_id;
     destination.next_institution_id_ = next_institution_id;
     destination.next_building_id_ = next_building_id;
+    destination.next_cohort_id_ = next_cohort_id;
     destination.demography_interval_ = SimulationDuration{demography_interval_ticks};
     destination.demography_next_run_ = SimulationTime{demography_next_run_ticks};
     destination.food_interval_ = SimulationDuration{food_interval_ticks};

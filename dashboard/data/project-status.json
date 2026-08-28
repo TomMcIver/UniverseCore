@@ -1,9 +1,9 @@
 {
   "project": "UniverseCore",
   "as_of": "2026-08-28",
-  "current_phase": "Milestone 3 economy and settlement growth (complete)",
-  "current_task": "Milestone 3 closeout complete (stopping before Milestone 4)",
-  "next_task": "Milestone 4 simulation LOD planning",
+  "current_phase": "Milestone 4 simulation LOD (in progress)",
+  "current_task": "Milestone 4A LOD substrate, snapshot schema v17, and baseline capture complete",
+  "next_task": "Milestone 4B settlement aggregate execution",
   "build": {
     "canonical_workflow": "podman scripts/container-test.sh",
     "last_verified": "2026-08-28",
@@ -91,6 +91,12 @@
       "percent": 100
     },
     {
+      "id": "M4",
+      "name": "Simulation LOD",
+      "status": "in_progress",
+      "percent": 20
+    },
+    {
       "id": "UE",
       "name": "Unreal Integration",
       "status": "future",
@@ -126,6 +132,9 @@
       "Milestone 3 work allocation and subsistence-priority labour balancing",
       "Milestone 3 production-chain balancing with construction/material demand integration",
       "Snapshot schema v16 and validation",
+      "Milestone 4 LOD architecture design document",
+      "Milestone 4A canonical LOD substrate and snapshot schema v17",
+      "Milestone 4 pre-change baseline metrics capture",
       "Canonical Podman build/test workflow",
       "Development dashboard + deployment workflow"
     ],
