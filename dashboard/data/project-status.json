@@ -1,18 +1,18 @@
 {
   "project": "UniverseCore",
-  "as_of": "2026-08-27",
-  "current_phase": "Milestone 3 planning (active)",
-  "current_task": "Milestone 3 planning",
-  "next_task": "Milestone 3 economy and settlement growth",
+  "as_of": "2026-08-28",
+  "current_phase": "Milestone 3 economy and settlement growth (active)",
+  "current_task": "Milestone 3A ownership/access substrate",
+  "next_task": "Milestone 3B deterministic local exchange",
   "build": {
     "canonical_workflow": "podman scripts/container-test.sh",
-    "last_verified": "2026-08-27",
+    "last_verified": "2026-08-28",
     "status": "passing",
-    "notes": "Verified in universecore-dev container with canonical build/test plus UI smoke coverage (container and native Windows UI); re-verified after Milestone 2 institutions foundation with snapshot schema v15"
+    "notes": "Verified in universecore-dev container with canonical fast and integration suites after Milestone 3A ownership/access substrate and snapshot schema v16 update"
   },
   "progress": {
     "simulation_foundation_percent": 100,
-    "bronze_age_simulator_percent": 45,
+    "bronze_age_simulator_percent": 49,
     "playable_vertical_slice_percent": 7,
     "full_game_vision_percent": 1,
     "note": "Percentages are approximate planning estimates, not objective measurements."
@@ -85,6 +85,12 @@
       "percent": 100
     },
     {
+      "id": "M3",
+      "name": "Economy and Settlement Growth",
+      "status": "in_progress",
+      "percent": 14
+    },
+    {
       "id": "UE",
       "name": "Unreal Integration",
       "status": "future",
@@ -112,16 +118,21 @@
       "Milestone 2 basic discoveries foundation",
       "Milestone 2 institutions foundation",
       "Snapshot schema v15 and validation",
+      "Milestone 3A ownership/access substrate",
+      "Snapshot schema v16 and validation",
       "Canonical Podman build/test workflow",
       "Development dashboard + deployment workflow"
     ],
     "active": [
-      "Milestone 3 planning"
+      "Milestone 3B deterministic local exchange"
     ],
     "planned": [
       "Milestone 1 migration implementation (designed/deferred)",
       "Milestone 1 long-horizon viability extension (deferred follow-up)",
-      "Milestone 3 economy and settlement growth"
+      "Milestone 3 economy and settlement growth",
+      "Milestone 3C deterministic construction and building effects",
+      "Milestone 3D settlement pressure and bounded growth",
+      "Milestone 3E wealth/inequality dynamics and balancing"
     ]
   },
   "invariants": [

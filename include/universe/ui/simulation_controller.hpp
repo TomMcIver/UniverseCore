@@ -61,6 +61,12 @@ struct SimulationSummary {
     std::int64_t material_labour_allocated{};
     std::int64_t material_labour_shortfall{};
     std::int64_t material_production_shortfall{};
+    std::int64_t total_household_wealth{};
+    std::int64_t settlement_commons_food{};
+    std::int64_t transfer_volume{};
+    std::int64_t exchange_volume{};
+    std::uint64_t active_buildings{};
+    std::uint64_t active_projects{};
     std::int64_t wood_capacity{};
     std::int64_t wood_stock{};
     std::int64_t stone_capacity{};

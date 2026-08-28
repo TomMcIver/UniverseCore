@@ -532,6 +532,13 @@ int main(int argc, char** argv) {
             static_cast<long long>(summary.timber_inventory),
             static_cast<long long>(summary.basic_tool_inventory),
             static_cast<long long>(summary.material_production_shortfall));
+        ImGui::Text("Economy: household_wealth=%lld commons_food=%lld transfers=%lld exchanges=%lld buildings=%llu projects=%llu",
+            static_cast<long long>(summary.total_household_wealth),
+            static_cast<long long>(summary.settlement_commons_food),
+            static_cast<long long>(summary.transfer_volume),
+            static_cast<long long>(summary.exchange_volume),
+            static_cast<unsigned long long>(summary.active_buildings),
+            static_cast<unsigned long long>(summary.active_projects));
         ImGui::Text("Tools durability: broken=%lld avg_coverage=%u/10000",
             static_cast<long long>(summary.basic_tool_broken),
             summary.average_tool_coverage_per_10k);
@@ -626,13 +633,15 @@ int main(int argc, char** argv) {
 
         ImGui::BeginChild("households", ImVec2(0, 220), true);
         ImGui::Text("Households");
-        if (ImGui::BeginTable("household_table", 6, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable)) {
+        if (ImGui::BeginTable("household_table", 8, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable)) {
             ImGui::TableSetupColumn("ID");
             ImGui::TableSetupColumn("Alive");
             ImGui::TableSetupColumn("Total");
             ImGui::TableSetupColumn("Food");
             ImGui::TableSetupColumn("Shortage");
             ImGui::TableSetupColumn("Stress");
+            ImGui::TableSetupColumn("Access");
+            ImGui::TableSetupColumn("Owned");
             ImGui::TableHeadersRow();
 
             for (const auto& household : households) {
@@ -660,6 +669,14 @@ int main(int argc, char** argv) {
                 ImGui::TextUnformatted(std::to_string(household.resources.consecutive_shortage_days).c_str());
                 ImGui::TableSetColumnIndex(5);
                 ImGui::TextUnformatted(std::to_string(household.resources.nutritional_stress_points).c_str());
+                ImGui::TableSetColumnIndex(6);
+                ImGui::Text("%u/10000", household.productive_access_share_points);
+                ImGui::TableSetColumnIndex(7);
+                ImGui::Text("W:%lld S:%lld T:%lld B:%lld",
+                    static_cast<long long>(household.owned_materials.wood.value),
+                    static_cast<long long>(household.owned_materials.stone.value),
+                    static_cast<long long>(household.owned_materials.timber.value),
+                    static_cast<long long>(household.owned_materials.basic_tool.value));
             }
             ImGui::EndTable();
         }
@@ -683,6 +700,8 @@ int main(int argc, char** argv) {
                 ImGui::Text("Region: %llu", static_cast<unsigned long long>(settlement->region_id));
                 ImGui::Text("Status: %s", settlement->active ? "active" : "extinct");
                 ImGui::Text("Access share: %u/10000", settlement->access_share_points);
+                ImGui::Text("Commons food: %lld", static_cast<long long>(settlement->commons_food.value));
+                ImGui::Text("Last transfers: %lld", static_cast<long long>(settlement->last_transfer_food_volume));
                 if (settlement_view != nullptr) {
                     ImGui::Text("Population: %llu", static_cast<unsigned long long>(settlement_view->alive_population));
                     ImGui::Text("Workers: %llu eligible, %llu active, %llu unallocated",
@@ -747,6 +766,17 @@ int main(int argc, char** argv) {
                 ImGui::Text("Unmet: %lld", static_cast<long long>(household->resources.unmet_food_total));
                 ImGui::Text("Stress: %lld", static_cast<long long>(household->resources.nutritional_stress_points));
                 ImGui::Text("Shortage streak: %u", household->resources.consecutive_shortage_days);
+                ImGui::Text("Productive access: %u/10000", household->productive_access_share_points);
+                ImGui::Text("Commons access: %u/10000", household->commons_access_share_points);
+                ImGui::Text("Owned materials: wood=%lld stone=%lld timber=%lld tools=%lld",
+                    static_cast<long long>(household->owned_materials.wood.value),
+                    static_cast<long long>(household->owned_materials.stone.value),
+                    static_cast<long long>(household->owned_materials.timber.value),
+                    static_cast<long long>(household->owned_materials.basic_tool.value));
+                ImGui::Text("Transfers food in/out: %lld / %lld",
+                    static_cast<long long>(household->cumulative_food_transferred_in),
+                    static_cast<long long>(household->cumulative_food_transferred_out));
+                ImGui::Text("Derived wealth: %lld", static_cast<long long>(household->derived_wealth_points));
                 ImGui::Separator();
                 ImGui::TextUnformatted("Members");
                 for (const auto member_id : household->member_ids) {

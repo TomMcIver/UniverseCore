@@ -20,6 +20,10 @@ namespace {
 constexpr std::uint32_t kSnapshotMagic = 0x524F4355U;  // "UCOR" little-endian
 constexpr std::size_t kHeaderSize = 4U + 2U + 2U + 8U + 8U;
 constexpr std::int64_t kToolWearWorkUnitsPerBreak = 24;
+constexpr std::int64_t kWealthValueWood = 2;
+constexpr std::int64_t kWealthValueStone = 2;
+constexpr std::int64_t kWealthValueTimber = 3;
+constexpr std::int64_t kWealthValueBasicTool = 6;
 
 [[nodiscard]] std::uint64_t fnv1a64(std::span<const std::byte> data) noexcept {
     std::uint64_t hash = 14695981039346656037ULL;
@@ -751,6 +755,74 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
     payload.write_u64(simulation.next_communication_id_);
     payload.write_u64(simulation.next_record_id_);
     payload.write_u64(simulation.next_institution_id_);
+    payload.write_u64(simulation.next_building_id_);
+
+    payload.write_u64(static_cast<std::uint64_t>(household_order.size()));
+    for (const auto* household : household_order) {
+        payload.write_u64(household->id);
+        payload.write_i64(household->owned_materials.wood.value);
+        payload.write_i64(household->owned_materials.stone.value);
+        payload.write_i64(household->owned_materials.timber.value);
+        payload.write_i64(household->owned_materials.basic_tool.value);
+        payload.write_u32(household->productive_access_share_points);
+        payload.write_u32(household->commons_access_share_points);
+        payload.write_i64(household->cumulative_food_transferred_in);
+        payload.write_i64(household->cumulative_food_transferred_out);
+        payload.write_i64(household->cumulative_material_transferred_in);
+        payload.write_i64(household->cumulative_material_transferred_out);
+        payload.write_i64(household->derived_wealth_points);
+    }
+
+    payload.write_u64(static_cast<std::uint64_t>(settlement_order.size()));
+    for (const auto* settlement : settlement_order) {
+        payload.write_u64(settlement->id);
+        payload.write_i64(settlement->commons_food.value);
+        payload.write_i64(settlement->last_transfer_food_volume);
+        payload.write_i64(settlement->last_exchange_volume);
+        payload.write_u32(settlement->economic_viability_streak);
+        payload.write_u32(settlement->economic_pressure_streak);
+        payload.write_i64(settlement->dwelling_capacity_bonus);
+        payload.write_i64(settlement->food_store_capacity_bonus);
+        payload.write_i64(settlement->workshop_capacity_bonus);
+        payload.write_i64(settlement->last_median_household_wealth);
+        payload.write_i64(settlement->last_min_household_wealth);
+        payload.write_i64(settlement->last_max_household_wealth);
+        payload.write_u64(settlement->last_inequality_numerator);
+        payload.write_u64(settlement->last_inequality_denominator);
+    }
+
+    std::vector<const Building*> building_order;
+    building_order.reserve(simulation.state_.buildings.size());
+    for (const auto& building : simulation.state_.buildings) {
+        building_order.push_back(&building);
+    }
+    std::sort(building_order.begin(), building_order.end(), [](const Building* lhs, const Building* rhs) {
+        return lhs->id < rhs->id;
+    });
+
+    payload.write_u64(static_cast<std::uint64_t>(building_order.size()));
+    for (const auto* building : building_order) {
+        payload.write_u64(building->id);
+        payload.write_u8(static_cast<std::uint8_t>(building->type));
+        payload.write_u64(building->settlement_id);
+        payload.write_bool(building->owner_household_id.has_value());
+        if (building->owner_household_id.has_value()) {
+            payload.write_u64(*building->owner_household_id);
+        }
+        payload.write_bool(building->settlement_commons_owned);
+        payload.write_u8(static_cast<std::uint8_t>(building->state));
+        payload.write_i64(building->timber_required);
+        payload.write_i64(building->stone_required);
+        payload.write_i64(building->labour_required);
+        payload.write_i64(building->timber_committed);
+        payload.write_i64(building->stone_committed);
+        payload.write_i64(building->labour_completed);
+        payload.write_i64(building->started_at.ticks);
+        payload.write_bool(building->completed_at.has_value());
+        if (building->completed_at.has_value()) {
+            payload.write_i64(building->completed_at->ticks);
+        }
+    }
 
     auto payload_bytes = payload.take();
     const auto payload_hash = fnv1a64(payload_bytes);
@@ -824,6 +896,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     std::uint64_t next_communication_id = 0;
     std::uint64_t next_record_id = 0;
     std::uint64_t next_institution_id = 0;
+    std::uint64_t next_building_id = 0;
     std::int64_t demography_interval_ticks = 0;
     std::int64_t demography_next_run_ticks = 0;
     std::int64_t food_interval_ticks = 0;
@@ -1881,6 +1954,253 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         return load_error(SnapshotErrorCode::TruncatedData, "Snapshot next institution id is truncated");
     }
 
+    if (!payload_reader.read_u64(next_building_id)) {
+        return load_error(SnapshotErrorCode::TruncatedData, "Snapshot next building id is truncated");
+    }
+
+    std::uint64_t household_economy_count = 0;
+    if (!payload_reader.read_u64(household_economy_count)) {
+        return load_error(SnapshotErrorCode::TruncatedData, "Snapshot household economy section is truncated");
+    }
+    if (household_economy_count != restored_state.households.size()) {
+        return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot household economy section count mismatch");
+    }
+
+    std::unordered_map<HouseholdId, Household*> household_mutable_by_id;
+    household_mutable_by_id.reserve(restored_state.households.size());
+    for (auto& household : restored_state.households) {
+        household_mutable_by_id.emplace(household.id, &household);
+    }
+
+    std::unordered_set<HouseholdId> household_economy_ids;
+    for (std::uint64_t i = 0; i < household_economy_count; ++i) {
+        HouseholdId household_id = 0;
+        std::int64_t wood = 0;
+        std::int64_t stone = 0;
+        std::int64_t timber = 0;
+        std::int64_t basic_tool = 0;
+        std::uint32_t productive_share = 0;
+        std::uint32_t commons_share = 0;
+        std::int64_t food_in = 0;
+        std::int64_t food_out = 0;
+        std::int64_t material_in = 0;
+        std::int64_t material_out = 0;
+        std::int64_t wealth = 0;
+
+        if (!payload_reader.read_u64(household_id) ||
+            !payload_reader.read_i64(wood) ||
+            !payload_reader.read_i64(stone) ||
+            !payload_reader.read_i64(timber) ||
+            !payload_reader.read_i64(basic_tool) ||
+            !payload_reader.read_u32(productive_share) ||
+            !payload_reader.read_u32(commons_share) ||
+            !payload_reader.read_i64(food_in) ||
+            !payload_reader.read_i64(food_out) ||
+            !payload_reader.read_i64(material_in) ||
+            !payload_reader.read_i64(material_out) ||
+            !payload_reader.read_i64(wealth)) {
+            return load_error(SnapshotErrorCode::TruncatedData, "Snapshot household economy record is truncated");
+        }
+
+        if (!household_economy_ids.insert(household_id).second) {
+            return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot household economy section has duplicate household ids");
+        }
+
+        const auto household_it = household_mutable_by_id.find(household_id);
+        if (household_it == household_mutable_by_id.end()) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot household economy references unknown household");
+        }
+        if (wood < 0 || stone < 0 || timber < 0 || basic_tool < 0 ||
+            productive_share > 10'000U || commons_share > 10'000U ||
+            food_in < 0 || food_out < 0 || material_in < 0 || material_out < 0 || wealth < 0) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot household economy values must be non-negative");
+        }
+
+        auto* household = household_it->second;
+        household->owned_materials.wood.value = wood;
+        household->owned_materials.stone.value = stone;
+        household->owned_materials.timber.value = timber;
+        household->owned_materials.basic_tool.value = basic_tool;
+        household->productive_access_share_points = productive_share;
+        household->commons_access_share_points = commons_share;
+        household->cumulative_food_transferred_in = food_in;
+        household->cumulative_food_transferred_out = food_out;
+        household->cumulative_material_transferred_in = material_in;
+        household->cumulative_material_transferred_out = material_out;
+        household->derived_wealth_points = wealth;
+    }
+
+    std::uint64_t settlement_economy_count = 0;
+    if (!payload_reader.read_u64(settlement_economy_count)) {
+        return load_error(SnapshotErrorCode::TruncatedData, "Snapshot settlement economy section is truncated");
+    }
+    if (settlement_economy_count != restored_state.settlements.size()) {
+        return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot settlement economy section count mismatch");
+    }
+
+    std::unordered_set<SettlementId> settlement_economy_ids;
+    for (std::uint64_t i = 0; i < settlement_economy_count; ++i) {
+        SettlementId settlement_id = 0;
+        std::int64_t commons_food = 0;
+        std::int64_t transfer_volume = 0;
+        std::int64_t exchange_volume = 0;
+        std::uint32_t viability_streak = 0;
+        std::uint32_t pressure_streak = 0;
+        std::int64_t dwelling_bonus = 0;
+        std::int64_t food_store_bonus = 0;
+        std::int64_t workshop_bonus = 0;
+        std::int64_t median_wealth = 0;
+        std::int64_t min_wealth = 0;
+        std::int64_t max_wealth = 0;
+        std::uint64_t inequality_numerator = 0;
+        std::uint64_t inequality_denominator = 0;
+
+        if (!payload_reader.read_u64(settlement_id) ||
+            !payload_reader.read_i64(commons_food) ||
+            !payload_reader.read_i64(transfer_volume) ||
+            !payload_reader.read_i64(exchange_volume) ||
+            !payload_reader.read_u32(viability_streak) ||
+            !payload_reader.read_u32(pressure_streak) ||
+            !payload_reader.read_i64(dwelling_bonus) ||
+            !payload_reader.read_i64(food_store_bonus) ||
+            !payload_reader.read_i64(workshop_bonus) ||
+            !payload_reader.read_i64(median_wealth) ||
+            !payload_reader.read_i64(min_wealth) ||
+            !payload_reader.read_i64(max_wealth) ||
+            !payload_reader.read_u64(inequality_numerator) ||
+            !payload_reader.read_u64(inequality_denominator)) {
+            return load_error(SnapshotErrorCode::TruncatedData, "Snapshot settlement economy record is truncated");
+        }
+
+        if (!settlement_economy_ids.insert(settlement_id).second) {
+            return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot settlement economy section has duplicate settlement ids");
+        }
+        const auto settlement_it = settlement_mutable_by_id.find(settlement_id);
+        if (settlement_it == settlement_mutable_by_id.end()) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot settlement economy references unknown settlement");
+        }
+        if (commons_food < 0 || transfer_volume < 0 || exchange_volume < 0 ||
+            dwelling_bonus < 0 || food_store_bonus < 0 || workshop_bonus < 0 ||
+            median_wealth < 0 || min_wealth < 0 || max_wealth < 0) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot settlement economy values must be non-negative");
+        }
+
+        auto* settlement = settlement_it->second;
+        settlement->commons_food.value = commons_food;
+        settlement->last_transfer_food_volume = transfer_volume;
+        settlement->last_exchange_volume = exchange_volume;
+        settlement->economic_viability_streak = viability_streak;
+        settlement->economic_pressure_streak = pressure_streak;
+        settlement->dwelling_capacity_bonus = dwelling_bonus;
+        settlement->food_store_capacity_bonus = food_store_bonus;
+        settlement->workshop_capacity_bonus = workshop_bonus;
+        settlement->last_median_household_wealth = median_wealth;
+        settlement->last_min_household_wealth = min_wealth;
+        settlement->last_max_household_wealth = max_wealth;
+        settlement->last_inequality_numerator = inequality_numerator;
+        settlement->last_inequality_denominator = inequality_denominator;
+    }
+
+    std::uint64_t building_count = 0;
+    if (!payload_reader.read_u64(building_count)) {
+        return load_error(SnapshotErrorCode::TruncatedData, "Snapshot building section is truncated");
+    }
+
+    restored_state.buildings.clear();
+    restored_state.buildings.reserve(static_cast<std::size_t>(building_count));
+    std::unordered_set<BuildingId> building_ids;
+    for (std::uint64_t i = 0; i < building_count; ++i) {
+        Building building{};
+        std::uint8_t type_raw = 0;
+        bool has_owner = false;
+        bool has_completed = false;
+        std::uint8_t state_raw = 0;
+
+        if (!payload_reader.read_u64(building.id) ||
+            !payload_reader.read_u8(type_raw) ||
+            !payload_reader.read_u64(building.settlement_id) ||
+            !payload_reader.read_bool(has_owner)) {
+            return load_error(SnapshotErrorCode::TruncatedData, "Snapshot building record is truncated");
+        }
+        if (has_owner) {
+            HouseholdId owner_household_id = 0;
+            if (!payload_reader.read_u64(owner_household_id)) {
+                return load_error(SnapshotErrorCode::TruncatedData, "Snapshot building owner id is truncated");
+            }
+            building.owner_household_id = owner_household_id;
+        }
+        if (!payload_reader.read_bool(building.settlement_commons_owned) ||
+            !payload_reader.read_u8(state_raw) ||
+            !payload_reader.read_i64(building.timber_required) ||
+            !payload_reader.read_i64(building.stone_required) ||
+            !payload_reader.read_i64(building.labour_required) ||
+            !payload_reader.read_i64(building.timber_committed) ||
+            !payload_reader.read_i64(building.stone_committed) ||
+            !payload_reader.read_i64(building.labour_completed) ||
+            !payload_reader.read_i64(building.started_at.ticks) ||
+            !payload_reader.read_bool(has_completed)) {
+            return load_error(SnapshotErrorCode::TruncatedData, "Snapshot building progress fields are truncated");
+        }
+        if (has_completed) {
+            SimulationTime completed_at{};
+            if (!payload_reader.read_i64(completed_at.ticks)) {
+                return load_error(SnapshotErrorCode::TruncatedData, "Snapshot building completion time is truncated");
+            }
+            building.completed_at = completed_at;
+        }
+
+        if (!building_ids.insert(building.id).second) {
+            return load_error(SnapshotErrorCode::DuplicateId, "Snapshot contains duplicate building ids");
+        }
+        if (type_raw > static_cast<std::uint8_t>(BuildingType::Workshop)) {
+            return load_error(SnapshotErrorCode::InvalidEnum, "Snapshot building type is invalid");
+        }
+        if (state_raw > static_cast<std::uint8_t>(ConstructionState::Complete)) {
+            return load_error(SnapshotErrorCode::InvalidEnum, "Snapshot construction state is invalid");
+        }
+        if (!settlement_mutable_by_id.contains(building.settlement_id)) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot building references unknown settlement");
+        }
+        if (building.owner_household_id.has_value() && !household_mutable_by_id.contains(*building.owner_household_id)) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot building references unknown owner household");
+        }
+        if (building.owner_household_id.has_value()) {
+            const auto* owner_household = household_mutable_by_id.at(*building.owner_household_id);
+            if (owner_household->settlement_id != building.settlement_id) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot building owner household/settlement mismatch");
+            }
+        }
+        if (building.timber_required < 0 || building.stone_required < 0 || building.labour_required < 0 ||
+            building.timber_committed < 0 || building.stone_committed < 0 || building.labour_completed < 0) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot building values must be non-negative");
+        }
+        if (building.timber_committed > building.timber_required ||
+            building.stone_committed > building.stone_required ||
+            building.labour_completed > building.labour_required) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot building committed values exceed requirements");
+        }
+        if (building.started_at.ticks < 0 || building.started_at.ticks > restored_state.time.ticks) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot building start time is invalid");
+        }
+
+        const auto construction_state = static_cast<ConstructionState>(state_raw);
+        if (construction_state == ConstructionState::Complete) {
+            if (!building.completed_at.has_value()) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot complete building must include completion time");
+            }
+            if (building.completed_at->ticks < building.started_at.ticks ||
+                building.completed_at->ticks > restored_state.time.ticks) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot building completion time is invalid");
+            }
+        } else if (building.completed_at.has_value()) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot incomplete building must not include completion time");
+        }
+
+        building.type = static_cast<BuildingType>(type_raw);
+        building.state = construction_state;
+        restored_state.buildings.push_back(std::move(building));
+    }
+
     if (!payload_reader.fully_consumed()) {
         return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot payload has trailing undecoded bytes");
     }
@@ -2387,19 +2707,6 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
             if (!settlement_by_id.contains(payload_data.settlement_id)) {
                 return load_error(SnapshotErrorCode::InvalidReference, "Snapshot discovery event references unknown settlement");
             }
-
-            const auto* discoverer = person_by_id.at(payload_data.discoverer_id);
-            const auto* settlement = settlement_by_id.at(payload_data.settlement_id);
-            if (discoverer->household_id == 0U) {
-                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot discovery event discoverer household is invalid");
-            }
-            if (!household_by_id.contains(discoverer->household_id)) {
-                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot discovery event discoverer household is unknown");
-            }
-            const auto* household = household_by_id.at(discoverer->household_id);
-            if (household->settlement_id != payload_data.settlement_id || settlement->id != payload_data.settlement_id) {
-                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot discovery event discoverer/settlement mismatch");
-            }
         } else if (event.type == EventType::InstitutionFounded) {
             if (!std::holds_alternative<InstitutionFoundedEventPayload>(event.payload)) {
                 return load_error(SnapshotErrorCode::InvalidState, "Snapshot event payload does not match institution founded type");
@@ -2663,11 +2970,11 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         if (event.type != EventType::InstitutionFounded) {
             continue;
         }
-        const auto& payload = std::get<InstitutionFoundedEventPayload>(event.payload);
-        if (founded_event_by_institution.contains(payload.institution_id)) {
+        const auto& founded_payload = std::get<InstitutionFoundedEventPayload>(event.payload);
+        if (founded_event_by_institution.contains(founded_payload.institution_id)) {
             return load_error(SnapshotErrorCode::InvalidState, "Snapshot institution has duplicate founded events");
         }
-        founded_event_by_institution.emplace(payload.institution_id, &payload);
+        founded_event_by_institution.emplace(founded_payload.institution_id, &founded_payload);
     }
 
     InstitutionId expected_institution_id = 1;
@@ -2751,6 +3058,15 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
 
     if (next_institution_id != expected_institution_id) {
         return load_error(SnapshotErrorCode::InvalidState, "Snapshot next institution id is inconsistent");
+    }
+
+    BuildingId max_building_id = 0;
+    for (const auto& building : restored_state.buildings) {
+        max_building_id = std::max(max_building_id, building.id);
+    }
+    const auto expected_next_building_id = (max_building_id == 0U) ? 1U : (max_building_id + 1U);
+    if (next_building_id != expected_next_building_id) {
+        return load_error(SnapshotErrorCode::InvalidState, "Snapshot next building id is inconsistent");
     }
 
     std::unordered_set<KnowledgeSemanticKey, KnowledgeSemanticKeyHash> knowledge_semantic_keys;
@@ -3008,6 +3324,10 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         household_in_stress.emplace(household.id, household.resources.nutritional_stress_points > 0);
     }
 
+    for (const auto& settlement : restored_state.settlements) {
+        total_food_stored += std::max<std::int64_t>(0, settlement.commons_food.value);
+    }
+
     for (const auto& person : restored_state.people) {
         if (!person.alive) {
             continue;
@@ -3026,6 +3346,91 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         restored_state.population_under_food_stress != population_under_food_stress) {
         return load_error(SnapshotErrorCode::InvalidState, "Snapshot food aggregate totals are inconsistent");
     }
+
+    std::int64_t recomputed_total_household_wealth = 0;
+    std::int64_t recomputed_total_settlement_commons_food = 0;
+    std::int64_t recomputed_total_exchange_volume = 0;
+    std::int64_t recomputed_total_transfer_volume = 0;
+    std::uint64_t recomputed_active_buildings = 0;
+    std::uint64_t recomputed_active_projects = 0;
+
+    for (const auto& household : restored_state.households) {
+        if (household.owned_materials.wood.value < 0 ||
+            household.owned_materials.stone.value < 0 ||
+            household.owned_materials.timber.value < 0 ||
+            household.owned_materials.basic_tool.value < 0 ||
+            household.productive_access_share_points > 10'000U ||
+            household.commons_access_share_points > 10'000U ||
+            household.cumulative_food_transferred_in < 0 ||
+            household.cumulative_food_transferred_out < 0 ||
+            household.cumulative_material_transferred_in < 0 ||
+            household.cumulative_material_transferred_out < 0 ||
+            household.derived_wealth_points < 0) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot household economic values are out of range");
+        }
+        const auto recomputed_household_wealth =
+            std::max<std::int64_t>(0, household.resources.food_inventory.value) +
+            std::max<std::int64_t>(0, household.owned_materials.wood.value) * kWealthValueWood +
+            std::max<std::int64_t>(0, household.owned_materials.stone.value) * kWealthValueStone +
+            std::max<std::int64_t>(0, household.owned_materials.timber.value) * kWealthValueTimber +
+            std::max<std::int64_t>(0, household.owned_materials.basic_tool.value) * kWealthValueBasicTool;
+        if (household.derived_wealth_points != recomputed_household_wealth) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot household derived wealth is inconsistent");
+        }
+        recomputed_total_household_wealth += recomputed_household_wealth;
+    }
+
+    std::unordered_map<SettlementId, std::uint32_t> productive_access_by_settlement;
+    std::unordered_map<SettlementId, std::uint32_t> commons_access_by_settlement;
+    for (const auto& household : restored_state.households) {
+        productive_access_by_settlement[household.settlement_id] += household.productive_access_share_points;
+        commons_access_by_settlement[household.settlement_id] += household.commons_access_share_points;
+    }
+    for (const auto& [settlement_id, share] : productive_access_by_settlement) {
+        (void)settlement_id;
+        if (share > 10'000U) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot productive access allocation exceeds settlement bounds");
+        }
+    }
+    for (const auto& [settlement_id, share] : commons_access_by_settlement) {
+        (void)settlement_id;
+        if (share > 10'000U) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot commons access allocation exceeds settlement bounds");
+        }
+    }
+
+    for (const auto& settlement : restored_state.settlements) {
+        if (settlement.commons_food.value < 0 ||
+            settlement.last_transfer_food_volume < 0 ||
+            settlement.last_exchange_volume < 0 ||
+            settlement.dwelling_capacity_bonus < 0 ||
+            settlement.food_store_capacity_bonus < 0 ||
+            settlement.workshop_capacity_bonus < 0 ||
+            settlement.last_median_household_wealth < 0 ||
+            settlement.last_min_household_wealth < 0 ||
+            settlement.last_max_household_wealth < 0) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot settlement economic values are out of range");
+        }
+
+        recomputed_total_settlement_commons_food += settlement.commons_food.value;
+        recomputed_total_exchange_volume += settlement.last_exchange_volume;
+        recomputed_total_transfer_volume += settlement.last_transfer_food_volume;
+    }
+
+    for (const auto& building : restored_state.buildings) {
+        if (building.state == ConstructionState::Complete) {
+            ++recomputed_active_buildings;
+        } else {
+            ++recomputed_active_projects;
+        }
+    }
+
+    restored_state.total_household_wealth = recomputed_total_household_wealth;
+    restored_state.total_settlement_commons_food = recomputed_total_settlement_commons_food;
+    restored_state.total_exchange_volume = recomputed_total_exchange_volume;
+    restored_state.total_transfer_volume = recomputed_total_transfer_volume;
+    restored_state.active_buildings = recomputed_active_buildings;
+    restored_state.active_projects = recomputed_active_projects;
 
     std::sort(restored_state.people.begin(), restored_state.people.end(), [](const Person& lhs, const Person& rhs) {
         return lhs.id < rhs.id;
@@ -3118,6 +3523,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     destination.next_communication_id_ = next_communication_id;
     destination.next_record_id_ = next_record_id;
     destination.next_institution_id_ = next_institution_id;
+    destination.next_building_id_ = next_building_id;
     destination.demography_interval_ = SimulationDuration{demography_interval_ticks};
     destination.demography_next_run_ = SimulationTime{demography_next_run_ticks};
     destination.food_interval_ = SimulationDuration{food_interval_ticks};

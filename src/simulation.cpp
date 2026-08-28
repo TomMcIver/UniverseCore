@@ -55,6 +55,11 @@ constexpr std::uint64_t kInstitutionMinimumMembers = 3;
 constexpr std::uint64_t kInstitutionTargetMembers = 6;
 constexpr std::uint32_t kInstitutionTeachingConfidenceCapPer10k = 9'200;
 constexpr std::array<std::uint32_t, 3> kBasicDiscoveryKeys{1U, 2U, 3U};
+constexpr std::int64_t kFoodCommonsTransferReserveDays = 14;
+constexpr std::int64_t kWealthValueWood = 2;
+constexpr std::int64_t kWealthValueStone = 2;
+constexpr std::int64_t kWealthValueTimber = 4;
+constexpr std::int64_t kWealthValueBasicTool = 8;
 
 struct LabourDemandProfile {
     std::int64_t cultivation_labour_demand{};
@@ -264,12 +269,14 @@ Simulation::Simulation(SimulationConfig config)
     initialize_regions();
     assign_households_to_regions();
     initialize_settlements();
+    process_household_access_allocation();
     process_occupation_reassignment(0);
     refresh_population_count();
     refresh_food_aggregates();
     refresh_environment_aggregates();
     refresh_labour_aggregates();
     refresh_material_aggregates();
+    refresh_economic_aggregates();
 }
 
 const WorldState& Simulation::state() const noexcept {
@@ -636,6 +643,8 @@ void Simulation::run_scheduled_systems_until(const SimulationTime target_time) {
 }
 
 void Simulation::process_food_period(const std::uint64_t food_period) {
+    process_household_access_allocation();
+
     struct HouseholdDayState {
         Household* household{};
         std::vector<Person*> alive_members{};
@@ -665,6 +674,8 @@ void Simulation::process_food_period(const std::uint64_t food_period) {
 
     for (auto& settlement : state_.settlements) {
         settlement.last_tool_coverage_per_10k = 0U;
+        settlement.last_transfer_food_volume = 0;
+        settlement.last_exchange_volume = 0;
     }
 
     for (auto& household : state_.households) {
@@ -1280,9 +1291,12 @@ void Simulation::process_food_period(const std::uint64_t food_period) {
         process_materials_period(food_period);
     }
 
+    process_household_stabilization_transfers();
+
     refresh_food_aggregates();
     refresh_environment_aggregates();
     refresh_material_aggregates();
+    refresh_economic_aggregates();
 }
 
 void Simulation::process_materials_period(const std::uint64_t food_period) {
@@ -1639,11 +1653,15 @@ void Simulation::process_demography_period(const std::uint64_t demographic_year)
     process_records(demographic_year);
     process_institutions(demographic_year);
     process_knowledge_loss(demographic_year);
+    process_local_exchange(demographic_year);
+    process_construction(demographic_year);
     process_occupation_reassignment(demographic_year);
+    process_household_access_allocation();
     refresh_population_count();
     refresh_food_aggregates();
     refresh_labour_aggregates();
     refresh_material_aggregates();
+    refresh_economic_aggregates();
 }
 
 void Simulation::process_basic_discoveries(const std::uint64_t demographic_year) {
@@ -2799,6 +2817,10 @@ RecordId Simulation::next_record_id() noexcept {
 
 InstitutionId Simulation::next_institution_id() noexcept {
     return next_institution_id_++;
+}
+
+BuildingId Simulation::next_building_id() noexcept {
+    return next_building_id_++;
 }
 
 SimulationSeed Simulation::root_seed() const noexcept {
@@ -4969,6 +4991,10 @@ void Simulation::refresh_food_aggregates() noexcept {
 
     }
 
+    for (const auto& settlement : state_.settlements) {
+        state_.total_food_stored += std::max<std::int64_t>(0, settlement.commons_food.value);
+    }
+
     for (const auto& person : state_.people) {
         if (!person.alive) {
             continue;
@@ -5038,6 +5064,221 @@ void Simulation::refresh_material_aggregates() noexcept {
 
     if (active_settlement_count > 0U) {
         state_.average_tool_coverage_per_10k = bounded_u32(coverage_sum / active_settlement_count);
+    }
+}
+
+void Simulation::process_household_access_allocation() {
+    std::unordered_map<PersonId, const Person*> person_by_id;
+    person_by_id.reserve(state_.people.size());
+    for (const auto& person : state_.people) {
+        person_by_id.emplace(person.id, &person);
+    }
+
+    std::unordered_map<SettlementId, std::vector<Household*>> households_by_settlement;
+    households_by_settlement.reserve(state_.settlements.size());
+    for (auto& household : state_.households) {
+        household.productive_access_share_points = 0U;
+        household.commons_access_share_points = 0U;
+
+        bool has_alive_member = false;
+        for (const auto member_id : household.member_ids) {
+            const auto person_it = person_by_id.find(member_id);
+            if (person_it != person_by_id.end() && person_it->second->alive) {
+                has_alive_member = true;
+                break;
+            }
+        }
+
+        if (has_alive_member) {
+            households_by_settlement[household.settlement_id].push_back(&household);
+        }
+    }
+
+    for (auto& [settlement_id, households] : households_by_settlement) {
+        std::sort(households.begin(), households.end(), [](const Household* lhs, const Household* rhs) {
+            return lhs->id < rhs->id;
+        });
+
+        std::vector<std::int64_t> capacities(households.size(), 0);
+        std::int64_t total_capacity = 0;
+        for (std::size_t i = 0; i < households.size(); ++i) {
+            auto* household = households[i];
+            std::int64_t capacity = 0;
+            for (const auto member_id : household->member_ids) {
+                const auto person_it = person_by_id.find(member_id);
+                if (person_it == person_by_id.end()) {
+                    continue;
+                }
+
+                const auto* person = person_it->second;
+                if (!occupation_eligible_for_productive_work(*person)) {
+                    continue;
+                }
+                capacity += productive_effort_for_person(*person);
+            }
+            capacities[i] = std::max<std::int64_t>(0, capacity);
+            total_capacity += capacities[i];
+        }
+
+        if (households.empty()) {
+            continue;
+        }
+
+        if (total_capacity <= 0) {
+            const auto base = kSettlementShareScale / static_cast<std::uint32_t>(households.size());
+            auto remainder = static_cast<std::uint32_t>(kSettlementShareScale - (base * static_cast<std::uint32_t>(households.size())));
+            for (auto* household : households) {
+                household->productive_access_share_points = base;
+                if (remainder > 0U) {
+                    ++household->productive_access_share_points;
+                    --remainder;
+                }
+                household->commons_access_share_points = household->productive_access_share_points;
+            }
+            continue;
+        }
+
+        std::uint32_t allocated = 0;
+        for (std::size_t i = 0; i < households.size(); ++i) {
+            auto* household = households[i];
+            const auto share = static_cast<std::uint32_t>(
+                std::min<std::int64_t>(
+                    kSettlementShareScale,
+                    (capacities[i] * static_cast<std::int64_t>(kSettlementShareScale)) / total_capacity));
+            household->productive_access_share_points = share;
+            household->commons_access_share_points = share;
+            allocated = std::min<std::uint32_t>(kSettlementShareScale, allocated + share);
+        }
+
+        auto remainder = static_cast<std::int64_t>(kSettlementShareScale) - static_cast<std::int64_t>(allocated);
+        for (auto* household : households) {
+            if (remainder <= 0) {
+                break;
+            }
+            ++household->productive_access_share_points;
+            ++household->commons_access_share_points;
+            --remainder;
+        }
+        (void)settlement_id;
+    }
+}
+
+void Simulation::process_household_stabilization_transfers() {
+    std::unordered_map<SettlementId, Settlement*> settlement_by_id;
+    settlement_by_id.reserve(state_.settlements.size());
+    for (auto& settlement : state_.settlements) {
+        settlement_by_id.emplace(settlement.id, &settlement);
+    }
+
+    std::unordered_map<PersonId, const Person*> person_by_id;
+    person_by_id.reserve(state_.people.size());
+    for (const auto& person : state_.people) {
+        person_by_id.emplace(person.id, &person);
+    }
+
+    for (auto& household : state_.households) {
+        auto settlement_it = settlement_by_id.find(household.settlement_id);
+        if (settlement_it == settlement_by_id.end() || !settlement_it->second->active) {
+            continue;
+        }
+
+        std::int64_t required_food = 0;
+        for (const auto member_id : household.member_ids) {
+            const auto person_it = person_by_id.find(member_id);
+            if (person_it == person_by_id.end() || !person_it->second->alive) {
+                continue;
+            }
+            required_food += food_requirement_for_person(*person_it->second);
+        }
+
+        const auto reserve = required_food * kFoodCommonsTransferReserveDays;
+        auto surplus = household.resources.food_inventory.value - reserve;
+        if (surplus <= 0) {
+            continue;
+        }
+
+        auto* settlement = settlement_it->second;
+        household.resources.food_inventory.value -= surplus;
+        settlement->commons_food.value += surplus;
+        household.cumulative_food_transferred_out += surplus;
+        settlement->last_transfer_food_volume += surplus;
+    }
+
+    for (auto& household : state_.households) {
+        auto settlement_it = settlement_by_id.find(household.settlement_id);
+        if (settlement_it == settlement_by_id.end() || !settlement_it->second->active) {
+            continue;
+        }
+
+        std::int64_t required_food = 0;
+        for (const auto member_id : household.member_ids) {
+            const auto person_it = person_by_id.find(member_id);
+            if (person_it == person_by_id.end() || !person_it->second->alive) {
+                continue;
+            }
+            required_food += food_requirement_for_person(*person_it->second);
+        }
+        if (required_food <= 0) {
+            continue;
+        }
+
+        const auto reserve = required_food * kFoodCommonsTransferReserveDays;
+        if (household.resources.food_inventory.value >= reserve) {
+            continue;
+        }
+
+        auto* settlement = settlement_it->second;
+        const auto need = reserve - household.resources.food_inventory.value;
+        const auto transfer = std::min<std::int64_t>(need, std::max<std::int64_t>(0, settlement->commons_food.value));
+        if (transfer <= 0) {
+            continue;
+        }
+
+        settlement->commons_food.value -= transfer;
+        household.resources.food_inventory.value += transfer;
+        household.cumulative_food_transferred_in += transfer;
+        settlement->last_transfer_food_volume += transfer;
+    }
+}
+
+void Simulation::process_local_exchange(const std::uint64_t demographic_year) {
+    (void)demographic_year;
+}
+
+void Simulation::process_construction(const std::uint64_t demographic_year) {
+    (void)demographic_year;
+}
+
+void Simulation::refresh_economic_aggregates() noexcept {
+    state_.total_household_wealth = 0;
+    state_.total_settlement_commons_food = 0;
+    state_.active_buildings = 0;
+    state_.active_projects = 0;
+    state_.total_exchange_volume = 0;
+    state_.total_transfer_volume = 0;
+
+    for (auto& household : state_.households) {
+        const auto wealth_food = std::max<std::int64_t>(0, household.resources.food_inventory.value);
+        const auto wealth_wood = std::max<std::int64_t>(0, household.owned_materials.wood.value) * kWealthValueWood;
+        const auto wealth_stone = std::max<std::int64_t>(0, household.owned_materials.stone.value) * kWealthValueStone;
+        const auto wealth_timber = std::max<std::int64_t>(0, household.owned_materials.timber.value) * kWealthValueTimber;
+        const auto wealth_tools = std::max<std::int64_t>(0, household.owned_materials.basic_tool.value) * kWealthValueBasicTool;
+        household.derived_wealth_points = wealth_food + wealth_wood + wealth_stone + wealth_timber + wealth_tools;
+        state_.total_household_wealth += household.derived_wealth_points;
+    }
+
+    for (const auto& settlement : state_.settlements) {
+        state_.total_settlement_commons_food += std::max<std::int64_t>(0, settlement.commons_food.value);
+        state_.total_exchange_volume += std::max<std::int64_t>(0, settlement.last_exchange_volume);
+        state_.total_transfer_volume += std::max<std::int64_t>(0, settlement.last_transfer_food_volume);
+    }
+
+    for (const auto& building : state_.buildings) {
+        if (building.state == ConstructionState::Complete) {
+            ++state_.active_buildings;
+        } else {
+            ++state_.active_projects;
+        }
     }
 }
 

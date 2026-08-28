@@ -306,16 +306,30 @@ void verify_resource_invariants(const universe::WorldState& state, const std::in
     std::int64_t total_wild_food_stock = 0;
     std::int64_t total_wild_food_harvested = 0;
     std::int64_t total_wild_food_regenerated = 0;
-    std::int64_t total_inferred_initial_food = 0;
     std::int64_t total_basic_tool_broken = 0;
+    std::int64_t total_household_wealth = 0;
+    std::int64_t total_commons_food = 0;
+    std::int64_t total_transfer_volume = 0;
+    std::int64_t total_exchange_volume = 0;
     std::uint64_t active_settlement_count = 0;
     std::uint64_t coverage_sum = 0;
 
     std::unordered_set<universe::RegionId> region_ids;
     std::unordered_set<universe::SettlementId> settlement_ids;
+    std::unordered_map<universe::SettlementId, std::uint32_t> productive_access_by_settlement;
+    std::unordered_map<universe::SettlementId, std::uint32_t> commons_access_by_settlement;
     for (const auto& settlement : state.settlements) {
         settlement_ids.insert(settlement.id);
         total_basic_tool_broken += settlement.cumulative_basic_tool_broken;
+        require(settlement.commons_food.value >= 0, "settlement commons food must be non-negative");
+        require(settlement.last_transfer_food_volume >= 0, "settlement transfer volume must be non-negative");
+        require(settlement.last_exchange_volume >= 0, "settlement exchange volume must be non-negative");
+        require(settlement.dwelling_capacity_bonus >= 0, "settlement dwelling capacity bonus must be non-negative");
+        require(settlement.food_store_capacity_bonus >= 0, "settlement food store capacity bonus must be non-negative");
+        require(settlement.workshop_capacity_bonus >= 0, "settlement workshop capacity bonus must be non-negative");
+        total_commons_food += settlement.commons_food.value;
+        total_transfer_volume += settlement.last_transfer_food_volume;
+        total_exchange_volume += settlement.last_exchange_volume;
         if (settlement.active) {
             ++active_settlement_count;
             coverage_sum += settlement.last_tool_coverage_per_10k;
@@ -356,10 +370,20 @@ void verify_resource_invariants(const universe::WorldState& state, const std::in
         require(resources.food_consumed_total >= 0, "household food consumed total must never be negative");
         require(resources.unmet_food_total >= 0, "household unmet food total must never be negative");
         require(resources.nutritional_stress_points >= 0, "household stress must never be negative");
-
-        const auto inferred_initial =
-            resources.food_inventory.value + resources.food_consumed_total - resources.food_produced_total;
-        total_inferred_initial_food += inferred_initial;
+        require(household.owned_materials.wood.value >= 0, "household owned wood must be non-negative");
+        require(household.owned_materials.stone.value >= 0, "household owned stone must be non-negative");
+        require(household.owned_materials.timber.value >= 0, "household owned timber must be non-negative");
+        require(household.owned_materials.basic_tool.value >= 0, "household owned tools must be non-negative");
+        require(household.productive_access_share_points <= 10'000U, "household productive access share must be bounded");
+        require(household.commons_access_share_points <= 10'000U, "household commons access share must be bounded");
+        require(household.cumulative_food_transferred_in >= 0, "household cumulative transfer-in must be non-negative");
+        require(household.cumulative_food_transferred_out >= 0, "household cumulative transfer-out must be non-negative");
+        require(household.cumulative_material_transferred_in >= 0, "household cumulative material transfer-in must be non-negative");
+        require(household.cumulative_material_transferred_out >= 0, "household cumulative material transfer-out must be non-negative");
+        require(household.derived_wealth_points >= 0, "household derived wealth must be non-negative");
+        productive_access_by_settlement[household.settlement_id] += household.productive_access_share_points;
+        commons_access_by_settlement[household.settlement_id] += household.commons_access_share_points;
+        total_household_wealth += household.derived_wealth_points;
 
         total_food_stored += resources.food_inventory.value;
         total_food_produced += resources.food_produced_total;
@@ -382,10 +406,11 @@ void verify_resource_invariants(const universe::WorldState& state, const std::in
         }
     }
 
-    require(total_food_stored == state.total_food_stored, "stored food aggregate must match household totals");
+    require(total_food_stored + total_commons_food == state.total_food_stored, "stored food aggregate must match household plus commons totals");
     require(total_food_produced == state.total_food_produced, "produced food aggregate must match household totals");
     require(total_food_consumed == state.total_food_consumed, "consumed food aggregate must match household totals");
     require(total_unmet_food == state.total_unmet_food, "unmet food aggregate must match household totals");
+    const auto total_inferred_initial_food = state.total_food_stored + state.total_food_consumed - state.total_food_produced;
     require(
         total_inferred_initial_food == expected_initial_food_units * static_cast<std::int64_t>(state.households.size()),
         "food accounting should preserve canonical world-level inventory conservation");
@@ -460,6 +485,49 @@ void verify_resource_invariants(const universe::WorldState& state, const std::in
     require(
         state.material_labour_shortfall == std::max<std::int64_t>(0, state.material_labour_demand - state.material_labour_allocated),
         "material labour shortfall must match demand minus allocated labour");
+
+    for (const auto& [settlement_id, productive_share] : productive_access_by_settlement) {
+        (void)settlement_id;
+        require(productive_share <= 10'000U, "household productive access allocations must remain bounded by settlement scale");
+    }
+    for (const auto& [settlement_id, commons_share] : commons_access_by_settlement) {
+        (void)settlement_id;
+        require(commons_share <= 10'000U, "household commons access allocations must remain bounded by settlement scale");
+    }
+
+    require(state.total_household_wealth == total_household_wealth, "household wealth aggregate must match household totals");
+    require(state.total_settlement_commons_food == total_commons_food, "settlement commons food aggregate must match settlement totals");
+    require(state.total_transfer_volume == total_transfer_volume, "transfer volume aggregate must match settlement totals");
+    require(state.total_exchange_volume == total_exchange_volume, "exchange volume aggregate must match settlement totals");
+
+    std::uint64_t completed_buildings = 0;
+    std::uint64_t active_projects = 0;
+    std::unordered_set<universe::BuildingId> building_ids;
+    for (const auto& building : state.buildings) {
+        require(building.id > 0U, "building id must be non-zero");
+        require(building_ids.insert(building.id).second, "building ids must be unique");
+        require(settlement_ids.contains(building.settlement_id), "building settlement id must reference existing settlement");
+        if (building.owner_household_id.has_value()) {
+            require(find_household(state, *building.owner_household_id) != nullptr, "building owner household id must reference existing household");
+        }
+        require(building.timber_required >= 0, "building timber requirement must be non-negative");
+        require(building.stone_required >= 0, "building stone requirement must be non-negative");
+        require(building.labour_required >= 0, "building labour requirement must be non-negative");
+        require(building.timber_committed >= 0, "building timber committed must be non-negative");
+        require(building.stone_committed >= 0, "building stone committed must be non-negative");
+        require(building.labour_completed >= 0, "building labour completed must be non-negative");
+        require(building.timber_committed <= building.timber_required, "building timber committed cannot exceed requirement");
+        require(building.stone_committed <= building.stone_required, "building stone committed cannot exceed requirement");
+        require(building.labour_completed <= building.labour_required, "building labour completed cannot exceed requirement");
+        if (building.state == universe::ConstructionState::Complete) {
+            ++completed_buildings;
+        } else {
+            ++active_projects;
+        }
+    }
+
+    require(state.active_buildings == completed_buildings, "active building aggregate must match building list");
+    require(state.active_projects == active_projects, "active project aggregate must match building list");
 
     verify_settlement_invariants(state);
 }
@@ -859,10 +927,17 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
     require(lhs.material_labour_allocated == rhs.material_labour_allocated, context);
     require(lhs.material_labour_shortfall == rhs.material_labour_shortfall, context);
     require(lhs.material_production_shortfall == rhs.material_production_shortfall, context);
+    require(lhs.total_household_wealth == rhs.total_household_wealth, context);
+    require(lhs.total_settlement_commons_food == rhs.total_settlement_commons_food, context);
+    require(lhs.active_buildings == rhs.active_buildings, context);
+    require(lhs.active_projects == rhs.active_projects, context);
+    require(lhs.total_exchange_volume == rhs.total_exchange_volume, context);
+    require(lhs.total_transfer_volume == rhs.total_transfer_volume, context);
     require(lhs.people.size() == rhs.people.size(), context);
     require(lhs.households.size() == rhs.households.size(), context);
     require(lhs.regions.size() == rhs.regions.size(), context);
     require(lhs.settlements.size() == rhs.settlements.size(), context);
+    require(lhs.buildings.size() == rhs.buildings.size(), context);
     require(lhs.event_log.size() == rhs.event_log.size(), context);
     require(lhs.agent_memories.size() == rhs.agent_memories.size(), context);
     require(lhs.knowledge_transmissions.size() == rhs.knowledge_transmissions.size(), context);
@@ -906,6 +981,17 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
         require(a.resources.unmet_food_total == b.resources.unmet_food_total, context);
         require(a.resources.nutritional_stress_points == b.resources.nutritional_stress_points, context);
         require(a.resources.consecutive_shortage_days == b.resources.consecutive_shortage_days, context);
+        require(a.owned_materials.wood.value == b.owned_materials.wood.value, context);
+        require(a.owned_materials.stone.value == b.owned_materials.stone.value, context);
+        require(a.owned_materials.timber.value == b.owned_materials.timber.value, context);
+        require(a.owned_materials.basic_tool.value == b.owned_materials.basic_tool.value, context);
+        require(a.productive_access_share_points == b.productive_access_share_points, context);
+        require(a.commons_access_share_points == b.commons_access_share_points, context);
+        require(a.cumulative_food_transferred_in == b.cumulative_food_transferred_in, context);
+        require(a.cumulative_food_transferred_out == b.cumulative_food_transferred_out, context);
+        require(a.cumulative_material_transferred_in == b.cumulative_material_transferred_in, context);
+        require(a.cumulative_material_transferred_out == b.cumulative_material_transferred_out, context);
+        require(a.derived_wealth_points == b.derived_wealth_points, context);
     }
 
     for (std::size_t i = 0; i < lhs.regions.size(); ++i) {
@@ -949,6 +1035,38 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
         require(a.cumulative_timber_produced == b.cumulative_timber_produced, context);
         require(a.cumulative_basic_tool_produced == b.cumulative_basic_tool_produced, context);
         require(a.cumulative_basic_tool_broken == b.cumulative_basic_tool_broken, context);
+        require(a.commons_food.value == b.commons_food.value, context);
+        require(a.last_transfer_food_volume == b.last_transfer_food_volume, context);
+        require(a.last_exchange_volume == b.last_exchange_volume, context);
+        require(a.economic_viability_streak == b.economic_viability_streak, context);
+        require(a.economic_pressure_streak == b.economic_pressure_streak, context);
+        require(a.dwelling_capacity_bonus == b.dwelling_capacity_bonus, context);
+        require(a.food_store_capacity_bonus == b.food_store_capacity_bonus, context);
+        require(a.workshop_capacity_bonus == b.workshop_capacity_bonus, context);
+        require(a.last_median_household_wealth == b.last_median_household_wealth, context);
+        require(a.last_min_household_wealth == b.last_min_household_wealth, context);
+        require(a.last_max_household_wealth == b.last_max_household_wealth, context);
+        require(a.last_inequality_numerator == b.last_inequality_numerator, context);
+        require(a.last_inequality_denominator == b.last_inequality_denominator, context);
+    }
+
+    for (std::size_t i = 0; i < lhs.buildings.size(); ++i) {
+        const auto& a = lhs.buildings[i];
+        const auto& b = rhs.buildings[i];
+        require(a.id == b.id, context);
+        require(a.type == b.type, context);
+        require(a.settlement_id == b.settlement_id, context);
+        require(a.owner_household_id == b.owner_household_id, context);
+        require(a.settlement_commons_owned == b.settlement_commons_owned, context);
+        require(a.state == b.state, context);
+        require(a.timber_required == b.timber_required, context);
+        require(a.stone_required == b.stone_required, context);
+        require(a.labour_required == b.labour_required, context);
+        require(a.timber_committed == b.timber_committed, context);
+        require(a.stone_committed == b.stone_committed, context);
+        require(a.labour_completed == b.labour_completed, context);
+        require(a.started_at == b.started_at, context);
+        require(a.completed_at == b.completed_at, context);
     }
 
     for (std::size_t i = 0; i < lhs.event_log.size(); ++i) {

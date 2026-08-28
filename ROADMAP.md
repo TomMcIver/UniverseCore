@@ -104,7 +104,7 @@ Exit criteria: a discovery can originate with one person, spread through part of
 
 - [ ] work allocation
 - [ ] production chains
-- [ ] ownership/access
+- [x] ownership/access
 - [ ] exchange
 - [ ] construction
 - [ ] land/resource pressure

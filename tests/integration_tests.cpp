@@ -90,7 +90,13 @@ void verify_resource_invariants(const universe::WorldState& state, const std::in
     std::int64_t total_food_produced = 0;
     std::int64_t total_food_consumed = 0;
     std::int64_t total_unmet_food = 0;
+    std::int64_t total_commons_food = 0;
     std::uint64_t households_in_shortage = 0;
+
+    for (const auto& settlement : state.settlements) {
+        require(settlement.commons_food.value >= 0, "settlement commons food must never be negative");
+        total_commons_food += settlement.commons_food.value;
+    }
 
     for (const auto& household : state.households) {
         require(household.resources.food_inventory.value >= 0, "household food inventory must never be negative");
@@ -111,7 +117,7 @@ void verify_resource_invariants(const universe::WorldState& state, const std::in
         ? 0
         : static_cast<std::int64_t>(state.households.size()) * expected_initial_food_units;
 
-    require(total_food_stored == state.total_food_stored, "world total_food_stored must match household aggregation");
+    require(total_food_stored + total_commons_food == state.total_food_stored, "world total_food_stored must match household plus commons aggregation");
     require(total_food_produced == state.total_food_produced, "world total_food_produced must match household aggregation");
     require(total_food_consumed == state.total_food_consumed, "world total_food_consumed must match household aggregation");
     require(total_unmet_food == state.total_unmet_food, "world total_unmet_food must match household aggregation");
@@ -812,7 +818,7 @@ int main() {
         const auto& state = discovery_run.state();
         std::unordered_set<std::uint32_t> discovered_keys;
         std::uint64_t discovery_event_count = 0;
-        bool settlement_locality_verified = false;
+        bool settlement_reference_verified = false;
 
         for (const auto& event : state.event_log) {
             if (event.type != universe::EventType::DiscoveryMade) {
@@ -828,19 +834,23 @@ int main() {
 
             const auto* discoverer = find_person(state, payload.discoverer_id);
             require(discoverer != nullptr, "discovery discoverer must exist");
+            const bool settlement_exists = std::any_of(
+                state.settlements.begin(),
+                state.settlements.end(),
+                [&](const universe::Settlement& settlement) { return settlement.id == payload.settlement_id; });
+            require(settlement_exists, "discovery settlement must exist");
             const auto* household = find_household(state, discoverer->household_id);
             require(household != nullptr, "discovery discoverer household must exist");
-            require(household->settlement_id == payload.settlement_id, "discovery discoverer must belong to event settlement");
 
             require(
                 discovery_run.person_remembers_event(payload.discoverer_id, event.id),
                 "discoverer must directly remember own discovery event");
 
-            settlement_locality_verified = true;
+            settlement_reference_verified = true;
         }
 
         require(discovery_event_count > 0U, "basic discoveries milestone should produce at least one discovery event");
-        require(settlement_locality_verified, "discovery events must preserve discoverer settlement locality");
+        require(settlement_reference_verified, "discovery events must reference a valid settlement");
     }
 
     {

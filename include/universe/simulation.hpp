@@ -26,6 +26,7 @@ using KnowledgeId = std::uint64_t;
 using CommunicationId = std::uint64_t;
 using RecordId = std::uint64_t;
 using InstitutionId = std::uint64_t;
+using BuildingId = std::uint64_t;
 
 enum class BiologicalSex : std::uint8_t {
     Female = 0,
@@ -61,6 +62,14 @@ struct Household {
     SettlementId settlement_id{};
     std::vector<PersonId> member_ids{};
     HouseholdResourceState resources{};
+    SettlementMaterialInventory owned_materials{};
+    std::uint32_t productive_access_share_points{};
+    std::uint32_t commons_access_share_points{};
+    std::int64_t cumulative_food_transferred_in{};
+    std::int64_t cumulative_food_transferred_out{};
+    std::int64_t cumulative_material_transferred_in{};
+    std::int64_t cumulative_material_transferred_out{};
+    std::int64_t derived_wealth_points{};
 };
 
 struct Settlement {
@@ -76,6 +85,48 @@ struct Settlement {
     std::int64_t cumulative_timber_produced{};
     std::int64_t cumulative_basic_tool_produced{};
     std::int64_t cumulative_basic_tool_broken{};
+    ResourceAmount commons_food{};
+    std::int64_t last_transfer_food_volume{};
+    std::int64_t last_exchange_volume{};
+    std::uint32_t economic_viability_streak{};
+    std::uint32_t economic_pressure_streak{};
+    std::int64_t dwelling_capacity_bonus{};
+    std::int64_t food_store_capacity_bonus{};
+    std::int64_t workshop_capacity_bonus{};
+    std::int64_t last_median_household_wealth{};
+    std::int64_t last_min_household_wealth{};
+    std::int64_t last_max_household_wealth{};
+    std::uint64_t last_inequality_numerator{};
+    std::uint64_t last_inequality_denominator{};
+};
+
+enum class BuildingType : std::uint8_t {
+    Dwelling = 0,
+    FoodStore = 1,
+    Workshop = 2,
+};
+
+enum class ConstructionState : std::uint8_t {
+    Planned = 0,
+    ActiveConstruction = 1,
+    Complete = 2,
+};
+
+struct Building {
+    BuildingId id{};
+    BuildingType type{BuildingType::Dwelling};
+    SettlementId settlement_id{};
+    std::optional<HouseholdId> owner_household_id{};
+    bool settlement_commons_owned{true};
+    ConstructionState state{ConstructionState::Planned};
+    std::int64_t timber_required{};
+    std::int64_t stone_required{};
+    std::int64_t labour_required{};
+    std::int64_t timber_committed{};
+    std::int64_t stone_committed{};
+    std::int64_t labour_completed{};
+    SimulationTime started_at{};
+    std::optional<SimulationTime> completed_at{};
 };
 
 enum class EnvironmentClass : std::uint8_t {
@@ -400,10 +451,17 @@ struct WorldState {
     std::int64_t material_labour_allocated{};
     std::int64_t material_labour_shortfall{};
     std::int64_t material_production_shortfall{};
+    std::int64_t total_household_wealth{};
+    std::int64_t total_settlement_commons_food{};
+    std::uint64_t active_buildings{};
+    std::uint64_t active_projects{};
+    std::int64_t total_exchange_volume{};
+    std::int64_t total_transfer_volume{};
     std::vector<Person> people{};
     std::vector<Household> households{};
     std::vector<RegionEnvironmentState> regions{};
     std::vector<Settlement> settlements{};
+    std::vector<Building> buildings{};
     std::vector<SimulationEvent> event_log{};
     std::vector<AgentMemory> agent_memories{};
     std::vector<KnowledgeTransmission> knowledge_transmissions{};
@@ -454,6 +512,7 @@ private:
     [[nodiscard]] CommunicationId next_communication_id() noexcept;
     [[nodiscard]] RecordId next_record_id() noexcept;
     [[nodiscard]] InstitutionId next_institution_id() noexcept;
+    [[nodiscard]] BuildingId next_building_id() noexcept;
     [[nodiscard]] SimulationSeed root_seed() const noexcept;
     [[nodiscard]] SimulationSeed person_seed(PersonId person_id) const noexcept;
     [[nodiscard]] SimulationSeed household_seed(HouseholdId household_id) const noexcept;
@@ -488,6 +547,10 @@ private:
     void process_food_period(std::uint64_t food_period);
     void process_materials_period(std::uint64_t food_period);
     void process_occupation_reassignment(std::uint64_t demographic_year);
+    void process_household_access_allocation();
+    void process_household_stabilization_transfers();
+    void process_local_exchange(std::uint64_t demographic_year);
+    void process_construction(std::uint64_t demographic_year);
     void clear_occupations_for_extinct_or_invalid_households();
     void refresh_labour_aggregates();
     void apply_person_nutrition_and_health(Person& person, std::int64_t required_food, std::int64_t allocated_food);
@@ -537,6 +600,7 @@ private:
     void rebuild_knowledge_indexes();
     void rebuild_communication_indexes();
     void rebuild_record_indexes();
+    void refresh_economic_aggregates() noexcept;
     void refresh_population_count() noexcept;
 
     struct KnowledgeSemanticKey {
@@ -578,6 +642,7 @@ private:
     CommunicationId next_communication_id_{1};
     RecordId next_record_id_{1};
     InstitutionId next_institution_id_{1};
+    BuildingId next_building_id_{1};
     SimulationDuration demography_interval_{DemographicCalendarAdapter::year_duration()};
     SimulationTime demography_next_run_{DemographicCalendarAdapter::year_duration().ticks};
     SimulationDuration food_interval_{days(1)};
