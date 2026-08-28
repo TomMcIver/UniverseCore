@@ -5579,12 +5579,36 @@ void Simulation::process_construction(const std::uint64_t demographic_year) {
 }
 
 void Simulation::refresh_economic_aggregates() noexcept {
+    const auto saturating_increment_u32 = [](const std::uint32_t value) noexcept {
+        return value < std::numeric_limits<std::uint32_t>::max() ? static_cast<std::uint32_t>(value + 1U)
+                                                                 : std::numeric_limits<std::uint32_t>::max();
+    };
+    const auto add_u64_checked = [](const std::uint64_t left, const std::uint64_t right, std::uint64_t& out) noexcept {
+        if (left > std::numeric_limits<std::uint64_t>::max() - right) {
+            out = std::numeric_limits<std::uint64_t>::max();
+            return false;
+        }
+        out = left + right;
+        return true;
+    };
+    const auto mul_u64_checked = [](const std::uint64_t left, const std::uint64_t right, std::uint64_t& out) noexcept {
+        if (left != 0U && right > std::numeric_limits<std::uint64_t>::max() / left) {
+            out = std::numeric_limits<std::uint64_t>::max();
+            return false;
+        }
+        out = left * right;
+        return true;
+    };
+
     state_.total_household_wealth = 0;
     state_.total_settlement_commons_food = 0;
     state_.active_buildings = 0;
     state_.active_projects = 0;
     state_.total_exchange_volume = 0;
     state_.total_transfer_volume = 0;
+
+    std::unordered_map<SettlementId, std::vector<std::int64_t>> wealth_by_settlement;
+    wealth_by_settlement.reserve(state_.settlements.size());
 
     for (auto& household : state_.households) {
         const auto wealth_food = std::max<std::int64_t>(0, household.resources.food_inventory.value);
@@ -5594,12 +5618,79 @@ void Simulation::refresh_economic_aggregates() noexcept {
         const auto wealth_tools = std::max<std::int64_t>(0, household.owned_materials.basic_tool.value) * kWealthValueBasicTool;
         household.derived_wealth_points = wealth_food + wealth_wood + wealth_stone + wealth_timber + wealth_tools;
         state_.total_household_wealth += household.derived_wealth_points;
+        wealth_by_settlement[household.settlement_id].push_back(household.derived_wealth_points);
     }
 
-    for (const auto& settlement : state_.settlements) {
+    for (auto& settlement : state_.settlements) {
         state_.total_settlement_commons_food += std::max<std::int64_t>(0, settlement.commons_food.value);
         state_.total_exchange_volume += std::max<std::int64_t>(0, settlement.last_exchange_volume);
         state_.total_transfer_volume += std::max<std::int64_t>(0, settlement.last_transfer_food_volume);
+
+        const auto pressure = settlement_pressure_per_10k(settlement);
+        if (pressure >= kHighPressureThresholdPer10k) {
+            settlement.economic_pressure_streak = saturating_increment_u32(settlement.economic_pressure_streak);
+        } else {
+            settlement.economic_pressure_streak = 0U;
+        }
+
+        const auto wealth_it = wealth_by_settlement.find(settlement.id);
+        if (wealth_it == wealth_by_settlement.end() || wealth_it->second.empty()) {
+            settlement.last_median_household_wealth = 0;
+            settlement.last_min_household_wealth = 0;
+            settlement.last_max_household_wealth = 0;
+            settlement.last_inequality_numerator = 0;
+            settlement.last_inequality_denominator = 0;
+            settlement.economic_viability_streak = 0U;
+            continue;
+        }
+
+        auto wealths = wealth_it->second;
+        std::sort(wealths.begin(), wealths.end());
+        settlement.last_min_household_wealth = wealths.front();
+        settlement.last_max_household_wealth = wealths.back();
+        settlement.last_median_household_wealth = wealths[wealths.size() / 2U];
+
+        std::uint64_t total_wealth = 0;
+        for (const auto wealth : wealths) {
+            total_wealth += static_cast<std::uint64_t>(std::max<std::int64_t>(0, wealth));
+        }
+
+        if (total_wealth == 0U) {
+            settlement.last_inequality_numerator = 0;
+            settlement.last_inequality_denominator = 0;
+        } else {
+            std::uint64_t pairwise_gap = 0;
+            std::uint64_t prefix_sum = 0;
+            for (std::size_t i = 0; i < wealths.size(); ++i) {
+                const auto wealth_u64 = static_cast<std::uint64_t>(std::max<std::int64_t>(0, wealths[i]));
+                std::uint64_t weighted = 0;
+                mul_u64_checked(wealth_u64, static_cast<std::uint64_t>(i), weighted);
+
+                if (weighted >= prefix_sum) {
+                    std::uint64_t updated_pairwise_gap = 0;
+                    add_u64_checked(pairwise_gap, weighted - prefix_sum, updated_pairwise_gap);
+                    pairwise_gap = updated_pairwise_gap;
+                }
+
+                std::uint64_t updated_prefix_sum = 0;
+                add_u64_checked(prefix_sum, wealth_u64, updated_prefix_sum);
+                prefix_sum = updated_prefix_sum;
+            }
+
+            std::uint64_t numerator = 0;
+            mul_u64_checked(pairwise_gap, 2U, numerator);
+
+            std::uint64_t denominator = 0;
+            mul_u64_checked(static_cast<std::uint64_t>(wealths.size()), total_wealth, denominator);
+            settlement.last_inequality_numerator = std::min(numerator, denominator);
+            settlement.last_inequality_denominator = denominator;
+        }
+
+        if (pressure <= 5'500U && settlement.last_median_household_wealth > 0) {
+            settlement.economic_viability_streak = saturating_increment_u32(settlement.economic_viability_streak);
+        } else {
+            settlement.economic_viability_streak = 0U;
+        }
     }
 
     for (const auto& building : state_.buildings) {

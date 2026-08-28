@@ -47,6 +47,8 @@ The project deliberately starts without Unreal Engine. The initial objective is 
 - Deterministic settlement-local material ownership exchange/partitioning
 - Deterministic construction projects with canonical building progression and completion state
 - Deterministic building effects on settlement food/material capacity
+- Deterministic settlement pressure and viability streak tracking from household access conditions
+- Deterministic per-settlement household wealth distribution and bounded inequality metrics
 - Optional SDL3 + Dear ImGui simulation inspector (`UNIVERSECORE_BUILD_UI=ON`)
 - UI command/query adapter over canonical simulation state
 - UI smoke test validating deterministic advance/save/load behavior

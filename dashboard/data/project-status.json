@@ -2,13 +2,13 @@
   "project": "UniverseCore",
   "as_of": "2026-08-28",
   "current_phase": "Milestone 3 economy and settlement growth (active)",
-  "current_task": "Milestone 3C deterministic construction and building effects",
-  "next_task": "Milestone 3D settlement pressure and bounded growth",
+  "current_task": "Milestone 3E wealth/inequality dynamics and balancing",
+  "next_task": "Milestone 3 work allocation and production-chain balancing",
   "build": {
     "canonical_workflow": "podman scripts/container-test.sh",
     "last_verified": "2026-08-28",
     "status": "passing",
-    "notes": "Verified in universecore-dev container with canonical fast and integration suites after Milestone 3C deterministic construction progression and building capacity effects"
+    "notes": "Verified in universecore-dev container with canonical fast and integration suites after Milestone 3D/M3E settlement pressure and wealth-inequality aggregate instrumentation"
   },
   "progress": {
     "simulation_foundation_percent": 100,
@@ -88,7 +88,7 @@
       "id": "M3",
       "name": "Economy and Settlement Growth",
       "status": "in_progress",
-      "percent": 43
+      "percent": 71
     },
     {
       "id": "UE",
@@ -121,20 +121,20 @@
       "Milestone 3A ownership/access substrate",
       "Milestone 3B deterministic local exchange",
       "Milestone 3C deterministic construction and building effects",
+      "Milestone 3D settlement pressure and bounded growth",
+      "Milestone 3E wealth/inequality dynamics and balancing",
       "Snapshot schema v16 and validation",
       "Canonical Podman build/test workflow",
       "Development dashboard + deployment workflow"
     ],
     "active": [
-      "Milestone 3D settlement pressure and bounded growth"
+      "Milestone 3 work allocation and production-chain balancing"
     ],
     "planned": [
       "Milestone 1 migration implementation (designed/deferred)",
       "Milestone 1 long-horizon viability extension (deferred follow-up)",
       "Milestone 3 economy and settlement growth",
-      "Milestone 3C deterministic construction and building effects",
-      "Milestone 3D settlement pressure and bounded growth",
-      "Milestone 3E wealth/inequality dynamics and balancing"
+      "Milestone 3 work allocation and production-chain balancing"
     ]
   },
   "invariants": [

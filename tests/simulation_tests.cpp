@@ -331,6 +331,19 @@ void verify_resource_invariants(const universe::WorldState& state, const std::in
         require(settlement.dwelling_capacity_bonus >= 0, "settlement dwelling capacity bonus must be non-negative");
         require(settlement.food_store_capacity_bonus >= 0, "settlement food store capacity bonus must be non-negative");
         require(settlement.workshop_capacity_bonus >= 0, "settlement workshop capacity bonus must be non-negative");
+        require(settlement.last_min_household_wealth >= 0, "settlement min household wealth must be non-negative");
+        require(settlement.last_median_household_wealth >= 0, "settlement median household wealth must be non-negative");
+        require(settlement.last_max_household_wealth >= 0, "settlement max household wealth must be non-negative");
+        require(
+            settlement.last_min_household_wealth <= settlement.last_median_household_wealth &&
+                settlement.last_median_household_wealth <= settlement.last_max_household_wealth,
+            "settlement wealth statistics must be ordered min <= median <= max");
+        require(
+            settlement.last_inequality_numerator <= settlement.last_inequality_denominator,
+            "settlement inequality ratio numerator must not exceed denominator");
+        if (settlement.last_inequality_denominator == 0U) {
+            require(settlement.last_inequality_numerator == 0U, "zero inequality denominator requires zero numerator");
+        }
         total_commons_food += settlement.commons_food.value;
         total_transfer_volume += settlement.last_transfer_food_volume;
         total_exchange_volume += settlement.last_exchange_volume;

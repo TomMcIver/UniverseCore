@@ -107,8 +107,8 @@ Exit criteria: a discovery can originate with one person, spread through part of
 - [x] ownership/access
 - [x] exchange
 - [x] construction
-- [ ] land/resource pressure
-- [ ] inequality/household wealth
+- [x] land/resource pressure
+- [x] inequality/household wealth
 
 Exit criteria: settlement growth is constrained by real resources and labour rather than scripted population thresholds.
 
