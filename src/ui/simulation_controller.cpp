@@ -242,6 +242,10 @@ std::span<const Settlement> SimulationController::settlements() const noexcept {
     return simulation_.state().settlements;
 }
 
+std::span<const Building> SimulationController::buildings() const noexcept {
+    return simulation_.state().buildings;
+}
+
 std::span<const RegionEnvironmentState> SimulationController::regions() const noexcept {
     return simulation_.state().regions;
 }

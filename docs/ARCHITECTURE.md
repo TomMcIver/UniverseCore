@@ -271,6 +271,13 @@ Current M2A modelling limits (intentional abstractions):
 - wood is modelled as renewable stock abstraction
 - stone is modelled as finite non-regenerating abstraction
 
+Current implementation status (Milestone 3 complete):
+
+- deterministic work allocation prioritizes subsistence before optional material/construction labour
+- deterministic production-chain balancing integrates ownership, transfers/exchange, tool coverage, and construction demand
+- deterministic settlement founding uses viability/resource constraints rather than threshold-only scripted growth
+- deterministic bounded wealth/inequality and pressure/viability metrics are available in headless state and inspector UI
+
 ### Phase C
 Cohort aggregation for distant populations.
 

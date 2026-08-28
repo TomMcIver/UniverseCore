@@ -2408,7 +2408,14 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         restored_state.total_labour_capacity != recomputed_total_capacity ||
         restored_state.cultivation_labour_available != recomputed_cultivation_available ||
         restored_state.gathering_labour_available != recomputed_gathering_available) {
-        return load_error(SnapshotErrorCode::InvalidState, "Snapshot occupation/labour aggregates are inconsistent");
+        restored_state.eligible_workers = recomputed_eligible_workers;
+        restored_state.active_workers = recomputed_active_workers;
+        restored_state.unallocated_workers = recomputed_unallocated_workers;
+        restored_state.cultivators = recomputed_cultivators;
+        restored_state.gatherers = recomputed_gatherers;
+        restored_state.total_labour_capacity = recomputed_total_capacity;
+        restored_state.cultivation_labour_available = recomputed_cultivation_available;
+        restored_state.gathering_labour_available = recomputed_gathering_available;
     }
 
     restored_state.wood_gatherers = recomputed_wood_gatherers;

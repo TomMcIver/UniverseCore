@@ -149,6 +149,7 @@ public:
     [[nodiscard]] std::span<const Person> people() const noexcept;
     [[nodiscard]] std::span<const Household> households() const noexcept;
     [[nodiscard]] std::span<const Settlement> settlements() const noexcept;
+    [[nodiscard]] std::span<const Building> buildings() const noexcept;
     [[nodiscard]] std::span<const RegionEnvironmentState> regions() const noexcept;
     [[nodiscard]] std::span<const SimulationEvent> events() const noexcept;
     [[nodiscard]] std::span<const AgentMemory> agent_memories() const noexcept;

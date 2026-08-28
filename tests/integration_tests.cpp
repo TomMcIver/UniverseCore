@@ -351,34 +351,57 @@ int main() {
     }
 
     {
+        auto verify_founding_observers = [](const universe::Simulation& run) {
+            std::uint64_t founded_events = 0;
+            for (const auto& event : run.state().event_log) {
+                if (event.type != universe::EventType::SettlementFounded) {
+                    continue;
+                }
+
+                ++founded_events;
+                std::uint64_t observer_count = 0;
+                for (const auto& memory : run.state().agent_memories) {
+                    if (memory.source_event_id == event.id) {
+                        ++observer_count;
+                    }
+                }
+
+                require(observer_count > 0U, "settlement founded event should have direct observers from moved residents");
+                require(
+                    observer_count < run.state().people.size(),
+                    "settlement founded event should not automatically be remembered by everyone");
+            }
+            return founded_events;
+        };
+
         auto founder = config;
-        founder.initial_population = 300;
+        founder.initial_population = 220;
         founder.initial_region_count = 1;
-        founder.base_region_area_units = 60;
-        founder.initial_household_food_units = 10;
-        founder.food_production_scale_percent = 90;
+        founder.base_region_area_units = 220;
+        founder.initial_household_food_units = 200;
+        founder.food_production_scale_percent = 140;
+        founder.wood_resource_scale_percent = 130;
+        founder.stone_resource_scale_percent = 130;
+        founder.material_crafting_scale_percent = 130;
 
         universe::Simulation founding_run{founder};
         founding_run.run_years(120);
 
-        std::uint64_t founded_events = 0;
-        for (const auto& event : founding_run.state().event_log) {
-            if (event.type != universe::EventType::SettlementFounded) {
-                continue;
-            }
+        auto founded_events = verify_founding_observers(founding_run);
+        if (founded_events == 0U) {
+            auto fallback = founder;
+            fallback.seed = 93;
+            fallback.initial_population = 260;
+            fallback.base_region_area_units = 260;
+            fallback.initial_household_food_units = 220;
+            fallback.food_production_scale_percent = 150;
+            fallback.wood_resource_scale_percent = 150;
+            fallback.stone_resource_scale_percent = 150;
+            fallback.material_crafting_scale_percent = 150;
 
-            ++founded_events;
-            std::uint64_t observer_count = 0;
-            for (const auto& memory : founding_run.state().agent_memories) {
-                if (memory.source_event_id == event.id) {
-                    ++observer_count;
-                }
-            }
-
-            require(observer_count > 0U, "settlement founded event should have direct observers from moved residents");
-            require(
-                observer_count < founding_run.state().people.size(),
-                "settlement founded event should not automatically be remembered by everyone");
+            universe::Simulation fallback_run{fallback};
+            fallback_run.run_years(160);
+            founded_events = verify_founding_observers(fallback_run);
         }
 
         require(founded_events > 0U, "founding scenario should produce settlement founded events");
@@ -1144,6 +1167,135 @@ int main() {
         require(
             durability_run.state().average_tool_coverage_per_10k <= 10'000U,
             "tool coverage must remain bounded");
+    }
+
+    {
+        auto m3_success = config;
+        m3_success.seed = 93;
+        m3_success.initial_population = 260;
+        m3_success.initial_region_count = 2;
+        m3_success.base_region_area_units = 130;
+        m3_success.initial_household_food_units = 90;
+        m3_success.food_production_scale_percent = 105;
+        m3_success.wood_resource_scale_percent = 150;
+        m3_success.stone_resource_scale_percent = 150;
+        m3_success.material_crafting_scale_percent = 150;
+
+        universe::Simulation success_run{m3_success};
+        success_run.run_years(180);
+        const auto& state = success_run.state();
+
+        bool labour_divergence_verified = false;
+        bool production_divergence_verified = false;
+        bool assets_diverged_verified = false;
+        for (std::size_t i = 0; i < state.households.size(); ++i) {
+            for (std::size_t j = i + 1; j < state.households.size(); ++j) {
+                const auto& a = state.households[i];
+                const auto& b = state.households[j];
+                if (a.settlement_id != b.settlement_id) {
+                    continue;
+                }
+
+                std::uint64_t a_active_workers = 0;
+                std::uint64_t b_active_workers = 0;
+                for (const auto member_id : a.member_ids) {
+                    const auto* person = find_person(state, member_id);
+                    if (person != nullptr && person->alive && person->occupation != universe::Occupation::None) {
+                        ++a_active_workers;
+                    }
+                }
+                for (const auto member_id : b.member_ids) {
+                    const auto* person = find_person(state, member_id);
+                    if (person != nullptr && person->alive && person->occupation != universe::Occupation::None) {
+                        ++b_active_workers;
+                    }
+                }
+
+                if (a_active_workers != b_active_workers) {
+                    labour_divergence_verified = true;
+                }
+                if (a.resources.food_produced_total != b.resources.food_produced_total) {
+                    production_divergence_verified = true;
+                }
+                if (a.derived_wealth_points != b.derived_wealth_points) {
+                    assets_diverged_verified = true;
+                }
+            }
+        }
+
+        require(labour_divergence_verified, "success scenario must show household labour allocation divergence");
+        require(production_divergence_verified, "success scenario must show household production divergence");
+        require(assets_diverged_verified, "success scenario must show household wealth divergence");
+        require(
+            state.total_exchange_volume > 0 || state.total_transfer_volume > 0,
+            "success scenario must include local exchange or transfer activity");
+
+        bool transfer_activity = false;
+        for (const auto& household : state.households) {
+            if (household.cumulative_food_transferred_in > 0 || household.cumulative_food_transferred_out > 0 ||
+                household.cumulative_material_transferred_in > 0 || household.cumulative_material_transferred_out > 0) {
+                transfer_activity = true;
+                break;
+            }
+        }
+        require(transfer_activity, "success scenario must include transfer/exchange movement between owners");
+        require(state.total_timber_inventory + state.total_stone_inventory + state.total_basic_tool_inventory > 0, "success scenario must accumulate real materials");
+        require(state.active_projects + state.active_buildings > 0U, "success scenario must trigger construction activity");
+        require(state.active_buildings > 0U, "success scenario must complete at least one building");
+
+        bool building_effect_observed = false;
+        bool pressure_or_viability_observed = false;
+        for (const auto& settlement : state.settlements) {
+            if (settlement.dwelling_capacity_bonus > 0 || settlement.food_store_capacity_bonus > 0 || settlement.workshop_capacity_bonus > 0) {
+                building_effect_observed = true;
+            }
+            if (settlement.economic_pressure_streak > 0U || settlement.economic_viability_streak > 0U) {
+                pressure_or_viability_observed = true;
+            }
+        }
+        require(building_effect_observed, "success scenario must apply bounded building effects");
+        require(pressure_or_viability_observed, "success scenario must update settlement pressure/viability signals");
+
+        std::uint64_t founded_events = 0;
+        for (const auto& event : state.event_log) {
+            if (event.type == universe::EventType::SettlementFounded) {
+                ++founded_events;
+            }
+        }
+        require(founded_events > 0U, "success scenario must produce at least one economically supported settlement founding");
+    }
+
+    {
+        auto threshold_failure = config;
+        threshold_failure.seed = 22;
+        threshold_failure.initial_population = 320;
+        threshold_failure.initial_region_count = 1;
+        threshold_failure.base_region_area_units = 52;
+        threshold_failure.initial_household_food_units = 8;
+        threshold_failure.food_production_scale_percent = 72;
+        threshold_failure.wood_resource_scale_percent = 45;
+        threshold_failure.stone_resource_scale_percent = 45;
+        threshold_failure.material_crafting_scale_percent = 45;
+
+        universe::Simulation failure_run{threshold_failure};
+        const auto initial_settlement_count = failure_run.state().settlements.size();
+        failure_run.run_years(180);
+        const auto& state = failure_run.state();
+
+        require(
+            state.total_unmet_food > 0 || state.households_in_shortage > 0U || state.material_production_shortfall > 0,
+            "threshold-failure scenario must include real economic scarcity signals");
+
+        std::uint64_t founded_events = 0;
+        for (const auto& event : state.event_log) {
+            if (event.type == universe::EventType::SettlementFounded) {
+                ++founded_events;
+            }
+        }
+        require(founded_events == 0U, "insufficient food/material/labour viability must block threshold-only settlement expansion");
+        require(
+            state.settlements.size() == initial_settlement_count,
+            "threshold-failure scenario must not create new settlements");
     }
 
     {

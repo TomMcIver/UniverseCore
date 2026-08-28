@@ -102,13 +102,15 @@ Exit criteria: a discovery can originate with one person, spread through part of
 
 ## Milestone 3: Economy and settlement growth
 
-- [ ] work allocation
-- [ ] production chains
+- [x] work allocation
+- [x] production chains
 - [x] ownership/access
 - [x] exchange
 - [x] construction
 - [x] land/resource pressure
 - [x] inequality/household wealth
+
+Status: **complete**
 
 Exit criteria: settlement growth is constrained by real resources and labour rather than scripted population thresholds.
 

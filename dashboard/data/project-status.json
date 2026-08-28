@@ -1,18 +1,18 @@
 {
   "project": "UniverseCore",
   "as_of": "2026-08-28",
-  "current_phase": "Milestone 3 economy and settlement growth (active)",
-  "current_task": "Milestone 3E wealth/inequality dynamics and balancing",
-  "next_task": "Milestone 3 work allocation and production-chain balancing",
+  "current_phase": "Milestone 3 economy and settlement growth (complete)",
+  "current_task": "Milestone 3 closeout complete (stopping before Milestone 4)",
+  "next_task": "Milestone 4 simulation LOD planning",
   "build": {
     "canonical_workflow": "podman scripts/container-test.sh",
     "last_verified": "2026-08-28",
     "status": "passing",
-    "notes": "Verified in universecore-dev container with canonical fast and integration suites after Milestone 3D/M3E settlement pressure and wealth-inequality aggregate instrumentation"
+    "notes": "Verified in universecore-dev container with canonical fast/integration/long suites, full container-test.sh, and UI smoke checks (container + Windows host) after Milestone 3 work-allocation and production-chain balancing."
   },
   "progress": {
     "simulation_foundation_percent": 100,
-    "bronze_age_simulator_percent": 57,
+    "bronze_age_simulator_percent": 66,
     "playable_vertical_slice_percent": 7,
     "full_game_vision_percent": 1,
     "note": "Percentages are approximate planning estimates, not objective measurements."
@@ -87,8 +87,8 @@
     {
       "id": "M3",
       "name": "Economy and Settlement Growth",
-      "status": "in_progress",
-      "percent": 71
+      "status": "complete",
+      "percent": 100
     },
     {
       "id": "UE",
@@ -123,18 +123,17 @@
       "Milestone 3C deterministic construction and building effects",
       "Milestone 3D settlement pressure and bounded growth",
       "Milestone 3E wealth/inequality dynamics and balancing",
+      "Milestone 3 work allocation and subsistence-priority labour balancing",
+      "Milestone 3 production-chain balancing with construction/material demand integration",
       "Snapshot schema v16 and validation",
       "Canonical Podman build/test workflow",
       "Development dashboard + deployment workflow"
     ],
-    "active": [
-      "Milestone 3 work allocation and production-chain balancing"
-    ],
+    "active": [],
     "planned": [
       "Milestone 1 migration implementation (designed/deferred)",
       "Milestone 1 long-horizon viability extension (deferred follow-up)",
-      "Milestone 3 economy and settlement growth",
-      "Milestone 3 work allocation and production-chain balancing"
+      "Milestone 4 simulation LOD"
     ]
   },
   "invariants": [

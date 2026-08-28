@@ -23,12 +23,15 @@ constexpr std::uint32_t kInitialAllocatedSettlementShare = 8'500;
 constexpr std::uint32_t kHighPressureThresholdPer10k = 8'500;
 constexpr std::uint32_t kFoundingMinimumUnallocatedShare = 1'500;
 constexpr std::uint32_t kFoundingDefaultShare = 900;
-constexpr std::uint64_t kFoundingMinimumSourceHouseholds = 5;
+constexpr std::uint64_t kFoundingMinimumSourceHouseholds = 4;
 constexpr std::uint64_t kFoundingMinimumNewHouseholds = 2;
 constexpr std::uint64_t kFoundingMinimumRemainingHouseholds = 1;
+constexpr std::uint64_t kFoundingMinimumEligibleWorkers = 4;
+constexpr std::uint32_t kFoundingMinimumEconomicViabilityStreak = 2;
+constexpr std::uint32_t kFoundingMinimumSourceShareAfterSplit = 1'500;
 constexpr std::uint64_t kTargetHouseholdsPerSettlement = 8;
-constexpr std::uint64_t kMaxInitialSettlementsPerRegion = 6;
-constexpr std::int64_t kAssignmentRequiredCoveragePercent = 115;
+constexpr std::uint64_t kMaxInitialSettlementsPerRegion = 4;
+constexpr std::int64_t kAssignmentRequiredCoveragePercent = 140;
 constexpr std::int64_t kSettlementMaterialShareScale = 10'000;
 constexpr std::int64_t kToolWearWorkUnitsPerBreak = 24;
 constexpr std::uint32_t kToolProductivityBonusPercentAtFullCoverage = 45;
@@ -72,6 +75,9 @@ constexpr std::int64_t kWorkshopLabourRequired = 620;
 constexpr std::int64_t kDwellingCapacityBonusPerBuilding = 18;
 constexpr std::int64_t kFoodStoreCapacityBonusPerBuilding = 32;
 constexpr std::int64_t kWorkshopCapacityBonusPerBuilding = 14;
+constexpr std::int64_t kCommonsReserveTargetDays = 10;
+constexpr std::int64_t kCommonsReplenishDays = 8;
+constexpr std::int64_t kFoodCrisisBufferDays = 7;
 
 struct LabourDemandProfile {
     std::int64_t cultivation_labour_demand{};
@@ -88,6 +94,30 @@ struct MaterialTargetProfile {
     std::int64_t timber_target{};
     std::int64_t basic_tool_target{};
 };
+
+struct ConstructionDemandProfile {
+    std::int64_t timber_remaining{};
+    std::int64_t stone_remaining{};
+    std::int64_t labour_remaining{};
+    std::uint64_t active_projects{};
+};
+
+[[nodiscard]] ConstructionDemandProfile construction_demand_for_settlement(
+    const SettlementId settlement_id,
+    const std::vector<Building>& buildings) noexcept {
+    ConstructionDemandProfile demand{};
+    for (const auto& building : buildings) {
+        if (building.settlement_id != settlement_id || building.state == ConstructionState::Complete) {
+            continue;
+        }
+
+        ++demand.active_projects;
+        demand.timber_remaining += std::max<std::int64_t>(0, building.timber_required - building.timber_committed);
+        demand.stone_remaining += std::max<std::int64_t>(0, building.stone_required - building.stone_committed);
+        demand.labour_remaining += std::max<std::int64_t>(0, building.labour_required - building.labour_completed);
+    }
+    return demand;
+}
 
 [[nodiscard]] MaterialTargetProfile material_targets_for_settlement(
     const std::uint64_t alive_population,
@@ -1488,20 +1518,48 @@ void Simulation::process_materials_period(const std::uint64_t food_period) {
             const auto targets = material_targets_for_settlement(
                 settlement_state->alive_population,
                 settlement_state->eligible_workers);
+            const auto construction_demand =
+                construction_demand_for_settlement(settlement_state->settlement->id, state_.buildings);
 
             auto& inventory = settlement_state->settlement->materials;
-            const auto timber_deficit = std::max<std::int64_t>(0, targets.timber_target - inventory.timber.value);
+            std::int64_t timber_target_with_construction = 0;
+            if (!checked_add_i64(targets.timber_target, construction_demand.timber_remaining, timber_target_with_construction)) {
+                throw std::overflow_error("Timber target with construction overflow");
+            }
+            std::int64_t stone_target_with_construction = 0;
+            if (!checked_add_i64(targets.stone_target, construction_demand.stone_remaining, stone_target_with_construction)) {
+                throw std::overflow_error("Stone target with construction overflow");
+            }
+            const auto timber_deficit = std::max<std::int64_t>(0, timber_target_with_construction - inventory.timber.value);
             const auto tool_deficit = std::max<std::int64_t>(0, targets.basic_tool_target - inventory.basic_tool.value);
+            const auto stone_deficit = std::max<std::int64_t>(0, stone_target_with_construction - inventory.stone.value);
 
-            const auto wood_recipe_need =
-                (timber_deficit * material_parameters_.wood_per_timber) +
-                (tool_deficit * material_parameters_.wood_per_basic_tool);
-            const auto stone_recipe_need = tool_deficit * material_parameters_.stone_per_basic_tool;
+            std::int64_t timber_wood_recipe_need = 0;
+            std::int64_t tool_wood_recipe_need = 0;
+            if (!checked_mul_i64(timber_deficit, material_parameters_.wood_per_timber, timber_wood_recipe_need) ||
+                !checked_mul_i64(tool_deficit, material_parameters_.wood_per_basic_tool, tool_wood_recipe_need)) {
+                throw std::overflow_error("Wood recipe need overflow");
+            }
+            std::int64_t wood_recipe_need = 0;
+            if (!checked_add_i64(timber_wood_recipe_need, tool_wood_recipe_need, wood_recipe_need)) {
+                throw std::overflow_error("Wood recipe need aggregation overflow");
+            }
+
+            std::int64_t stone_recipe_need = 0;
+            if (!checked_mul_i64(tool_deficit, material_parameters_.stone_per_basic_tool, stone_recipe_need)) {
+                throw std::overflow_error("Stone recipe need overflow");
+            }
 
             const auto wood_reserve_need = std::max<std::int64_t>(0, targets.wood_target - inventory.wood.value);
-            const auto stone_reserve_need = std::max<std::int64_t>(0, targets.stone_target - inventory.stone.value);
-            const auto wood_total_need = wood_recipe_need + wood_reserve_need;
-            const auto stone_total_need = stone_recipe_need + stone_reserve_need;
+            const auto stone_reserve_need = stone_deficit;
+            std::int64_t wood_total_need = 0;
+            if (!checked_add_i64(wood_recipe_need, wood_reserve_need, wood_total_need)) {
+                throw std::overflow_error("Wood total need overflow");
+            }
+            std::int64_t stone_total_need = 0;
+            if (!checked_add_i64(stone_recipe_need, stone_reserve_need, stone_total_need)) {
+                throw std::overflow_error("Stone total need overflow");
+            }
 
             const auto output_scale_percent =
                 tool_output_scale_percent(settlement_state->settlement->last_tool_coverage_per_10k);
@@ -3401,9 +3459,13 @@ void Simulation::initialize_settlements() {
             kTargetHouseholdsPerSettlement;
         settlement_count = std::max<std::uint64_t>(1U, std::min<std::uint64_t>(settlement_count, kMaxInitialSettlementsPerRegion));
 
-        const auto allocated_share = std::min<std::uint32_t>(
-            kInitialAllocatedSettlementShare,
-            static_cast<std::uint32_t>(kSettlementShareScale));
+        const auto share_seed = derive_seed(region_seed(region_id), SeedDomain::SettlementAssignment, 1U);
+        const auto share_jitter = static_cast<std::int32_t>(seed_random_bounded(share_seed, 1'001U)) - 500;
+        const auto allocated_share_i32 = clamp_i32(
+            static_cast<std::int32_t>(kInitialAllocatedSettlementShare) + share_jitter,
+            static_cast<std::int32_t>(settlement_count),
+            static_cast<std::int32_t>(kSettlementShareScale));
+        const auto allocated_share = static_cast<std::uint32_t>(allocated_share_i32);
 
         std::vector<SettlementId> settlement_ids;
         settlement_ids.reserve(static_cast<std::size_t>(settlement_count));
@@ -3651,9 +3713,6 @@ void Simulation::process_settlement_founding(const std::uint64_t demographic_yea
         const auto unallocated_share = (allocated_share >= kSettlementShareScale)
             ? 0U
             : (kSettlementShareScale - allocated_share);
-        if (unallocated_share < kFoundingMinimumUnallocatedShare) {
-            continue;
-        }
 
         std::sort(active_settlements.begin(), active_settlements.end(), [](const Settlement* lhs, const Settlement* rhs) {
             return lhs->id < rhs->id;
@@ -3664,9 +3723,16 @@ void Simulation::process_settlement_founding(const std::uint64_t demographic_yea
 
         for (auto* candidate : active_settlements) {
             std::uint64_t alive_households = 0;
+            std::uint64_t eligible_workers = 0;
+            std::int64_t required_food = 0;
+            std::int64_t stored_food = std::max<std::int64_t>(0, candidate->commons_food.value);
             for (const auto& household : state_.households) {
                 if (household.region_id != region_id || household.settlement_id != candidate->id) {
                     continue;
+                }
+
+                if (!checked_add_i64(stored_food, household.resources.food_inventory.value, stored_food)) {
+                    throw std::overflow_error("Settlement founding stored food aggregation overflow");
                 }
 
                 bool has_alive = false;
@@ -3674,11 +3740,13 @@ void Simulation::process_settlement_founding(const std::uint64_t demographic_yea
                     for (const auto& person : state_.people) {
                         if (person.id == member_id && person.alive) {
                             has_alive = true;
-                            break;
+                            if (!checked_add_i64(required_food, food_requirement_for_person(person), required_food)) {
+                                throw std::overflow_error("Settlement founding required food aggregation overflow");
+                            }
+                            if (occupation_eligible_for_productive_work(person)) {
+                                ++eligible_workers;
+                            }
                         }
-                    }
-                    if (has_alive) {
-                        break;
                     }
                 }
 
@@ -3691,8 +3759,25 @@ void Simulation::process_settlement_founding(const std::uint64_t demographic_yea
                 continue;
             }
 
+            if (required_food <= 0 || eligible_workers < kFoundingMinimumEligibleWorkers) {
+                continue;
+            }
+
+            if (candidate->economic_viability_streak < kFoundingMinimumEconomicViabilityStreak) {
+                continue;
+            }
+
             const auto pressure = settlement_pressure_per_10k(*candidate);
-            if (pressure < kHighPressureThresholdPer10k) {
+
+            std::uint32_t candidate_assigned_share = 0U;
+            if (unallocated_share >= kFoundingMinimumUnallocatedShare) {
+                candidate_assigned_share = std::min<std::uint32_t>(unallocated_share, kFoundingDefaultShare);
+            } else if (candidate->access_share_points > kFoundingMinimumSourceShareAfterSplit) {
+                const auto transferable = candidate->access_share_points - kFoundingMinimumSourceShareAfterSplit;
+                candidate_assigned_share = std::min<std::uint32_t>(transferable, kFoundingDefaultShare);
+            }
+
+            if (candidate_assigned_share == 0U) {
                 continue;
             }
 
@@ -3744,7 +3829,19 @@ void Simulation::process_settlement_founding(const std::uint64_t demographic_yea
 
         const auto new_settlement_id = next_settlement_id();
         const auto source_settlement_id = source->id;
-        const auto assigned_share = std::min<std::uint32_t>(unallocated_share, kFoundingDefaultShare);
+        std::uint32_t assigned_share = 0U;
+        if (unallocated_share >= kFoundingMinimumUnallocatedShare) {
+            assigned_share = std::min<std::uint32_t>(unallocated_share, kFoundingDefaultShare);
+        } else if (source->access_share_points > kFoundingMinimumSourceShareAfterSplit) {
+            const auto transferable = source->access_share_points - kFoundingMinimumSourceShareAfterSplit;
+            assigned_share = std::min<std::uint32_t>(transferable, kFoundingDefaultShare);
+            source->access_share_points -= assigned_share;
+        }
+
+        if (assigned_share == 0U) {
+            continue;
+        }
+
         state_.settlements.push_back(Settlement{
             .id = new_settlement_id,
             .region_id = region_id,
@@ -3854,7 +3951,7 @@ void Simulation::process_occupation_reassignment(const std::uint64_t demographic
         }
 
         std::int64_t settlement_required_food = 0;
-        std::int64_t settlement_stored_food = 0;
+        std::int64_t settlement_stored_food = std::max<std::int64_t>(0, settlement->commons_food.value);
         std::uint64_t settlement_alive_population = 0;
 
         struct Candidate {
@@ -3912,6 +4009,8 @@ void Simulation::process_occupation_reassignment(const std::uint64_t demographic
             return lhs.person->id < rhs.person->id;
         });
 
+        const auto construction_demand = construction_demand_for_settlement(settlement_id, state_.buildings);
+
         const auto cultivation_opportunity =
             (region->productive_capacity_per_day * static_cast<std::int64_t>(settlement->access_share_points)) /
             static_cast<std::int64_t>(kSettlementShareScale);
@@ -3920,16 +4019,57 @@ void Simulation::process_occupation_reassignment(const std::uint64_t demographic
              static_cast<std::int64_t>(settlement->access_share_points)) /
             static_cast<std::int64_t>(kSettlementShareScale);
 
-        const auto output_target = compute_daily_food_output_target(
+        std::int64_t output_opportunity = 0;
+        if (!checked_add_i64(cultivation_opportunity, gathering_opportunity, output_opportunity)) {
+            throw std::overflow_error("Food output opportunity overflow");
+        }
+
+        const auto base_food_target = compute_daily_food_output_target(
             settlement_required_food,
             settlement_stored_food,
-            cultivation_opportunity + gathering_opportunity);
-        auto assignment_target = output_target;
+            output_opportunity);
+
+        auto assignment_target = base_food_target;
+        std::int64_t commons_target = 0;
+        if (!checked_mul_i64(settlement_required_food, kCommonsReserveTargetDays, commons_target)) {
+            throw std::overflow_error("Commons reserve target overflow");
+        }
+        commons_target = std::max<std::int64_t>(0, commons_target);
+        const auto commons_deficit = std::max<std::int64_t>(0, commons_target - std::max<std::int64_t>(0, settlement->commons_food.value));
+        if (commons_deficit > 0) {
+            const auto replenish_target = ceil_div_u64(
+                static_cast<std::uint64_t>(commons_deficit),
+                static_cast<std::uint64_t>(std::max<std::int64_t>(1, kCommonsReplenishDays)));
+
+            std::int64_t replenished_target = 0;
+            if (!checked_add_i64(base_food_target, static_cast<std::int64_t>(replenish_target), replenished_target)) {
+                throw std::overflow_error("Replenished assignment target overflow");
+            }
+
+            assignment_target = std::max(
+                assignment_target,
+                std::min<std::int64_t>(
+                    output_opportunity,
+                    replenished_target));
+        }
+
+        const auto pressure = settlement_pressure_per_10k(*settlement);
+        const auto food_buffer_days = settlement_required_food > 0
+            ? settlement_stored_food / std::max<std::int64_t>(1, settlement_required_food)
+            : 0;
+        const bool food_crisis =
+            settlement_required_food > 0 &&
+            (pressure >= kHighPressureThresholdPer10k || food_buffer_days < kFoodCrisisBufferDays);
+
         if (settlement_required_food > 0) {
-            const auto required_coverage_target = (settlement_required_food * kAssignmentRequiredCoveragePercent) / 100;
+            std::int64_t required_coverage_target = 0;
+            if (!checked_mul_i64(settlement_required_food, kAssignmentRequiredCoveragePercent, required_coverage_target)) {
+                throw std::overflow_error("Required food coverage target overflow");
+            }
+            required_coverage_target /= 100;
             assignment_target = std::max(assignment_target, required_coverage_target);
         }
-        assignment_target = std::min(assignment_target, cultivation_opportunity + gathering_opportunity);
+        assignment_target = std::min(assignment_target, output_opportunity);
         const auto demand = split_demand_by_opportunity(assignment_target, cultivation_opportunity, gathering_opportunity);
 
         std::int64_t cultivation_remaining = std::max<std::int64_t>(0, demand.cultivation_labour_demand);
@@ -3940,6 +4080,7 @@ void Simulation::process_occupation_reassignment(const std::uint64_t demographic
                 continue;
             }
             candidate.assigned = true;
+            candidate.person->occupation = Occupation::SubsistenceCultivator;
             cultivation_remaining = std::max<std::int64_t>(0, cultivation_remaining - candidate.labour_capacity);
         }
 
@@ -3948,6 +4089,7 @@ void Simulation::process_occupation_reassignment(const std::uint64_t demographic
                 continue;
             }
             candidate.assigned = true;
+            candidate.person->occupation = Occupation::WildFoodGatherer;
             gathering_remaining = std::max<std::int64_t>(0, gathering_remaining - candidate.labour_capacity);
         }
 
@@ -3981,34 +4123,112 @@ void Simulation::process_occupation_reassignment(const std::uint64_t demographic
             }
 
             const auto targets = material_targets_for_settlement(settlement_alive_population, eligible_workers);
-            const auto timber_deficit = std::max<std::int64_t>(0, targets.timber_target - settlement_mutable->materials.timber.value);
             const auto tool_deficit = std::max<std::int64_t>(0, targets.basic_tool_target - settlement_mutable->materials.basic_tool.value);
-            auto wood_total_need =
-                std::max<std::int64_t>(0, targets.wood_target - settlement_mutable->materials.wood.value) +
-                (timber_deficit * material_parameters_.wood_per_timber) +
-                (tool_deficit * material_parameters_.wood_per_basic_tool);
-            auto stone_total_need =
-                std::max<std::int64_t>(0, targets.stone_target - settlement_mutable->materials.stone.value) +
-                (tool_deficit * material_parameters_.stone_per_basic_tool);
-            auto craft_need = timber_deficit + tool_deficit;
+            std::int64_t timber_target_with_construction = 0;
+            if (!checked_add_i64(targets.timber_target, construction_demand.timber_remaining, timber_target_with_construction)) {
+                throw std::overflow_error("Settlement timber target overflow");
+            }
+            std::int64_t stone_target_with_construction = 0;
+            if (!checked_add_i64(targets.stone_target, construction_demand.stone_remaining, stone_target_with_construction)) {
+                throw std::overflow_error("Settlement stone target overflow");
+            }
+            const auto timber_deficit = std::max<std::int64_t>(0, timber_target_with_construction - settlement_mutable->materials.timber.value);
+            const auto stone_deficit = std::max<std::int64_t>(0, stone_target_with_construction - settlement_mutable->materials.stone.value);
 
-            for (auto& candidate : candidates) {
-                if (candidate.assigned) {
-                    continue;
+            const auto wood_reserve_need = std::max<std::int64_t>(0, targets.wood_target - settlement_mutable->materials.wood.value);
+            std::int64_t timber_wood_need = 0;
+            std::int64_t tool_wood_need = 0;
+            if (!checked_mul_i64(timber_deficit, material_parameters_.wood_per_timber, timber_wood_need) ||
+                !checked_mul_i64(tool_deficit, material_parameters_.wood_per_basic_tool, tool_wood_need)) {
+                throw std::overflow_error("Settlement wood material need overflow");
+            }
+            std::int64_t wood_total_need = 0;
+            if (!checked_add_i64(wood_reserve_need, timber_wood_need, wood_total_need) ||
+                !checked_add_i64(wood_total_need, tool_wood_need, wood_total_need)) {
+                throw std::overflow_error("Settlement total wood need overflow");
+            }
+
+            std::int64_t tool_stone_need = 0;
+            if (!checked_mul_i64(tool_deficit, material_parameters_.stone_per_basic_tool, tool_stone_need)) {
+                throw std::overflow_error("Settlement stone material need overflow");
+            }
+            std::int64_t stone_total_need = 0;
+            if (!checked_add_i64(stone_deficit, tool_stone_need, stone_total_need)) {
+                throw std::overflow_error("Settlement total stone need overflow");
+            }
+
+            std::int64_t craft_need = 0;
+            if (!checked_add_i64(timber_deficit, tool_deficit, craft_need)) {
+                throw std::overflow_error("Settlement craft need overflow");
+            }
+            const bool prioritize_craft_for_tools = tool_deficit > 0;
+
+            if (food_crisis) {
+                wood_total_need /= 4;
+                stone_total_need /= 4;
+                craft_need /= 4;
+            }
+
+            auto assign_for_occupation = [&](const Occupation occupation, std::int64_t& demand_value) {
+                if (demand_value <= 0) {
+                    return false;
                 }
 
-                if (wood_total_need > 0 && wood_total_need >= stone_total_need && wood_total_need >= craft_need) {
-                    candidate.person->occupation = Occupation::WoodGatherer;
+                for (auto& candidate : candidates) {
+                    if (candidate.assigned || candidate.person->occupation != occupation) {
+                        continue;
+                    }
                     candidate.assigned = true;
-                    wood_total_need = std::max<std::int64_t>(0, wood_total_need - candidate.labour_capacity);
-                } else if (stone_total_need > 0 && stone_total_need >= craft_need) {
-                    candidate.person->occupation = Occupation::StoneExtractor;
+                    candidate.person->occupation = occupation;
+                    demand_value = std::max<std::int64_t>(0, demand_value - candidate.labour_capacity);
+                    return true;
+                }
+
+                for (auto& candidate : candidates) {
+                    if (candidate.assigned) {
+                        continue;
+                    }
                     candidate.assigned = true;
-                    stone_total_need = std::max<std::int64_t>(0, stone_total_need - candidate.labour_capacity);
+                    candidate.person->occupation = occupation;
+                    demand_value = std::max<std::int64_t>(0, demand_value - candidate.labour_capacity);
+                    return true;
+                }
+
+                return false;
+            };
+
+            while (true) {
+                const auto has_demand = wood_total_need > 0 || stone_total_need > 0 || craft_need > 0;
+                if (!has_demand) {
+                    break;
+                }
+
+                bool any_unassigned = false;
+                for (const auto& candidate : candidates) {
+                    if (!candidate.assigned) {
+                        any_unassigned = true;
+                        break;
+                    }
+                }
+                if (!any_unassigned) {
+                    break;
+                }
+
+                bool assigned = false;
+                if (prioritize_craft_for_tools && craft_need > 0 && wood_total_need <= 0 && stone_total_need <= 0) {
+                    assigned = assign_for_occupation(Occupation::CraftWorker, craft_need);
+                } else if (wood_total_need >= stone_total_need && wood_total_need >= craft_need && wood_total_need > 0) {
+                    assigned = assign_for_occupation(Occupation::WoodGatherer, wood_total_need);
+                } else if (stone_total_need >= craft_need && stone_total_need > 0) {
+                    assigned = assign_for_occupation(Occupation::StoneExtractor, stone_total_need);
                 } else if (craft_need > 0) {
-                    candidate.person->occupation = Occupation::CraftWorker;
-                    candidate.assigned = true;
-                    craft_need = std::max<std::int64_t>(0, craft_need - candidate.labour_capacity);
+                    assigned = assign_for_occupation(Occupation::CraftWorker, craft_need);
+                } else {
+                    break;
+                }
+
+                if (!assigned) {
+                    break;
                 }
             }
         }
@@ -4918,6 +5138,16 @@ void Simulation::upsert_knowledge(
         throw std::invalid_argument("Knowledge owner mismatch during upsert");
     }
 
+    if (fact_kind == KnowledgeFactKind::PersonLifeStatus) {
+        const auto* existing_life = std::get_if<PersonLifeStatusKnowledgeFact>(&knowledge.fact);
+        const auto* incoming_life = std::get_if<PersonLifeStatusKnowledgeFact>(&fact);
+        if (existing_life != nullptr && incoming_life != nullptr &&
+            existing_life->status == KnownLifeStatus::Dead &&
+            incoming_life->status == KnownLifeStatus::Alive) {
+            return;
+        }
+    }
+
     if (acquired_at < knowledge.acquired_at) {
         knowledge.acquired_at = acquired_at;
     }
@@ -5465,6 +5695,46 @@ void Simulation::process_construction(const std::uint64_t demographic_year) {
             ? eligible_workers_by_settlement[settlement.id]
             : 0U;
 
+        std::int64_t required_food = 0;
+        std::int64_t stored_food = std::max<std::int64_t>(0, settlement.commons_food.value);
+        std::int64_t unallocated_labour_capacity = 0;
+        for (const auto& household : state_.households) {
+            if (household.settlement_id != settlement.id) {
+                continue;
+            }
+
+            if (!checked_add_i64(stored_food, household.resources.food_inventory.value, stored_food)) {
+                throw std::overflow_error("Construction stored food aggregation overflow");
+            }
+
+            for (const auto member_id : household.member_ids) {
+                const auto person_it = person_by_id.find(member_id);
+                if (person_it == person_by_id.end() || !person_it->second->alive) {
+                    continue;
+                }
+
+                const auto& person = *person_it->second;
+                if (!checked_add_i64(required_food, food_requirement_for_person(person), required_food)) {
+                    throw std::overflow_error("Construction required food aggregation overflow");
+                }
+                if (!occupation_eligible_for_productive_work(person) || person.occupation != Occupation::None) {
+                    continue;
+                }
+
+                if (!checked_add_i64(unallocated_labour_capacity, productive_effort_for_person(person), unallocated_labour_capacity)) {
+                    throw std::overflow_error("Construction unallocated labour overflow");
+                }
+            }
+        }
+
+        const auto pressure = settlement_pressure_per_10k(settlement);
+        const auto food_buffer_days = required_food > 0
+            ? stored_food / std::max<std::int64_t>(1, required_food)
+            : 0;
+        const bool subsistence_constrained =
+            required_food > 0 &&
+            (pressure >= kHighPressureThresholdPer10k || food_buffer_days < kFoodCrisisBufferDays);
+
         const auto target_dwellings = std::max<std::uint64_t>(1U, ceil_div_u64(alive_population, 30U));
         const auto target_food_stores = std::max<std::uint64_t>(1U, ceil_div_u64(alive_population, 60U));
         const auto target_workshops = std::max<std::uint64_t>(1U, ceil_div_u64(eligible_workers, 45U));
@@ -5496,13 +5766,7 @@ void Simulation::process_construction(const std::uint64_t demographic_year) {
 
         std::sort(settlement_buildings.begin(), settlement_buildings.end());
 
-        std::int64_t labour_budget_from_workers = 0;
-        if (eligible_workers > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() / 28)) {
-            labour_budget_from_workers = std::numeric_limits<std::int64_t>::max();
-        } else {
-            labour_budget_from_workers = static_cast<std::int64_t>(eligible_workers) * 28;
-        }
-        auto labour_budget = std::max<std::int64_t>(40, labour_budget_from_workers);
+        auto labour_budget = subsistence_constrained ? 0 : std::max<std::int64_t>(0, unallocated_labour_capacity);
         for (const auto building_id : settlement_buildings) {
             auto* building = find_building_mutable(building_id);
             if (building == nullptr) {

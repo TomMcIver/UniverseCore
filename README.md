@@ -6,7 +6,7 @@ The project deliberately starts without Unreal Engine. The initial objective is 
 
 ## Current milestone
 
-**Prototype 1 foundation: deterministic settlement simulation + inspector UI**
+**Milestone 3 complete: deterministic economy and settlement growth foundation (stopping before Milestone 4)**
 
 - C++23
 - Cross-platform CMake build

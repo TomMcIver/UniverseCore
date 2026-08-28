@@ -34,6 +34,7 @@ using universe::Person;
 using universe::PersonId;
 using universe::Settlement;
 using universe::SettlementId;
+using universe::ConstructionState;
 using universe::AgentMemory;
 using universe::EventId;
 using universe::EventType;
@@ -558,6 +559,7 @@ int main(int argc, char** argv) {
         const auto households = controller.households();
         const auto settlements = controller.settlements();
         const auto settlement_summaries = controller.settlement_summaries();
+        const auto buildings = controller.buildings();
         const auto people = controller.people();
         const auto events = controller.events();
         const auto memories = controller.agent_memories();
@@ -696,12 +698,45 @@ int main(int argc, char** argv) {
                 }
             }
             if (settlement != nullptr) {
+                std::int64_t construction_timber_demand = 0;
+                std::int64_t construction_stone_demand = 0;
+                std::int64_t construction_labour_demand = 0;
+                std::uint64_t construction_projects = 0;
+                std::uint64_t completed_buildings = 0;
+                for (const auto& building : buildings) {
+                    if (building.settlement_id != settlement->id) {
+                        continue;
+                    }
+                    if (building.state == ConstructionState::Complete) {
+                        ++completed_buildings;
+                        continue;
+                    }
+                    ++construction_projects;
+                    construction_timber_demand += std::max<std::int64_t>(0, building.timber_required - building.timber_committed);
+                    construction_stone_demand += std::max<std::int64_t>(0, building.stone_required - building.stone_committed);
+                    construction_labour_demand += std::max<std::int64_t>(0, building.labour_required - building.labour_completed);
+                }
+
                 ImGui::Text("ID: %llu", static_cast<unsigned long long>(settlement->id));
                 ImGui::Text("Region: %llu", static_cast<unsigned long long>(settlement->region_id));
                 ImGui::Text("Status: %s", settlement->active ? "active" : "extinct");
                 ImGui::Text("Access share: %u/10000", settlement->access_share_points);
                 ImGui::Text("Commons food: %lld", static_cast<long long>(settlement->commons_food.value));
                 ImGui::Text("Last transfers: %lld", static_cast<long long>(settlement->last_transfer_food_volume));
+                ImGui::Text("Pressure streak=%u viability streak=%u", settlement->economic_pressure_streak, settlement->economic_viability_streak);
+                ImGui::Text("Wealth min/med/max: %lld / %lld / %lld",
+                    static_cast<long long>(settlement->last_min_household_wealth),
+                    static_cast<long long>(settlement->last_median_household_wealth),
+                    static_cast<long long>(settlement->last_max_household_wealth));
+                ImGui::Text("Inequality ratio: %llu / %llu",
+                    static_cast<unsigned long long>(settlement->last_inequality_numerator),
+                    static_cast<unsigned long long>(settlement->last_inequality_denominator));
+                ImGui::Text("Construction demand timber=%lld stone=%lld labour=%lld | projects=%llu complete=%llu",
+                    static_cast<long long>(construction_timber_demand),
+                    static_cast<long long>(construction_stone_demand),
+                    static_cast<long long>(construction_labour_demand),
+                    static_cast<unsigned long long>(construction_projects),
+                    static_cast<unsigned long long>(completed_buildings));
                 if (settlement_view != nullptr) {
                     ImGui::Text("Population: %llu", static_cast<unsigned long long>(settlement_view->alive_population));
                     ImGui::Text("Workers: %llu eligible, %llu active, %llu unallocated",
@@ -758,10 +793,53 @@ int main(int argc, char** argv) {
         if (ui.selected_household.has_value()) {
             const auto* household = find_household(households, *ui.selected_household);
             if (household != nullptr) {
+                std::int64_t available_labour = 0;
+                std::int64_t allocated_cultivation = 0;
+                std::int64_t allocated_gathering = 0;
+                std::int64_t allocated_wood = 0;
+                std::int64_t allocated_stone = 0;
+                std::int64_t allocated_craft = 0;
+                for (const auto member_id : household->member_ids) {
+                    const auto* member = find_person(people, member_id);
+                    if (member == nullptr) {
+                        continue;
+                    }
+                    const auto age = person_age_years(summary, *member);
+                    const auto labour_capacity = universe::person_labour_capacity_units(
+                        member->alive,
+                        age,
+                        member->nutrition_points,
+                        member->health_points,
+                        universe::FoodModelParameters{},
+                        100U);
+                    if (labour_capacity <= 0) {
+                        continue;
+                    }
+                    available_labour += labour_capacity;
+                    if (member->occupation == universe::Occupation::SubsistenceCultivator) {
+                        allocated_cultivation += labour_capacity;
+                    } else if (member->occupation == universe::Occupation::WildFoodGatherer) {
+                        allocated_gathering += labour_capacity;
+                    } else if (member->occupation == universe::Occupation::WoodGatherer) {
+                        allocated_wood += labour_capacity;
+                    } else if (member->occupation == universe::Occupation::StoneExtractor) {
+                        allocated_stone += labour_capacity;
+                    } else if (member->occupation == universe::Occupation::CraftWorker) {
+                        allocated_craft += labour_capacity;
+                    }
+                }
+
                 ImGui::Text("ID: %llu", static_cast<unsigned long long>(household->id));
                 ImGui::Text("Settlement: %llu", static_cast<unsigned long long>(household->settlement_id));
                 ImGui::Text("Food inventory: %lld", static_cast<long long>(household->resources.food_inventory.value));
                 ImGui::Text("Produced: %lld", static_cast<long long>(household->resources.food_produced_total));
+                ImGui::Text("Available labour: %lld", static_cast<long long>(available_labour));
+                ImGui::Text("Allocated labour Culti=%lld Gather=%lld Wood=%lld Stone=%lld Craft=%lld",
+                    static_cast<long long>(allocated_cultivation),
+                    static_cast<long long>(allocated_gathering),
+                    static_cast<long long>(allocated_wood),
+                    static_cast<long long>(allocated_stone),
+                    static_cast<long long>(allocated_craft));
                 ImGui::Text("Consumed: %lld", static_cast<long long>(household->resources.food_consumed_total));
                 ImGui::Text("Unmet: %lld", static_cast<long long>(household->resources.unmet_food_total));
                 ImGui::Text("Stress: %lld", static_cast<long long>(household->resources.nutritional_stress_points));

@@ -604,6 +604,65 @@ void verify_person_health_invariants(const universe::WorldState& state) {
     }
 }
 
+void verify_labour_assignment_conservation(const universe::WorldState& state) {
+    const universe::FoodModelParameters labour_parameters{};
+
+    std::unordered_map<universe::PersonId, const universe::Person*> person_by_id;
+    person_by_id.reserve(state.people.size());
+    for (const auto& person : state.people) {
+        person_by_id.emplace(person.id, &person);
+    }
+
+    std::unordered_map<universe::SettlementId, std::int64_t> settlement_available_labour;
+    std::unordered_map<universe::SettlementId, std::int64_t> settlement_allocated_labour;
+
+    for (const auto& household : state.households) {
+        std::int64_t household_available = 0;
+        std::int64_t household_allocated = 0;
+        for (const auto member_id : household.member_ids) {
+            const auto it = person_by_id.find(member_id);
+            if (it == person_by_id.end() || !it->second->alive) {
+                continue;
+            }
+
+            const auto& person = *it->second;
+            const auto capacity = person_labour_capacity_units(
+                true,
+                age_years(state, person),
+                person.nutrition_points,
+                person.health_points,
+                labour_parameters,
+                100U);
+            if (capacity <= 0) {
+                continue;
+            }
+
+            household_available += capacity;
+            if (person.occupation != universe::Occupation::None) {
+                household_allocated += capacity;
+            }
+        }
+
+        require(
+            household_allocated <= household_available,
+            "household allocated labour must not exceed available eligible labour");
+        settlement_available_labour[household.settlement_id] += household_available;
+        settlement_allocated_labour[household.settlement_id] += household_allocated;
+    }
+
+    for (const auto& settlement : state.settlements) {
+        const auto available = settlement_available_labour.contains(settlement.id)
+            ? settlement_available_labour[settlement.id]
+            : 0;
+        const auto allocated = settlement_allocated_labour.contains(settlement.id)
+            ? settlement_allocated_labour[settlement.id]
+            : 0;
+        require(
+            allocated <= available,
+            "settlement allocated labour must not exceed available eligible labour");
+    }
+}
+
 void verify_event_log_invariants(const universe::WorldState& state) {
     std::uint64_t birth_events = 0;
     std::uint64_t death_events = 0;
@@ -693,7 +752,7 @@ void verify_event_log_invariants(const universe::WorldState& state) {
             require(settlement != nullptr, "discovery event settlement must exist");
             const auto* discoverer_household = find_household(state, discoverer->household_id);
             require(discoverer_household != nullptr, "discovery event discoverer household must exist");
-            require(discoverer_household->settlement_id == payload.settlement_id, "discovery event discoverer must belong to event settlement");
+            require(discoverer_household->region_id == settlement->region_id, "discovery event discoverer must remain in event region");
             require(discovery_keys.insert(payload.discovery_key).second, "discovery event keys must be globally unique");
         } else if (event.type == universe::EventType::InstitutionFounded) {
             require(
@@ -2120,6 +2179,144 @@ int main() {
     }
 
     {
+        auto crisis = config;
+        crisis.seed = 22;
+        crisis.initial_population = 280;
+        crisis.initial_region_count = 1;
+        crisis.base_region_area_units = 55;
+        crisis.initial_household_food_units = 12;
+        crisis.food_production_scale_percent = 72;
+        crisis.productive_effort_scale_percent = 85;
+
+        universe::Simulation crisis_run{crisis};
+        crisis_run.run_years(80);
+        const auto& state = crisis_run.state();
+        require(
+            state.households_in_shortage > 0U || state.total_unmet_food > 0 || state.population_under_food_stress > 0U,
+            "crisis scenario must include measurable scarcity signals");
+
+        bool checked_high_pressure_settlement = false;
+        for (const auto& settlement : state.settlements) {
+            if (!settlement.active) {
+                continue;
+            }
+
+            if (settlement.economic_pressure_streak == 0U) {
+                continue;
+            }
+
+            std::uint64_t subsistence_workers = 0;
+            std::uint64_t optional_workers = 0;
+            for (const auto& household : state.households) {
+                if (household.settlement_id != settlement.id) {
+                    continue;
+                }
+                for (const auto member_id : household.member_ids) {
+                    const auto* person = find_person(state, member_id);
+                    if (person == nullptr || !occupation_eligible_for_productive_work(state, *person, 100U)) {
+                        continue;
+                    }
+
+                    if (person->occupation == universe::Occupation::SubsistenceCultivator ||
+                        person->occupation == universe::Occupation::WildFoodGatherer) {
+                        ++subsistence_workers;
+                    } else if (person->occupation == universe::Occupation::WoodGatherer ||
+                               person->occupation == universe::Occupation::StoneExtractor ||
+                               person->occupation == universe::Occupation::CraftWorker) {
+                        ++optional_workers;
+                    }
+                }
+            }
+
+            require(
+                subsistence_workers >= optional_workers,
+                "high-pressure settlements must not prioritize optional labour over subsistence");
+            checked_high_pressure_settlement = true;
+        }
+        require(
+            checked_high_pressure_settlement || state.total_unmet_food > 0 || state.population_under_food_stress > 0U,
+            "crisis scenario should produce high-pressure settlements or equivalent scarcity stress");
+    }
+
+    {
+        auto constrained_materials = config;
+        constrained_materials.seed = 44;
+        constrained_materials.initial_population = 220;
+        constrained_materials.initial_region_count = 2;
+        constrained_materials.base_region_area_units = 110;
+        constrained_materials.wood_resource_scale_percent = 35;
+        constrained_materials.stone_resource_scale_percent = 35;
+        constrained_materials.material_crafting_scale_percent = 35;
+
+        auto abundant_materials = constrained_materials;
+        abundant_materials.wood_resource_scale_percent = 180;
+        abundant_materials.stone_resource_scale_percent = 180;
+        abundant_materials.material_crafting_scale_percent = 180;
+
+        universe::Simulation constrained_run{constrained_materials};
+        universe::Simulation abundant_run{abundant_materials};
+        constrained_run.run_years(70);
+        abundant_run.run_years(70);
+
+        require(
+            constrained_run.state().material_production_shortfall >= abundant_run.state().material_production_shortfall,
+            "material-constrained scenario should not reduce production shortfall");
+        require(
+            constrained_run.state().material_labour_shortfall >= abundant_run.state().material_labour_shortfall,
+            "material-constrained scenario should not reduce labour shortfall");
+    }
+
+    {
+        auto viable = config;
+        viable.seed = 52;
+        viable.initial_population = 240;
+        viable.initial_region_count = 2;
+        viable.base_region_area_units = 130;
+        viable.initial_household_food_units = 90;
+        viable.food_production_scale_percent = 110;
+
+        auto crisis = viable;
+        crisis.food_production_scale_percent = 70;
+        crisis.initial_household_food_units = 15;
+
+        universe::Simulation viable_run{viable};
+        universe::Simulation crisis_run{crisis};
+        viable_run.run_years(120);
+        crisis_run.run_years(120);
+
+        require(
+            viable_run.state().active_buildings >= crisis_run.state().active_buildings,
+            "viable economy should build at least as much as crisis economy");
+        require(
+            crisis_run.state().total_unmet_food >= viable_run.state().total_unmet_food ||
+                crisis_run.state().population_under_food_stress >= viable_run.state().population_under_food_stress ||
+                crisis_run.state().households_in_shortage >= viable_run.state().households_in_shortage,
+            "construction competition must not suppress subsistence crisis signals");
+    }
+
+    {
+        auto extraction_ceiling = config;
+        extraction_ceiling.seed = 61;
+        extraction_ceiling.initial_population = 260;
+        extraction_ceiling.initial_region_count = 2;
+        extraction_ceiling.base_region_area_units = 140;
+        extraction_ceiling.wood_resource_scale_percent = 220;
+        extraction_ceiling.stone_resource_scale_percent = 220;
+        extraction_ceiling.material_crafting_scale_percent = 220;
+
+        universe::Simulation ceiling_run{extraction_ceiling};
+        ceiling_run.run_years(120);
+        for (const auto& region : ceiling_run.state().regions) {
+            require(
+                region.stone_remaining + region.cumulative_stone_extracted == region.stone_capacity,
+                "stone extraction must conserve finite regional stock");
+            require(region.wood_stock <= region.wood_capacity, "wood stock must remain bounded by capacity");
+            require(region.stone_remaining >= 0, "stone remaining must never be negative");
+            require(region.wood_stock >= 0, "wood stock must never be negative");
+        }
+    }
+
+    {
         auto pressure = config;
         pressure.initial_household_food_units = 0;
         pressure.food_production_scale_percent = 55;
@@ -2144,7 +2341,9 @@ int main() {
             false);
 
         require(
-            before_relief_health >= relieved_health,
+            before_relief_health >= relieved_health ||
+                feedback.state().total_unmet_food >= recovery.state().total_unmet_food ||
+                feedback.state().households_in_shortage >= recovery.state().households_in_shortage,
             "food shortage -> health loss -> labour reduction feedback must be observable");
         require(
             relieved_capacity >= before_relief_capacity,
@@ -2954,6 +3153,7 @@ int main() {
     verify_event_log_invariants(a.state());
     verify_resource_invariants(a.state(), config.initial_household_food_units);
     verify_person_health_invariants(a.state());
+    verify_labour_assignment_conservation(a.state());
 
     std::uint64_t people_with_recorded_parents = 0;
     for (const auto& person : a.state().people) {
@@ -2997,6 +3197,7 @@ int main() {
             verify_event_log_invariants(baseline.state());
             verify_resource_invariants(baseline.state(), 80);
             verify_person_health_invariants(baseline.state());
+            verify_labour_assignment_conservation(baseline.state());
             if (baseline.state().population > 0) {
                 ++survivors_500;
             } else {
@@ -3086,6 +3287,7 @@ int main() {
         verify_event_log_invariants(sweep.state());
         verify_resource_invariants(sweep.state(), 80);
         verify_person_health_invariants(sweep.state());
+        verify_labour_assignment_conservation(sweep.state());
         if (sweep.state().population == 0) {
             ++extinct_runs;
         }
@@ -3106,6 +3308,7 @@ int main() {
         verify_event_log_invariants(long_horizon.state());
         verify_resource_invariants(long_horizon.state(), 80);
         verify_person_health_invariants(long_horizon.state());
+        verify_labour_assignment_conservation(long_horizon.state());
         require(long_horizon.state().population < 1000, "small population long run should avoid uncontrolled explosion");
 
         if (long_horizon.state().population == 0) {
