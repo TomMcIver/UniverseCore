@@ -92,6 +92,10 @@ void verify_resource_invariants(const universe::WorldState& state, const std::in
     std::int64_t total_unmet_food = 0;
     std::int64_t total_commons_food = 0;
     std::uint64_t households_in_shortage = 0;
+    std::unordered_map<universe::SettlementId, std::int64_t> owned_wood_by_settlement;
+    std::unordered_map<universe::SettlementId, std::int64_t> owned_stone_by_settlement;
+    std::unordered_map<universe::SettlementId, std::int64_t> owned_timber_by_settlement;
+    std::unordered_map<universe::SettlementId, std::int64_t> owned_tools_by_settlement;
 
     for (const auto& settlement : state.settlements) {
         require(settlement.commons_food.value >= 0, "settlement commons food must never be negative");
@@ -108,9 +112,20 @@ void verify_resource_invariants(const universe::WorldState& state, const std::in
         total_food_produced += household.resources.food_produced_total;
         total_food_consumed += household.resources.food_consumed_total;
         total_unmet_food += household.resources.unmet_food_total;
+        owned_wood_by_settlement[household.settlement_id] += household.owned_materials.wood.value;
+        owned_stone_by_settlement[household.settlement_id] += household.owned_materials.stone.value;
+        owned_timber_by_settlement[household.settlement_id] += household.owned_materials.timber.value;
+        owned_tools_by_settlement[household.settlement_id] += household.owned_materials.basic_tool.value;
         if (household.resources.consecutive_shortage_days > 0U) {
             ++households_in_shortage;
         }
+    }
+
+    for (const auto& settlement : state.settlements) {
+        require(owned_wood_by_settlement[settlement.id] == settlement.materials.wood.value, "owned wood partition must match settlement inventory");
+        require(owned_stone_by_settlement[settlement.id] == settlement.materials.stone.value, "owned stone partition must match settlement inventory");
+        require(owned_timber_by_settlement[settlement.id] == settlement.materials.timber.value, "owned timber partition must match settlement inventory");
+        require(owned_tools_by_settlement[settlement.id] == settlement.materials.basic_tool.value, "owned tool partition must match settlement inventory");
     }
 
     const auto expected_initial = state.households.empty()

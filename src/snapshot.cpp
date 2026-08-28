@@ -22,8 +22,8 @@ constexpr std::size_t kHeaderSize = 4U + 2U + 2U + 8U + 8U;
 constexpr std::int64_t kToolWearWorkUnitsPerBreak = 24;
 constexpr std::int64_t kWealthValueWood = 2;
 constexpr std::int64_t kWealthValueStone = 2;
-constexpr std::int64_t kWealthValueTimber = 3;
-constexpr std::int64_t kWealthValueBasicTool = 6;
+constexpr std::int64_t kWealthValueTimber = 4;
+constexpr std::int64_t kWealthValueBasicTool = 8;
 
 [[nodiscard]] std::uint64_t fnv1a64(std::span<const std::byte> data) noexcept {
     std::uint64_t hash = 14695981039346656037ULL;
@@ -3382,9 +3382,17 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
 
     std::unordered_map<SettlementId, std::uint32_t> productive_access_by_settlement;
     std::unordered_map<SettlementId, std::uint32_t> commons_access_by_settlement;
+    std::unordered_map<SettlementId, std::int64_t> owned_wood_by_settlement;
+    std::unordered_map<SettlementId, std::int64_t> owned_stone_by_settlement;
+    std::unordered_map<SettlementId, std::int64_t> owned_timber_by_settlement;
+    std::unordered_map<SettlementId, std::int64_t> owned_tools_by_settlement;
     for (const auto& household : restored_state.households) {
         productive_access_by_settlement[household.settlement_id] += household.productive_access_share_points;
         commons_access_by_settlement[household.settlement_id] += household.commons_access_share_points;
+        owned_wood_by_settlement[household.settlement_id] += household.owned_materials.wood.value;
+        owned_stone_by_settlement[household.settlement_id] += household.owned_materials.stone.value;
+        owned_timber_by_settlement[household.settlement_id] += household.owned_materials.timber.value;
+        owned_tools_by_settlement[household.settlement_id] += household.owned_materials.basic_tool.value;
     }
     for (const auto& [settlement_id, share] : productive_access_by_settlement) {
         (void)settlement_id;
@@ -3410,6 +3418,13 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
             settlement.last_min_household_wealth < 0 ||
             settlement.last_max_household_wealth < 0) {
             return load_error(SnapshotErrorCode::InvalidState, "Snapshot settlement economic values are out of range");
+        }
+
+        if (owned_wood_by_settlement[settlement.id] != settlement.materials.wood.value ||
+            owned_stone_by_settlement[settlement.id] != settlement.materials.stone.value ||
+            owned_timber_by_settlement[settlement.id] != settlement.materials.timber.value ||
+            owned_tools_by_settlement[settlement.id] != settlement.materials.basic_tool.value) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot household ownership partition does not match settlement inventory");
         }
 
         recomputed_total_settlement_commons_food += settlement.commons_food.value;

@@ -2,17 +2,17 @@
   "project": "UniverseCore",
   "as_of": "2026-08-28",
   "current_phase": "Milestone 3 economy and settlement growth (active)",
-  "current_task": "Milestone 3A ownership/access substrate",
-  "next_task": "Milestone 3B deterministic local exchange",
+  "current_task": "Milestone 3B deterministic local exchange",
+  "next_task": "Milestone 3C deterministic construction and building effects",
   "build": {
     "canonical_workflow": "podman scripts/container-test.sh",
     "last_verified": "2026-08-28",
     "status": "passing",
-    "notes": "Verified in universecore-dev container with canonical fast and integration suites after Milestone 3A ownership/access substrate and snapshot schema v16 update"
+    "notes": "Verified in universecore-dev container with canonical fast and integration suites after Milestone 3B deterministic local exchange and ownership partition conservation checks"
   },
   "progress": {
     "simulation_foundation_percent": 100,
-    "bronze_age_simulator_percent": 49,
+    "bronze_age_simulator_percent": 52,
     "playable_vertical_slice_percent": 7,
     "full_game_vision_percent": 1,
     "note": "Percentages are approximate planning estimates, not objective measurements."
@@ -88,7 +88,7 @@
       "id": "M3",
       "name": "Economy and Settlement Growth",
       "status": "in_progress",
-      "percent": 14
+      "percent": 28
     },
     {
       "id": "UE",
@@ -119,12 +119,13 @@
       "Milestone 2 institutions foundation",
       "Snapshot schema v15 and validation",
       "Milestone 3A ownership/access substrate",
+      "Milestone 3B deterministic local exchange",
       "Snapshot schema v16 and validation",
       "Canonical Podman build/test workflow",
       "Development dashboard + deployment workflow"
     ],
     "active": [
-      "Milestone 3B deterministic local exchange"
+      "Milestone 3C deterministic construction and building effects"
     ],
     "planned": [
       "Milestone 1 migration implementation (designed/deferred)",

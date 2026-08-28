@@ -1653,6 +1653,7 @@ void Simulation::process_demography_period(const std::uint64_t demographic_year)
     process_records(demographic_year);
     process_institutions(demographic_year);
     process_knowledge_loss(demographic_year);
+    process_household_access_allocation();
     process_local_exchange(demographic_year);
     process_construction(demographic_year);
     process_occupation_reassignment(demographic_year);
@@ -5243,6 +5244,108 @@ void Simulation::process_household_stabilization_transfers() {
 
 void Simulation::process_local_exchange(const std::uint64_t demographic_year) {
     (void)demographic_year;
+
+    std::unordered_map<SettlementId, std::vector<Household*>> households_by_settlement;
+    households_by_settlement.reserve(state_.settlements.size());
+    for (auto& household : state_.households) {
+        households_by_settlement[household.settlement_id].push_back(&household);
+    }
+
+    for (auto& settlement : state_.settlements) {
+        auto it = households_by_settlement.find(settlement.id);
+        if (it == households_by_settlement.end()) {
+            continue;
+        }
+
+        auto& households = it->second;
+        std::sort(households.begin(), households.end(), [](const Household* lhs, const Household* rhs) {
+            return lhs->id < rhs->id;
+        });
+
+        if (households.empty()) {
+            continue;
+        }
+
+        std::vector<std::uint32_t> shares;
+        shares.reserve(households.size());
+        std::uint32_t total_share = 0;
+        for (const auto* household : households) {
+            shares.push_back(household->productive_access_share_points);
+            total_share += household->productive_access_share_points;
+        }
+
+        if (total_share == 0U) {
+            shares.assign(households.size(), 1U);
+            total_share = static_cast<std::uint32_t>(households.size());
+        }
+
+        auto allocate_and_apply = [&](const std::int64_t total_units, auto&& getter) {
+            const auto capped_total = std::max<std::int64_t>(0, total_units);
+            std::vector<std::int64_t> allocations(households.size(), 0);
+
+            std::int64_t allocated = 0;
+            for (std::size_t i = 0; i < households.size(); ++i) {
+                const auto share_i64 = static_cast<std::int64_t>(shares[i]);
+                const auto divisor = static_cast<std::int64_t>(total_share);
+                const auto quotient = capped_total / divisor;
+                const auto remainder = capped_total % divisor;
+
+                if (quotient > 0 && share_i64 > 0 && quotient > (std::numeric_limits<std::int64_t>::max() / share_i64)) {
+                    throw std::overflow_error("Exchange ownership allocation overflow");
+                }
+
+                const auto base = quotient * share_i64;
+                const auto rem_component = (remainder * share_i64) / divisor;
+                if (base > (std::numeric_limits<std::int64_t>::max() - rem_component)) {
+                    throw std::overflow_error("Exchange ownership allocation overflow");
+                }
+
+                const auto value = base + rem_component;
+                allocations[i] = std::max<std::int64_t>(0, value);
+                if (!checked_add_i64(allocated, allocations[i], allocated)) {
+                    throw std::overflow_error("Exchange allocation accumulation overflow");
+                }
+            }
+
+            auto remainder = capped_total - allocated;
+            for (std::size_t i = 0; i < households.size() && remainder > 0; ++i) {
+                ++allocations[i];
+                --remainder;
+            }
+
+            std::int64_t movement = 0;
+            for (std::size_t i = 0; i < households.size(); ++i) {
+                auto* household = households[i];
+                const auto old_value = getter(*household);
+                const auto new_value = allocations[i];
+
+                if (new_value > old_value) {
+                    household->cumulative_material_transferred_in += (new_value - old_value);
+                    movement += (new_value - old_value);
+                } else if (old_value > new_value) {
+                    household->cumulative_material_transferred_out += (old_value - new_value);
+                    movement += (old_value - new_value);
+                }
+
+                getter(*household) = new_value;
+            }
+
+            settlement.last_exchange_volume += movement / 2;
+        };
+
+        allocate_and_apply(settlement.materials.wood.value, [](Household& household) -> std::int64_t& {
+            return household.owned_materials.wood.value;
+        });
+        allocate_and_apply(settlement.materials.stone.value, [](Household& household) -> std::int64_t& {
+            return household.owned_materials.stone.value;
+        });
+        allocate_and_apply(settlement.materials.timber.value, [](Household& household) -> std::int64_t& {
+            return household.owned_materials.timber.value;
+        });
+        allocate_and_apply(settlement.materials.basic_tool.value, [](Household& household) -> std::int64_t& {
+            return household.owned_materials.basic_tool.value;
+        });
+    }
 }
 
 void Simulation::process_construction(const std::uint64_t demographic_year) {

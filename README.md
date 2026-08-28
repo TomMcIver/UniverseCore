@@ -44,6 +44,7 @@ The project deliberately starts without Unreal Engine. The initial objective is 
 - Material-environment abstractions: renewable wood stock + finite stone stock
 - Deterministic household ownership/access substrate with settlement commons food redistribution
 - Deterministic household owned-material ledgers and derived wealth aggregates
+- Deterministic settlement-local material ownership exchange/partitioning
 - Optional SDL3 + Dear ImGui simulation inspector (`UNIVERSECORE_BUILD_UI=ON`)
 - UI command/query adapter over canonical simulation state
 - UI smoke test validating deterministic advance/save/load behavior
@@ -56,7 +57,7 @@ Current M3A modelling limitations (intentional):
 - aggregate material quantities rather than item-instance objects
 - settlement-level inventories only
 - no price system or market-clearing exchange logic yet
-- no trade or market layer
+- no inter-settlement trade or market layer
 - no building/construction behavior yet (state scaffolding only)
 - no technology gating for these material chains
 - generic `BasicTool` abstraction (non-specialized tooling taxonomy)

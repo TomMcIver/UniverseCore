@@ -318,6 +318,10 @@ void verify_resource_invariants(const universe::WorldState& state, const std::in
     std::unordered_set<universe::SettlementId> settlement_ids;
     std::unordered_map<universe::SettlementId, std::uint32_t> productive_access_by_settlement;
     std::unordered_map<universe::SettlementId, std::uint32_t> commons_access_by_settlement;
+    std::unordered_map<universe::SettlementId, std::int64_t> owned_wood_by_settlement;
+    std::unordered_map<universe::SettlementId, std::int64_t> owned_stone_by_settlement;
+    std::unordered_map<universe::SettlementId, std::int64_t> owned_timber_by_settlement;
+    std::unordered_map<universe::SettlementId, std::int64_t> owned_tools_by_settlement;
     for (const auto& settlement : state.settlements) {
         settlement_ids.insert(settlement.id);
         total_basic_tool_broken += settlement.cumulative_basic_tool_broken;
@@ -383,6 +387,10 @@ void verify_resource_invariants(const universe::WorldState& state, const std::in
         require(household.derived_wealth_points >= 0, "household derived wealth must be non-negative");
         productive_access_by_settlement[household.settlement_id] += household.productive_access_share_points;
         commons_access_by_settlement[household.settlement_id] += household.commons_access_share_points;
+        owned_wood_by_settlement[household.settlement_id] += household.owned_materials.wood.value;
+        owned_stone_by_settlement[household.settlement_id] += household.owned_materials.stone.value;
+        owned_timber_by_settlement[household.settlement_id] += household.owned_materials.timber.value;
+        owned_tools_by_settlement[household.settlement_id] += household.owned_materials.basic_tool.value;
         total_household_wealth += household.derived_wealth_points;
 
         total_food_stored += resources.food_inventory.value;
@@ -499,6 +507,17 @@ void verify_resource_invariants(const universe::WorldState& state, const std::in
     require(state.total_settlement_commons_food == total_commons_food, "settlement commons food aggregate must match settlement totals");
     require(state.total_transfer_volume == total_transfer_volume, "transfer volume aggregate must match settlement totals");
     require(state.total_exchange_volume == total_exchange_volume, "exchange volume aggregate must match settlement totals");
+
+    for (const auto& settlement : state.settlements) {
+        const auto owned_wood = owned_wood_by_settlement.contains(settlement.id) ? owned_wood_by_settlement[settlement.id] : 0;
+        const auto owned_stone = owned_stone_by_settlement.contains(settlement.id) ? owned_stone_by_settlement[settlement.id] : 0;
+        const auto owned_timber = owned_timber_by_settlement.contains(settlement.id) ? owned_timber_by_settlement[settlement.id] : 0;
+        const auto owned_tools = owned_tools_by_settlement.contains(settlement.id) ? owned_tools_by_settlement[settlement.id] : 0;
+        require(owned_wood == settlement.materials.wood.value, "household-owned wood totals must match settlement inventory");
+        require(owned_stone == settlement.materials.stone.value, "household-owned stone totals must match settlement inventory");
+        require(owned_timber == settlement.materials.timber.value, "household-owned timber totals must match settlement inventory");
+        require(owned_tools == settlement.materials.basic_tool.value, "household-owned tool totals must match settlement inventory");
+    }
 
     std::uint64_t completed_buildings = 0;
     std::uint64_t active_projects = 0;
