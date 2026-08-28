@@ -522,12 +522,17 @@ void verify_resource_invariants(const universe::WorldState& state, const std::in
     std::uint64_t completed_buildings = 0;
     std::uint64_t active_projects = 0;
     std::unordered_set<universe::BuildingId> building_ids;
+    std::unordered_map<universe::SettlementId, std::uint64_t> completed_dwellings_by_settlement;
+    std::unordered_map<universe::SettlementId, std::uint64_t> completed_food_stores_by_settlement;
+    std::unordered_map<universe::SettlementId, std::uint64_t> completed_workshops_by_settlement;
     for (const auto& building : state.buildings) {
         require(building.id > 0U, "building id must be non-zero");
         require(building_ids.insert(building.id).second, "building ids must be unique");
         require(settlement_ids.contains(building.settlement_id), "building settlement id must reference existing settlement");
         if (building.owner_household_id.has_value()) {
-            require(find_household(state, *building.owner_household_id) != nullptr, "building owner household id must reference existing household");
+            const auto* owner = find_household(state, *building.owner_household_id);
+            require(owner != nullptr, "building owner household id must reference existing household");
+            require(owner->settlement_id == building.settlement_id, "building owner household must belong to building settlement");
         }
         require(building.timber_required >= 0, "building timber requirement must be non-negative");
         require(building.stone_required >= 0, "building stone requirement must be non-negative");
@@ -538,15 +543,43 @@ void verify_resource_invariants(const universe::WorldState& state, const std::in
         require(building.timber_committed <= building.timber_required, "building timber committed cannot exceed requirement");
         require(building.stone_committed <= building.stone_required, "building stone committed cannot exceed requirement");
         require(building.labour_completed <= building.labour_required, "building labour completed cannot exceed requirement");
+        require(building.started_at.ticks >= 0 && building.started_at.ticks <= state.time.ticks, "building start time must be within timeline");
         if (building.state == universe::ConstructionState::Complete) {
+            require(building.completed_at.has_value(), "complete building must include completion time");
+            require(
+                building.completed_at->ticks >= building.started_at.ticks && building.completed_at->ticks <= state.time.ticks,
+                "building completion time must be within timeline and after start");
+            if (building.type == universe::BuildingType::Dwelling) {
+                ++completed_dwellings_by_settlement[building.settlement_id];
+            } else if (building.type == universe::BuildingType::FoodStore) {
+                ++completed_food_stores_by_settlement[building.settlement_id];
+            } else if (building.type == universe::BuildingType::Workshop) {
+                ++completed_workshops_by_settlement[building.settlement_id];
+            }
             ++completed_buildings;
         } else {
+            require(!building.completed_at.has_value(), "incomplete building must not include completion time");
             ++active_projects;
         }
     }
 
     require(state.active_buildings == completed_buildings, "active building aggregate must match building list");
     require(state.active_projects == active_projects, "active project aggregate must match building list");
+
+    for (const auto& settlement : state.settlements) {
+        const auto dwellings = completed_dwellings_by_settlement.contains(settlement.id) ? completed_dwellings_by_settlement[settlement.id] : 0U;
+        const auto food_stores = completed_food_stores_by_settlement.contains(settlement.id) ? completed_food_stores_by_settlement[settlement.id] : 0U;
+        const auto workshops = completed_workshops_by_settlement.contains(settlement.id) ? completed_workshops_by_settlement[settlement.id] : 0U;
+        require(
+            settlement.dwelling_capacity_bonus == static_cast<std::int64_t>(dwellings) * 18,
+            "dwelling capacity bonus must match completed dwelling count");
+        require(
+            settlement.food_store_capacity_bonus == static_cast<std::int64_t>(food_stores) * 32,
+            "food store capacity bonus must match completed food store count");
+        require(
+            settlement.workshop_capacity_bonus == static_cast<std::int64_t>(workshops) * 14,
+            "workshop capacity bonus must match completed workshop count");
+    }
 
     verify_settlement_invariants(state);
 }

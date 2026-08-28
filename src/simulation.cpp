@@ -60,6 +60,18 @@ constexpr std::int64_t kWealthValueWood = 2;
 constexpr std::int64_t kWealthValueStone = 2;
 constexpr std::int64_t kWealthValueTimber = 4;
 constexpr std::int64_t kWealthValueBasicTool = 8;
+constexpr std::int64_t kDwellingTimberRequired = 20;
+constexpr std::int64_t kDwellingStoneRequired = 8;
+constexpr std::int64_t kDwellingLabourRequired = 560;
+constexpr std::int64_t kFoodStoreTimberRequired = 26;
+constexpr std::int64_t kFoodStoreStoneRequired = 12;
+constexpr std::int64_t kFoodStoreLabourRequired = 680;
+constexpr std::int64_t kWorkshopTimberRequired = 18;
+constexpr std::int64_t kWorkshopStoneRequired = 20;
+constexpr std::int64_t kWorkshopLabourRequired = 620;
+constexpr std::int64_t kDwellingCapacityBonusPerBuilding = 18;
+constexpr std::int64_t kFoodStoreCapacityBonusPerBuilding = 32;
+constexpr std::int64_t kWorkshopCapacityBonusPerBuilding = 14;
 
 struct LabourDemandProfile {
     std::int64_t cultivation_labour_demand{};
@@ -171,6 +183,13 @@ struct MaterialTargetProfile {
 
 std::uint32_t bounded_u32(const std::uint64_t value) {
     return static_cast<std::uint32_t>(std::min(value, static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max())));
+}
+
+[[nodiscard]] std::uint64_t ceil_div_u64(const std::uint64_t value, const std::uint64_t divisor) noexcept {
+    if (divisor == 0U) {
+        return 0U;
+    }
+    return (value / divisor) + ((value % divisor) == 0U ? 0U : 1U);
 }
 
 std::int32_t clamp_i32(const std::int32_t value, const std::int32_t lo, const std::int32_t hi) {
@@ -1289,6 +1308,7 @@ void Simulation::process_food_period(const std::uint64_t food_period) {
 
     if (config_.materials_system_enabled) {
         process_materials_period(food_period);
+        process_local_exchange(current_demographic_year());
     }
 
     process_household_stabilization_transfers();
@@ -1532,6 +1552,12 @@ void Simulation::process_materials_period(const std::uint64_t food_period) {
                 std::max<std::int64_t>(0, settlement_state->craft_labour_available),
                 config_.material_crafting_scale_percent);
             craft_labour_remaining = apply_scaled_percent(craft_labour_remaining, output_scale_percent);
+            if (!checked_add_i64(
+                    craft_labour_remaining,
+                    std::max<std::int64_t>(0, settlement_state->settlement->workshop_capacity_bonus),
+                    craft_labour_remaining)) {
+                throw std::overflow_error("Workshop bonus labour overflow");
+            }
 
             const auto craft_demand_total = timber_deficit + tool_deficit;
             std::int64_t material_labour_increment = 0;
@@ -1656,6 +1682,7 @@ void Simulation::process_demography_period(const std::uint64_t demographic_year)
     process_household_access_allocation();
     process_local_exchange(demographic_year);
     process_construction(demographic_year);
+    process_local_exchange(demographic_year);
     process_occupation_reassignment(demographic_year);
     process_household_access_allocation();
     refresh_population_count();
@@ -3511,7 +3538,17 @@ std::int64_t Simulation::settlement_accessible_food_capacity_per_day(const Settl
         static_cast<std::int64_t>(kSettlementShareScale);
     const auto wild = (region->wild_food_harvest_limit_per_day * static_cast<std::int64_t>(settlement.access_share_points)) /
         static_cast<std::int64_t>(kSettlementShareScale);
-    return std::max<std::int64_t>(0, productive + wild);
+    std::int64_t capacity = 0;
+    if (!checked_add_i64(productive, wild, capacity)) {
+        capacity = std::numeric_limits<std::int64_t>::max();
+    }
+    if (!checked_add_i64(capacity, settlement.dwelling_capacity_bonus, capacity)) {
+        capacity = std::numeric_limits<std::int64_t>::max();
+    }
+    if (!checked_add_i64(capacity, settlement.food_store_capacity_bonus, capacity)) {
+        capacity = std::numeric_limits<std::int64_t>::max();
+    }
+    return std::max<std::int64_t>(0, capacity);
 }
 
 std::uint32_t Simulation::settlement_pressure_per_10k(const Settlement& settlement) const noexcept {
@@ -5350,6 +5387,195 @@ void Simulation::process_local_exchange(const std::uint64_t demographic_year) {
 
 void Simulation::process_construction(const std::uint64_t demographic_year) {
     (void)demographic_year;
+
+    std::unordered_map<SettlementId, std::uint64_t> alive_population_by_settlement;
+    std::unordered_map<SettlementId, std::uint64_t> eligible_workers_by_settlement;
+    alive_population_by_settlement.reserve(state_.settlements.size());
+    eligible_workers_by_settlement.reserve(state_.settlements.size());
+
+    std::unordered_map<PersonId, const Person*> person_by_id;
+    person_by_id.reserve(state_.people.size());
+    for (const auto& person : state_.people) {
+        person_by_id.emplace(person.id, &person);
+    }
+
+    for (const auto& household : state_.households) {
+        for (const auto member_id : household.member_ids) {
+            const auto person_it = person_by_id.find(member_id);
+            if (person_it == person_by_id.end() || !person_it->second->alive) {
+                continue;
+            }
+
+            ++alive_population_by_settlement[household.settlement_id];
+            if (occupation_eligible_for_productive_work(*person_it->second)) {
+                ++eligible_workers_by_settlement[household.settlement_id];
+            }
+        }
+    }
+
+    auto find_building_mutable = [&](const BuildingId building_id) -> Building* {
+        for (auto& building : state_.buildings) {
+            if (building.id == building_id) {
+                return &building;
+            }
+        }
+        return nullptr;
+    };
+
+    std::unordered_map<SettlementId, std::vector<BuildingId>> buildings_by_settlement;
+    buildings_by_settlement.reserve(state_.settlements.size());
+    for (const auto& building : state_.buildings) {
+        buildings_by_settlement[building.settlement_id].push_back(building.id);
+    }
+
+    for (auto& settlement : state_.settlements) {
+        if (!settlement.active) {
+            continue;
+        }
+
+        auto& settlement_buildings = buildings_by_settlement[settlement.id];
+        std::sort(settlement_buildings.begin(), settlement_buildings.end());
+
+        std::uint64_t complete_dwellings = 0;
+        std::uint64_t complete_food_stores = 0;
+        std::uint64_t complete_workshops = 0;
+        std::uint64_t active_dwellings = 0;
+        std::uint64_t active_food_stores = 0;
+        std::uint64_t active_workshops = 0;
+
+        for (const auto building_id : settlement_buildings) {
+            const auto* building = find_building_mutable(building_id);
+            if (building == nullptr) {
+                continue;
+            }
+            const bool is_complete = building->state == ConstructionState::Complete;
+            if (building->type == BuildingType::Dwelling) {
+                is_complete ? ++complete_dwellings : ++active_dwellings;
+            } else if (building->type == BuildingType::FoodStore) {
+                is_complete ? ++complete_food_stores : ++active_food_stores;
+            } else if (building->type == BuildingType::Workshop) {
+                is_complete ? ++complete_workshops : ++active_workshops;
+            }
+        }
+
+        const auto alive_population = alive_population_by_settlement.contains(settlement.id)
+            ? alive_population_by_settlement[settlement.id]
+            : 0U;
+        const auto eligible_workers = eligible_workers_by_settlement.contains(settlement.id)
+            ? eligible_workers_by_settlement[settlement.id]
+            : 0U;
+
+        const auto target_dwellings = std::max<std::uint64_t>(1U, ceil_div_u64(alive_population, 30U));
+        const auto target_food_stores = std::max<std::uint64_t>(1U, ceil_div_u64(alive_population, 60U));
+        const auto target_workshops = std::max<std::uint64_t>(1U, ceil_div_u64(eligible_workers, 45U));
+
+        auto queue_project = [&](const BuildingType type, const std::int64_t timber_required, const std::int64_t stone_required, const std::int64_t labour_required) {
+            Building project{};
+            project.id = next_building_id();
+            project.type = type;
+            project.settlement_id = settlement.id;
+            project.settlement_commons_owned = true;
+            project.state = ConstructionState::Planned;
+            project.timber_required = timber_required;
+            project.stone_required = stone_required;
+            project.labour_required = labour_required;
+            project.started_at = state_.time;
+            state_.buildings.push_back(project);
+            settlement_buildings.push_back(project.id);
+        };
+
+        if (complete_dwellings + active_dwellings < target_dwellings) {
+            queue_project(BuildingType::Dwelling, kDwellingTimberRequired, kDwellingStoneRequired, kDwellingLabourRequired);
+        }
+        if (complete_food_stores + active_food_stores < target_food_stores) {
+            queue_project(BuildingType::FoodStore, kFoodStoreTimberRequired, kFoodStoreStoneRequired, kFoodStoreLabourRequired);
+        }
+        if (complete_workshops + active_workshops < target_workshops) {
+            queue_project(BuildingType::Workshop, kWorkshopTimberRequired, kWorkshopStoneRequired, kWorkshopLabourRequired);
+        }
+
+        std::sort(settlement_buildings.begin(), settlement_buildings.end());
+
+        std::int64_t labour_budget_from_workers = 0;
+        if (eligible_workers > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() / 28)) {
+            labour_budget_from_workers = std::numeric_limits<std::int64_t>::max();
+        } else {
+            labour_budget_from_workers = static_cast<std::int64_t>(eligible_workers) * 28;
+        }
+        auto labour_budget = std::max<std::int64_t>(40, labour_budget_from_workers);
+        for (const auto building_id : settlement_buildings) {
+            auto* building = find_building_mutable(building_id);
+            if (building == nullptr) {
+                continue;
+            }
+            if (building->state == ConstructionState::Complete) {
+                continue;
+            }
+
+            if (building->state == ConstructionState::Planned) {
+                building->state = ConstructionState::ActiveConstruction;
+            }
+
+            const auto timber_need = std::max<std::int64_t>(0, building->timber_required - building->timber_committed);
+            const auto timber_commit = std::min<std::int64_t>(timber_need, std::max<std::int64_t>(0, settlement.materials.timber.value));
+            settlement.materials.timber.value -= timber_commit;
+            building->timber_committed += timber_commit;
+
+            const auto stone_need = std::max<std::int64_t>(0, building->stone_required - building->stone_committed);
+            const auto stone_commit = std::min<std::int64_t>(stone_need, std::max<std::int64_t>(0, settlement.materials.stone.value));
+            settlement.materials.stone.value -= stone_commit;
+            building->stone_committed += stone_commit;
+
+            const auto labour_need = std::max<std::int64_t>(0, building->labour_required - building->labour_completed);
+            const auto labour_commit = std::min<std::int64_t>(labour_need, std::max<std::int64_t>(0, labour_budget));
+            labour_budget -= labour_commit;
+            building->labour_completed += labour_commit;
+
+            if (building->timber_committed >= building->timber_required &&
+                building->stone_committed >= building->stone_required &&
+                building->labour_completed >= building->labour_required) {
+                building->state = ConstructionState::Complete;
+                building->completed_at = state_.time;
+            }
+        }
+    }
+
+    std::unordered_map<SettlementId, std::uint64_t> completed_dwellings_by_settlement;
+    std::unordered_map<SettlementId, std::uint64_t> completed_food_stores_by_settlement;
+    std::unordered_map<SettlementId, std::uint64_t> completed_workshops_by_settlement;
+    completed_dwellings_by_settlement.reserve(state_.settlements.size());
+    completed_food_stores_by_settlement.reserve(state_.settlements.size());
+    completed_workshops_by_settlement.reserve(state_.settlements.size());
+
+    for (const auto& building : state_.buildings) {
+        if (building.state != ConstructionState::Complete) {
+            continue;
+        }
+
+        if (building.type == BuildingType::Dwelling) {
+            ++completed_dwellings_by_settlement[building.settlement_id];
+        } else if (building.type == BuildingType::FoodStore) {
+            ++completed_food_stores_by_settlement[building.settlement_id];
+        } else if (building.type == BuildingType::Workshop) {
+            ++completed_workshops_by_settlement[building.settlement_id];
+        }
+    }
+
+    for (auto& settlement : state_.settlements) {
+        const auto completed_dwellings = completed_dwellings_by_settlement.contains(settlement.id)
+            ? completed_dwellings_by_settlement[settlement.id]
+            : 0U;
+        const auto completed_food_stores = completed_food_stores_by_settlement.contains(settlement.id)
+            ? completed_food_stores_by_settlement[settlement.id]
+            : 0U;
+        const auto completed_workshops = completed_workshops_by_settlement.contains(settlement.id)
+            ? completed_workshops_by_settlement[settlement.id]
+            : 0U;
+
+        settlement.dwelling_capacity_bonus = static_cast<std::int64_t>(completed_dwellings) * kDwellingCapacityBonusPerBuilding;
+        settlement.food_store_capacity_bonus = static_cast<std::int64_t>(completed_food_stores) * kFoodStoreCapacityBonusPerBuilding;
+        settlement.workshop_capacity_bonus = static_cast<std::int64_t>(completed_workshops) * kWorkshopCapacityBonusPerBuilding;
+    }
 }
 
 void Simulation::refresh_economic_aggregates() noexcept {

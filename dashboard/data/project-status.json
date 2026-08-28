@@ -2,17 +2,17 @@
   "project": "UniverseCore",
   "as_of": "2026-08-28",
   "current_phase": "Milestone 3 economy and settlement growth (active)",
-  "current_task": "Milestone 3B deterministic local exchange",
-  "next_task": "Milestone 3C deterministic construction and building effects",
+  "current_task": "Milestone 3C deterministic construction and building effects",
+  "next_task": "Milestone 3D settlement pressure and bounded growth",
   "build": {
     "canonical_workflow": "podman scripts/container-test.sh",
     "last_verified": "2026-08-28",
     "status": "passing",
-    "notes": "Verified in universecore-dev container with canonical fast and integration suites after Milestone 3B deterministic local exchange and ownership partition conservation checks"
+    "notes": "Verified in universecore-dev container with canonical fast and integration suites after Milestone 3C deterministic construction progression and building capacity effects"
   },
   "progress": {
     "simulation_foundation_percent": 100,
-    "bronze_age_simulator_percent": 52,
+    "bronze_age_simulator_percent": 57,
     "playable_vertical_slice_percent": 7,
     "full_game_vision_percent": 1,
     "note": "Percentages are approximate planning estimates, not objective measurements."
@@ -88,7 +88,7 @@
       "id": "M3",
       "name": "Economy and Settlement Growth",
       "status": "in_progress",
-      "percent": 28
+      "percent": 43
     },
     {
       "id": "UE",
@@ -120,12 +120,13 @@
       "Snapshot schema v15 and validation",
       "Milestone 3A ownership/access substrate",
       "Milestone 3B deterministic local exchange",
+      "Milestone 3C deterministic construction and building effects",
       "Snapshot schema v16 and validation",
       "Canonical Podman build/test workflow",
       "Development dashboard + deployment workflow"
     ],
     "active": [
-      "Milestone 3C deterministic construction and building effects"
+      "Milestone 3D settlement pressure and bounded growth"
     ],
     "planned": [
       "Milestone 1 migration implementation (designed/deferred)",

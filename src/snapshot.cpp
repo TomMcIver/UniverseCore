@@ -24,6 +24,9 @@ constexpr std::int64_t kWealthValueWood = 2;
 constexpr std::int64_t kWealthValueStone = 2;
 constexpr std::int64_t kWealthValueTimber = 4;
 constexpr std::int64_t kWealthValueBasicTool = 8;
+constexpr std::int64_t kDwellingCapacityBonusPerBuilding = 18;
+constexpr std::int64_t kFoodStoreCapacityBonusPerBuilding = 32;
+constexpr std::int64_t kWorkshopCapacityBonusPerBuilding = 14;
 
 [[nodiscard]] std::uint64_t fnv1a64(std::span<const std::byte> data) noexcept {
     std::uint64_t hash = 14695981039346656037ULL;
@@ -3353,6 +3356,9 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     std::int64_t recomputed_total_transfer_volume = 0;
     std::uint64_t recomputed_active_buildings = 0;
     std::uint64_t recomputed_active_projects = 0;
+    std::unordered_map<SettlementId, std::uint64_t> completed_dwellings_by_settlement;
+    std::unordered_map<SettlementId, std::uint64_t> completed_food_stores_by_settlement;
+    std::unordered_map<SettlementId, std::uint64_t> completed_workshops_by_settlement;
 
     for (const auto& household : restored_state.households) {
         if (household.owned_materials.wood.value < 0 ||
@@ -3435,8 +3441,42 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     for (const auto& building : restored_state.buildings) {
         if (building.state == ConstructionState::Complete) {
             ++recomputed_active_buildings;
+            if (building.type == BuildingType::Dwelling) {
+                ++completed_dwellings_by_settlement[building.settlement_id];
+            } else if (building.type == BuildingType::FoodStore) {
+                ++completed_food_stores_by_settlement[building.settlement_id];
+            } else if (building.type == BuildingType::Workshop) {
+                ++completed_workshops_by_settlement[building.settlement_id];
+            }
         } else {
             ++recomputed_active_projects;
+        }
+    }
+
+    for (const auto& settlement : restored_state.settlements) {
+        const auto dwellings = completed_dwellings_by_settlement.contains(settlement.id)
+            ? completed_dwellings_by_settlement[settlement.id]
+            : 0U;
+        const auto food_stores = completed_food_stores_by_settlement.contains(settlement.id)
+            ? completed_food_stores_by_settlement[settlement.id]
+            : 0U;
+        const auto workshops = completed_workshops_by_settlement.contains(settlement.id)
+            ? completed_workshops_by_settlement[settlement.id]
+            : 0U;
+
+        if (dwellings > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() / kDwellingCapacityBonusPerBuilding) ||
+            food_stores > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() / kFoodStoreCapacityBonusPerBuilding) ||
+            workshops > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() / kWorkshopCapacityBonusPerBuilding)) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot settlement building bonus overflows supported range");
+        }
+
+        const auto expected_dwelling_bonus = static_cast<std::int64_t>(dwellings) * kDwellingCapacityBonusPerBuilding;
+        const auto expected_food_store_bonus = static_cast<std::int64_t>(food_stores) * kFoodStoreCapacityBonusPerBuilding;
+        const auto expected_workshop_bonus = static_cast<std::int64_t>(workshops) * kWorkshopCapacityBonusPerBuilding;
+        if (settlement.dwelling_capacity_bonus != expected_dwelling_bonus ||
+            settlement.food_store_capacity_bonus != expected_food_store_bonus ||
+            settlement.workshop_capacity_bonus != expected_workshop_bonus) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot settlement building bonus totals are inconsistent");
         }
     }
 

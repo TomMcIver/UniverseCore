@@ -304,6 +304,9 @@ int main() {
         verify_resource_invariants(deterministic_a.state(), config.initial_household_food_units);
         verify_event_payload_types(deterministic_a.state());
         verify_memory_invariants(deterministic_a.state(), deterministic_a);
+        require(
+            deterministic_a.state().active_buildings + deterministic_a.state().active_projects > 0U,
+            "construction system should produce active projects or completed buildings");
 
         std::uint64_t checked_births = 0;
         std::uint64_t checked_deaths = 0;
@@ -504,6 +507,48 @@ int main() {
             }
         }
 
+        if (!no_omniscience_verified) {
+            auto no_omniscience_config = config;
+            no_omniscience_config.initial_population = 300;
+            no_omniscience_config.initial_region_count = 1;
+            no_omniscience_config.base_region_area_units = 60;
+            no_omniscience_config.initial_household_food_units = 10;
+            no_omniscience_config.food_production_scale_percent = 90;
+
+            universe::Simulation no_omniscience_run{no_omniscience_config};
+            no_omniscience_run.run_years(220);
+            const auto& no_omniscience_state = no_omniscience_run.state();
+            for (const auto& event : no_omniscience_state.event_log) {
+                if (event.type != universe::EventType::SettlementFounded) {
+                    continue;
+                }
+
+                const auto& payload = std::get<universe::SettlementFoundedEventPayload>(event.payload);
+                const auto observers = event_observers(no_omniscience_state, event.id);
+                if (observers.empty()) {
+                    continue;
+                }
+
+                universe::PersonId unrelated_id = 0;
+                for (const auto& person : no_omniscience_state.people) {
+                    if (std::find(observers.begin(), observers.end(), person.id) == observers.end() &&
+                        !no_omniscience_run.person_remembers_event(person.id, event.id)) {
+                        unrelated_id = person.id;
+                        break;
+                    }
+                }
+                if (unrelated_id == 0U) {
+                    continue;
+                }
+
+                require(
+                    !no_omniscience_run.known_settlement_status(unrelated_id, payload.settlement_id).has_value(),
+                    "non-observer must not gain settlement knowledge from journal omniscience");
+                no_omniscience_verified = true;
+                break;
+            }
+        }
+
         struct StaleKnowledgeCase {
             universe::PersonId child_id{};
             universe::PersonId stale_observer_id{};
@@ -580,44 +625,55 @@ int main() {
         require(life_fact_count == 1U, "life-status upsert must keep one current entry per owner/subject");
         require(life_fact_id > 0U, "life-status knowledge id must be stable and non-zero");
 
-        bool found_settlement_stale_case = false;
-        for (const auto& event : state.event_log) {
-            if (event.type != universe::EventType::SettlementExtinct) {
-                continue;
-            }
-            const auto& extinct_payload = std::get<universe::SettlementExtinctEventPayload>(event.payload);
-
-            for (const auto& prior_event : state.event_log) {
-                if (prior_event.id >= event.id || prior_event.type != universe::EventType::SettlementFounded) {
+        const auto verify_settlement_stale_case = [](const universe::Simulation& run, const universe::WorldState& run_state) {
+            for (const auto& event : run_state.event_log) {
+                if (event.type != universe::EventType::SettlementExtinct) {
                     continue;
                 }
-                const auto& founded_payload = std::get<universe::SettlementFoundedEventPayload>(prior_event.payload);
-                if (founded_payload.settlement_id != extinct_payload.settlement_id) {
-                    continue;
+                const auto& extinct_payload = std::get<universe::SettlementExtinctEventPayload>(event.payload);
+
+                for (const auto& prior_event : run_state.event_log) {
+                    if (prior_event.id >= event.id || prior_event.type != universe::EventType::SettlementFounded) {
+                        continue;
+                    }
+                    const auto& founded_payload = std::get<universe::SettlementFoundedEventPayload>(prior_event.payload);
+                    if (founded_payload.settlement_id != extinct_payload.settlement_id) {
+                        continue;
+                    }
+
+                    const auto founded_observers = event_observers(run_state, prior_event.id);
+                    if (founded_observers.empty()) {
+                        continue;
+                    }
+
+                    const auto observer_id = founded_observers.front();
+                    require(
+                        !run.person_remembers_event(observer_id, event.id),
+                        "settlement extinction currently has zero direct observer memories");
+
+                    const auto settlement_status = run.known_settlement_status(observer_id, founded_payload.settlement_id);
+                    require(settlement_status.has_value(), "founded settlement observer should have settlement knowledge");
+                    require(settlement_status->region_id == founded_payload.region_id, "settlement knowledge region must match founded event");
+                    require(settlement_status->active, "settlement knowledge should remain active without extinction memory");
+
+                    return true;
                 }
-
-                const auto founded_observers = event_observers(state, prior_event.id);
-                if (founded_observers.empty()) {
-                    continue;
-                }
-
-                const auto observer_id = founded_observers.front();
-                require(
-                    !knowledge_run.person_remembers_event(observer_id, event.id),
-                    "settlement extinction currently has zero direct observer memories");
-
-                const auto settlement_status = knowledge_run.known_settlement_status(observer_id, founded_payload.settlement_id);
-                require(settlement_status.has_value(), "founded settlement observer should have settlement knowledge");
-                require(settlement_status->region_id == founded_payload.region_id, "settlement knowledge region must match founded event");
-                require(settlement_status->active, "settlement knowledge should remain active without extinction memory");
-
-                found_settlement_stale_case = true;
-                break;
             }
+            return false;
+        };
 
-            if (found_settlement_stale_case) {
-                break;
-            }
+        bool found_settlement_stale_case = verify_settlement_stale_case(knowledge_run, state);
+        if (!found_settlement_stale_case) {
+            auto stale_settlement_config = config;
+            stale_settlement_config.initial_population = 300;
+            stale_settlement_config.initial_region_count = 1;
+            stale_settlement_config.base_region_area_units = 60;
+            stale_settlement_config.initial_household_food_units = 10;
+            stale_settlement_config.food_production_scale_percent = 90;
+
+            universe::Simulation stale_settlement_run{stale_settlement_config};
+            stale_settlement_run.run_years(220);
+            found_settlement_stale_case = verify_settlement_stale_case(stale_settlement_run, stale_settlement_run.state());
         }
 
         require(found_settlement_stale_case, "integration run should include founded-then-extinct stale settlement knowledge case");
