@@ -145,6 +145,12 @@
   ],
   "recent_verified_commits": [
     {
+      "hash": "c21f610",
+      "date": "2026-08-28",
+      "summary": "Complete Milestone 3 work allocation and production-chain closeout",
+      "verified": true
+    },
+    {
       "hash": "052210b",
       "date": "2026-08-26",
       "summary": "Add deterministic event journal foundation",
