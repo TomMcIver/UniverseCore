@@ -97,6 +97,48 @@ struct PopulationCohort {
     [[nodiscard]] bool operator==(const PopulationCohort& other) const = default;
 };
 
+struct SettlementAggregateState {
+    SettlementId settlement_id{};
+    RegionId region_id{};
+    std::uint64_t household_count{};
+    std::uint64_t small_household_count{};
+    std::uint64_t medium_household_count{};
+    std::uint64_t large_household_count{};
+    std::int64_t food_inventory{};
+    std::int64_t food_produced_total{};
+    std::int64_t food_consumed_total{};
+    std::int64_t unmet_food_total{};
+    std::int64_t labour_capacity{};
+    std::int64_t labour_demand{};
+    std::int64_t labour_allocated{};
+
+    // Household labour-capacity distribution (M4B household aggregation contract).
+    std::uint64_t labour_low_household_count{};
+    std::uint64_t labour_medium_household_count{};
+    std::uint64_t labour_high_household_count{};
+
+    // Household wealth distribution.
+    std::uint64_t wealth_low_household_count{};
+    std::uint64_t wealth_medium_household_count{};
+    std::uint64_t wealth_high_household_count{};
+
+    // Household food-buffer distribution.
+    std::uint64_t food_buffer_low_household_count{};
+    std::uint64_t food_buffer_medium_household_count{};
+    std::uint64_t food_buffer_high_household_count{};
+
+    // Exact conserved settlement-level economic totals held by the aggregate.
+    std::int64_t wealth_points_total{};
+    std::int64_t productive_access_points{};
+
+    // Rolling per-demographic-year food flow, used to drive aggregate
+    // mortality/fertility stress. Reset at the start of each demographic year.
+    std::int64_t required_food_year{};
+    std::int64_t unmet_food_year{};
+
+    [[nodiscard]] bool operator==(const SettlementAggregateState& other) const = default;
+};
+
 struct Person {
     PersonId id{};
     std::int64_t birth_year{};
@@ -109,6 +151,8 @@ struct Person {
     std::int32_t health_points{850};
     std::uint32_t consecutive_undernourished_days{};
     Occupation occupation{Occupation::None};
+    bool materialized_from_cohort{false};
+    std::optional<CohortId> source_cohort_id{};
 };
 
 struct Household {
@@ -454,6 +498,11 @@ struct WorldState {
     std::uint64_t population{};
     std::uint64_t total_births{};
     std::uint64_t total_deaths{};
+    // Portion of the canonical totals produced by aggregate cohort demography.
+    // Anonymous aggregate transitions deliberately emit no per-person events,
+    // so the event journal reconciles against totals minus these counters.
+    std::uint64_t aggregate_births_total{};
+    std::uint64_t aggregate_deaths_total{};
     std::int64_t total_food_stored{};
     std::int64_t total_food_produced{};
     std::int64_t total_food_consumed{};
@@ -515,6 +564,7 @@ struct WorldState {
     SimulationDetailLevel detail_level{SimulationDetailLevel::Detailed};
     std::vector<RegionLodState> region_lod_states{};
     std::vector<PopulationCohort> population_cohorts{};
+    std::vector<SettlementAggregateState> settlement_aggregates{};
     std::vector<Person> people{};
     std::vector<Household> households{};
     std::vector<RegionEnvironmentState> regions{};
@@ -556,6 +606,27 @@ public:
     [[nodiscard]] bool knows_basic_discovery(PersonId knower_id, std::uint32_t discovery_key) const noexcept;
     [[nodiscard]] std::vector<std::byte> save_snapshot() const;
     [[nodiscard]] static SnapshotLoadResult load_snapshot(std::span<const std::byte> data, Simulation& destination);
+    void set_region_detail_level(RegionId region_id, SimulationDetailLevel level);
+    [[nodiscard]] SimulationDetailLevel region_detail_level(RegionId region_id) const noexcept;
+    void add_aggregate_population(RegionId region_id, SettlementId settlement_id, std::uint64_t population);
+    void promote_region_to_detailed(RegionId region_id);
+    void demote_region_to_settlement_aggregate(RegionId region_id);
+    [[nodiscard]] std::uint64_t aggregate_population() const noexcept;
+    [[nodiscard]] std::uint64_t detailed_population() const noexcept;
+
+    // Non-canonical LOD execution instrumentation. These counters are never
+    // serialized and never affect simulation outcomes; they exist so tests can
+    // prove that aggregate settlements do not fall back to per-person loops.
+    [[nodiscard]] std::uint64_t person_daily_update_count() const noexcept { return person_daily_update_count_; }
+    [[nodiscard]] std::uint64_t person_demography_update_count() const noexcept { return person_demography_update_count_; }
+    [[nodiscard]] std::uint64_t aggregate_settlement_update_count() const noexcept { return aggregate_settlement_update_count_; }
+    [[nodiscard]] std::uint64_t aggregate_cohort_update_count() const noexcept { return aggregate_cohort_update_count_; }
+    void reset_lod_instrumentation() noexcept {
+        person_daily_update_count_ = 0;
+        person_demography_update_count_ = 0;
+        aggregate_settlement_update_count_ = 0;
+        aggregate_cohort_update_count_ = 0;
+    }
     void advance(SimulationDuration duration);
     void step_year();
     void run_years(std::uint64_t years);
@@ -619,6 +690,21 @@ private:
     void initialize_regions();
     void assign_households_to_regions();
     void initialize_settlements();
+    void initialize_region_lod_states();
+    void initialize_settlement_aggregates();
+    [[nodiscard]] bool is_region_detailed(RegionId region_id) const noexcept;
+    [[nodiscard]] bool is_settlement_detailed(SettlementId settlement_id) const noexcept;
+    [[nodiscard]] bool is_household_detailed(HouseholdId household_id) const noexcept;
+    [[nodiscard]] bool is_person_detailed(const Person& person) const noexcept;
+    void merge_population_cohorts();
+    [[nodiscard]] std::unordered_set<PersonId> collect_canonized_person_ids() const;
+    void process_aggregate_cohort_aging(std::uint64_t demographic_year);
+    void process_aggregate_cohort_mortality(std::uint64_t demographic_year);
+    void process_aggregate_cohort_fertility(std::uint64_t demographic_year);
+    void process_aggregate_food_period(std::uint64_t food_period);
+    void process_aggregate_demography_period(std::uint64_t demographic_year);
+    void rebuild_settlement_aggregate_distribution(SettlementId settlement_id);
+    void rebuild_global_detail_level();
     void process_settlement_restructuring(std::uint64_t demographic_year);
     void process_settlement_extinction();
     void process_settlement_founding(std::uint64_t demographic_year);
@@ -702,6 +788,12 @@ private:
     InstitutionId next_institution_id_{1};
     BuildingId next_building_id_{1};
     CohortId next_cohort_id_{1};
+
+    // Non-canonical instrumentation; excluded from snapshots and equality.
+    std::uint64_t person_daily_update_count_{};
+    std::uint64_t person_demography_update_count_{};
+    std::uint64_t aggregate_settlement_update_count_{};
+    std::uint64_t aggregate_cohort_update_count_{};
     SimulationDuration demography_interval_{DemographicCalendarAdapter::year_duration()};
     SimulationTime demography_next_run_{DemographicCalendarAdapter::year_duration().ticks};
     SimulationDuration food_interval_{days(1)};

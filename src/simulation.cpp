@@ -78,6 +78,18 @@ constexpr std::int64_t kWorkshopCapacityBonusPerBuilding = 14;
 constexpr std::int64_t kCommonsReserveTargetDays = 10;
 constexpr std::int64_t kCommonsReplenishDays = 8;
 constexpr std::int64_t kFoodCrisisBufferDays = 7;
+constexpr std::uint64_t kAggregatePeoplePerHousehold = 5;
+// M4E resolution-aware cadence: aggregate settlements advance in monthly
+// chunks rather than daily steps. Detailed regions keep the daily cadence.
+constexpr std::uint64_t kAggregateFoodPeriodDays = 30;
+constexpr std::uint32_t kAggregateEligibleWorkersPer10k = 5'600;
+constexpr std::uint32_t kAggregateCultivatorSharePer10k = 4'500;
+constexpr std::uint32_t kAggregateGathererSharePer10k = 2'500;
+constexpr std::uint32_t kAggregateWoodSharePer10k = 1'300;
+constexpr std::uint32_t kAggregateStoneSharePer10k = 900;
+constexpr std::uint32_t kAggregateCraftSharePer10k = 800;
+constexpr std::uint32_t kAggregateBirthRatePer10k = 180;
+constexpr std::uint32_t kAggregateDeathRatePer10k = 140;
 
 struct LabourDemandProfile {
     std::int64_t cultivation_labour_demand{};
@@ -230,6 +242,52 @@ std::int64_t clamp_i64(const std::int64_t value, const std::int64_t lo, const st
     return std::min(std::max(value, lo), hi);
 }
 
+[[nodiscard]] CohortAgeBand age_band_from_years(const std::uint32_t age_years) noexcept {
+    if (age_years < 18U) {
+        return CohortAgeBand::Child;
+    }
+    if (age_years < 30U) {
+        return CohortAgeBand::YoungAdult;
+    }
+    if (age_years < 60U) {
+        return CohortAgeBand::Adult;
+    }
+    return CohortAgeBand::Senior;
+}
+
+[[nodiscard]] CohortOccupationGroup occupation_group_from_person(const Occupation occupation) noexcept {
+    if (occupation == Occupation::SubsistenceCultivator || occupation == Occupation::WildFoodGatherer) {
+        return CohortOccupationGroup::Food;
+    }
+    if (occupation == Occupation::WoodGatherer || occupation == Occupation::StoneExtractor) {
+        return CohortOccupationGroup::Materials;
+    }
+    if (occupation == Occupation::CraftWorker) {
+        return CohortOccupationGroup::Craft;
+    }
+    return CohortOccupationGroup::Unspecified;
+}
+
+[[nodiscard]] CohortHealthBand health_band_from_points(const std::int32_t points) noexcept {
+    if (points < 400) {
+        return CohortHealthBand::Low;
+    }
+    if (points < 750) {
+        return CohortHealthBand::Medium;
+    }
+    return CohortHealthBand::High;
+}
+
+[[nodiscard]] CohortWealthBand wealth_band_from_points(const std::int64_t points) noexcept {
+    if (points < 80) {
+        return CohortWealthBand::Low;
+    }
+    if (points < 220) {
+        return CohortWealthBand::Medium;
+    }
+    return CohortWealthBand::High;
+}
+
 std::int64_t environment_class_productive_units_per_area(const EnvironmentClass environment_class) {
     switch (environment_class) {
         case EnvironmentClass::ProductiveArable:
@@ -318,6 +376,8 @@ Simulation::Simulation(SimulationConfig config)
     initialize_regions();
     assign_households_to_regions();
     initialize_settlements();
+    initialize_region_lod_states();
+    initialize_settlement_aggregates();
     process_household_access_allocation();
     process_occupation_reassignment(0);
     refresh_population_count();
@@ -627,6 +687,153 @@ SnapshotLoadResult Simulation::load_snapshot(const std::span<const std::byte> da
     return SnapshotCodec::deserialize(data, destination);
 }
 
+void Simulation::set_region_detail_level(const RegionId region_id, const SimulationDetailLevel level) {
+    if (find_region(region_id) == nullptr) {
+        throw std::invalid_argument("Unknown region id for detail-level change");
+    }
+
+    auto found = false;
+    for (auto& entry : state_.region_lod_states) {
+        if (entry.region_id == region_id) {
+            entry.detail_level = level;
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        state_.region_lod_states.push_back(RegionLodState{.region_id = region_id, .detail_level = level});
+        std::sort(state_.region_lod_states.begin(), state_.region_lod_states.end(), [](const RegionLodState& lhs, const RegionLodState& rhs) {
+            return lhs.region_id < rhs.region_id;
+        });
+    }
+
+    rebuild_global_detail_level();
+}
+
+SimulationDetailLevel Simulation::region_detail_level(const RegionId region_id) const noexcept {
+    for (const auto& entry : state_.region_lod_states) {
+        if (entry.region_id == region_id) {
+            return entry.detail_level;
+        }
+    }
+    return SimulationDetailLevel::Detailed;
+}
+
+void Simulation::add_aggregate_population(
+    const RegionId region_id,
+    const SettlementId settlement_id,
+    const std::uint64_t population) {
+    if (population == 0U) {
+        return;
+    }
+
+    const auto* region = find_region(region_id);
+    if (region == nullptr) {
+        throw std::invalid_argument("Unknown region id for aggregate population");
+    }
+    (void)region;
+
+    SettlementId effective_settlement_id = settlement_id;
+    if (effective_settlement_id == 0U) {
+        // Only the share still unclaimed in this region may be taken, otherwise
+        // regional access allocation would exceed its capacity.
+        std::uint32_t claimed_share = 0U;
+        for (const auto& existing : state_.settlements) {
+            if (existing.active && existing.region_id == region_id) {
+                claimed_share += existing.access_share_points;
+            }
+        }
+        if (claimed_share >= kSettlementShareScale) {
+            throw std::invalid_argument("Region has no remaining access share for an aggregate settlement");
+        }
+        const auto available_share = kSettlementShareScale - claimed_share;
+
+        effective_settlement_id = next_settlement_id();
+        state_.settlements.push_back(Settlement{
+            .id = effective_settlement_id,
+            .region_id = region_id,
+            .active = true,
+            .access_share_points = available_share,
+        });
+        state_.settlement_aggregates.push_back(SettlementAggregateState{
+            .settlement_id = effective_settlement_id,
+            .region_id = region_id,
+        });
+        std::sort(state_.settlements.begin(), state_.settlements.end(), [](const Settlement& lhs, const Settlement& rhs) {
+            return lhs.id < rhs.id;
+        });
+        std::sort(state_.settlement_aggregates.begin(), state_.settlement_aggregates.end(), [](const SettlementAggregateState& lhs, const SettlementAggregateState& rhs) {
+            return lhs.settlement_id < rhs.settlement_id;
+        });
+    }
+
+    const auto* settlement = find_settlement(effective_settlement_id);
+    if (settlement == nullptr || settlement->region_id != region_id) {
+        throw std::invalid_argument("Unknown settlement id for aggregate population");
+    }
+
+    set_region_detail_level(region_id, SimulationDetailLevel::SettlementAggregate);
+
+    const auto male_population = population / 2U;
+    const auto female_population = population - male_population;
+
+    const auto push_cohort = [&](const std::uint64_t cohort_population, const BiologicalSex sex) {
+        if (cohort_population == 0U) {
+            return;
+        }
+        state_.population_cohorts.push_back(PopulationCohort{
+            .id = next_cohort_id_++,
+            .region_id = region_id,
+            .settlement_id = effective_settlement_id,
+            .age_band = CohortAgeBand::Adult,
+            .sex = sex,
+            .occupation_group = CohortOccupationGroup::Food,
+            .health_band = CohortHealthBand::Medium,
+            .wealth_band = CohortWealthBand::Medium,
+            .knowledge_profile_id = 1U,
+            .population = cohort_population,
+        });
+    };
+
+    push_cohort(female_population, BiologicalSex::Female);
+    push_cohort(male_population, BiologicalSex::Male);
+
+    std::sort(state_.population_cohorts.begin(), state_.population_cohorts.end(), [](const PopulationCohort& lhs, const PopulationCohort& rhs) {
+        if (lhs.region_id != rhs.region_id) {
+            return lhs.region_id < rhs.region_id;
+        }
+        if (lhs.settlement_id != rhs.settlement_id) {
+            return lhs.settlement_id < rhs.settlement_id;
+        }
+        return lhs.id < rhs.id;
+    });
+
+    rebuild_settlement_aggregate_distribution(effective_settlement_id);
+    refresh_population_count();
+    refresh_food_aggregates();
+    refresh_labour_aggregates();
+    refresh_material_aggregates();
+    refresh_economic_aggregates();
+}
+
+std::uint64_t Simulation::aggregate_population() const noexcept {
+    std::uint64_t total = 0;
+    for (const auto& cohort : state_.population_cohorts) {
+        total += cohort.population;
+    }
+    return total;
+}
+
+std::uint64_t Simulation::detailed_population() const noexcept {
+    std::uint64_t total = 0;
+    for (const auto& person : state_.people) {
+        if (person.alive) {
+            ++total;
+        }
+    }
+    return total;
+}
+
 std::uint64_t Simulation::current_demographic_year() const noexcept {
     return DemographicCalendarAdapter::demographic_year(state_.time);
 }
@@ -728,6 +935,12 @@ void Simulation::process_food_period(const std::uint64_t food_period) {
     }
 
     for (auto& household : state_.households) {
+        // LOD gate: households in non-detailed regions are executed by
+        // process_aggregate_food_period, never by per-person daily loops.
+        if (!is_region_detailed(household.region_id)) {
+            continue;
+        }
+
         HouseholdDayState household_state{};
         household_state.household = &household;
         household_state.alive_members.reserve(household.member_ids.size());
@@ -1342,6 +1555,7 @@ void Simulation::process_food_period(const std::uint64_t food_period) {
     }
 
     process_household_stabilization_transfers();
+    process_aggregate_food_period(food_period);
 
     refresh_food_aggregates();
     refresh_environment_aggregates();
@@ -1732,6 +1946,7 @@ void Simulation::process_demography_period(const std::uint64_t demographic_year)
     process_mortality(demographic_year);
     process_births(demographic_year);
     process_settlement_restructuring(demographic_year);
+    process_aggregate_demography_period(demographic_year);
     process_basic_discoveries(demographic_year);
     process_communication_teaching(demographic_year);
     process_records(demographic_year);
@@ -1743,6 +1958,1012 @@ void Simulation::process_demography_period(const std::uint64_t demographic_year)
     process_local_exchange(demographic_year);
     process_occupation_reassignment(demographic_year);
     process_household_access_allocation();
+    refresh_population_count();
+    refresh_food_aggregates();
+    refresh_labour_aggregates();
+    refresh_material_aggregates();
+    refresh_economic_aggregates();
+}
+
+void Simulation::process_aggregate_food_period(const std::uint64_t food_period) {
+    // Chunked monthly advancement: one aggregate step covers kAggregateFoodPeriodDays
+    // of flow, so off-screen population costs ~1/30th of daily execution.
+    if (food_period % kAggregateFoodPeriodDays != 0U) {
+        return;
+    }
+    const auto chunk_days = static_cast<std::int64_t>(kAggregateFoodPeriodDays);
+
+    std::unordered_map<SettlementId, SettlementAggregateState*> aggregate_by_settlement;
+    aggregate_by_settlement.reserve(state_.settlement_aggregates.size());
+    for (auto& aggregate : state_.settlement_aggregates) {
+        aggregate_by_settlement.emplace(aggregate.settlement_id, &aggregate);
+    }
+
+    std::unordered_map<SettlementId, std::uint64_t> population_by_settlement;
+    population_by_settlement.reserve(state_.settlements.size());
+    for (const auto& cohort : state_.population_cohorts) {
+        if (!is_region_detailed(cohort.region_id)) {
+            population_by_settlement[cohort.settlement_id] += cohort.population;
+        }
+    }
+
+    for (auto& region : state_.regions) {
+        std::vector<Settlement*> aggregate_settlements;
+        aggregate_settlements.reserve(state_.settlements.size());
+        for (auto& settlement : state_.settlements) {
+            if (!settlement.active || settlement.region_id != region.id || is_settlement_detailed(settlement.id) || settlement.access_share_points == 0U) {
+                continue;
+            }
+            aggregate_settlements.push_back(&settlement);
+        }
+
+        std::sort(aggregate_settlements.begin(), aggregate_settlements.end(), [](const Settlement* lhs, const Settlement* rhs) {
+            return lhs->id < rhs->id;
+        });
+
+        if (aggregate_settlements.empty()) {
+            continue;
+        }
+
+        auto productive_available = apply_scaled_percent(region.productive_capacity_per_day, config_.food_production_scale_percent);
+        const auto productive_seed = derive_seed(region_seed(region.id), SeedDomain::RegionDailyVariation, food_period);
+        const auto productive_variation_percent = 85U + static_cast<std::uint32_t>(seed_random_bounded(productive_seed, 31U));
+        productive_available = apply_scaled_percent(productive_available, productive_variation_percent);
+        productive_available *= chunk_days;
+
+        auto wild_harvest_available = std::min(region.wild_food_stock, region.wild_food_harvest_limit_per_day * chunk_days);
+        const auto wild_seed = derive_seed(region_seed(region.id), SeedDomain::RegionWildHarvest, food_period);
+        const auto wild_variation_percent = 80U + static_cast<std::uint32_t>(seed_random_bounded(wild_seed, 41U));
+        wild_harvest_available = apply_scaled_percent(wild_harvest_available, wild_variation_percent);
+        wild_harvest_available = std::min(wild_harvest_available, region.wild_food_stock);
+
+        auto productive_remaining = std::max<std::int64_t>(0, productive_available);
+        auto wild_remaining = std::max<std::int64_t>(0, wild_harvest_available);
+
+        for (auto* settlement : aggregate_settlements) {
+            const auto aggregate_it = aggregate_by_settlement.find(settlement->id);
+            if (aggregate_it == aggregate_by_settlement.end()) {
+                continue;
+            }
+            auto* aggregate = aggregate_it->second;
+            const auto population = population_by_settlement.contains(settlement->id)
+                ? population_by_settlement[settlement->id]
+                : 0U;
+
+            aggregate->region_id = settlement->region_id;
+            aggregate->household_count = ceil_div_u64(population, kAggregatePeoplePerHousehold);
+            aggregate->small_household_count = aggregate->household_count / 3U;
+            aggregate->medium_household_count = aggregate->household_count / 3U;
+            aggregate->large_household_count =
+                aggregate->household_count - aggregate->small_household_count - aggregate->medium_household_count;
+
+            if (population == 0U) {
+                aggregate->labour_capacity = 0;
+                aggregate->labour_demand = 0;
+                aggregate->labour_allocated = 0;
+                continue;
+            }
+
+            const auto eligible_workers = (population * kAggregateEligibleWorkersPer10k) / 10'000U;
+            const auto cultivators = (eligible_workers * kAggregateCultivatorSharePer10k) / 10'000U;
+            const auto gatherers = (eligible_workers * kAggregateGathererSharePer10k) / 10'000U;
+            const auto wood_workers = (eligible_workers * kAggregateWoodSharePer10k) / 10'000U;
+            const auto stone_workers = (eligible_workers * kAggregateStoneSharePer10k) / 10'000U;
+            const auto craft_workers = (eligible_workers * kAggregateCraftSharePer10k) / 10'000U;
+
+            // Workforce diagnostics are published once per year by
+            // refresh_labour_aggregates, not accumulated on the food cadence.
+            (void)cultivators;
+            (void)gatherers;
+
+            const auto labour_capacity = static_cast<std::int64_t>(eligible_workers) * 6 * chunk_days;
+            aggregate->labour_capacity = labour_capacity;
+
+            auto settlement_productive_budget =
+                (productive_available * static_cast<std::int64_t>(settlement->access_share_points)) /
+                static_cast<std::int64_t>(kSettlementShareScale);
+            auto settlement_wild_budget =
+                (wild_harvest_available * static_cast<std::int64_t>(settlement->access_share_points)) /
+                static_cast<std::int64_t>(kSettlementShareScale);
+
+            settlement_productive_budget = std::min(std::max<std::int64_t>(0, settlement_productive_budget), productive_remaining);
+            settlement_wild_budget = std::min(std::max<std::int64_t>(0, settlement_wild_budget), wild_remaining);
+
+            const auto required_food = static_cast<std::int64_t>(population) * 2 * chunk_days;
+            const auto output_target = compute_daily_food_output_target(
+                required_food,
+                aggregate->food_inventory,
+                settlement_productive_budget + settlement_wild_budget);
+            const auto produced_food = std::min<std::int64_t>(output_target, labour_capacity);
+            const auto available_food = aggregate->food_inventory + produced_food;
+            const auto consumed_food = std::min<std::int64_t>(required_food, std::max<std::int64_t>(0, available_food));
+            const auto unmet_food = std::max<std::int64_t>(0, required_food - consumed_food);
+            aggregate->food_inventory = std::max<std::int64_t>(0, available_food - consumed_food);
+            aggregate->food_produced_total += produced_food;
+            aggregate->food_consumed_total += consumed_food;
+            aggregate->unmet_food_total += unmet_food;
+            // Rolling yearly window consumed by aggregate demography.
+            aggregate->required_food_year += required_food;
+            aggregate->unmet_food_year += unmet_food;
+
+            ++aggregate_settlement_update_count_;
+
+            aggregate->labour_demand = std::min<std::int64_t>(required_food, settlement_productive_budget + settlement_wild_budget);
+            aggregate->labour_allocated = std::min(aggregate->labour_demand, labour_capacity);
+
+            productive_remaining = std::max<std::int64_t>(0, productive_remaining - settlement_productive_budget);
+            wild_remaining = std::max<std::int64_t>(0, wild_remaining - settlement_wild_budget);
+
+            const auto wood_extract_quota = std::min<std::int64_t>(
+                std::max<std::int64_t>(0, region.wood_stock),
+                static_cast<std::int64_t>(wood_workers) * 2 * chunk_days);
+            const auto stone_extract_quota = std::min<std::int64_t>(
+                std::max<std::int64_t>(0, region.stone_remaining),
+                static_cast<std::int64_t>(stone_workers) * 2 * chunk_days);
+
+            settlement->materials.wood.value += wood_extract_quota;
+            settlement->materials.stone.value += stone_extract_quota;
+            settlement->cumulative_wood_extracted += wood_extract_quota;
+            settlement->cumulative_stone_extracted += stone_extract_quota;
+
+            region.wood_stock = std::max<std::int64_t>(0, region.wood_stock - wood_extract_quota);
+            region.stone_remaining = std::max<std::int64_t>(0, region.stone_remaining - stone_extract_quota);
+            region.cumulative_wood_harvested += wood_extract_quota;
+            region.cumulative_stone_extracted += stone_extract_quota;
+
+            const auto timber_produced = std::min<std::int64_t>(
+                settlement->materials.wood.value / 2,
+                static_cast<std::int64_t>(craft_workers) * chunk_days);
+            const auto tools_produced = std::min<std::int64_t>(
+                std::min<std::int64_t>(settlement->materials.timber.value, settlement->materials.stone.value),
+                static_cast<std::int64_t>(craft_workers / 2) * chunk_days);
+
+            settlement->materials.wood.value -= timber_produced * 2;
+            settlement->materials.timber.value += timber_produced;
+            settlement->materials.timber.value -= tools_produced;
+            settlement->materials.stone.value -= tools_produced;
+            settlement->materials.basic_tool.value += tools_produced;
+            settlement->cumulative_timber_produced += timber_produced;
+            settlement->cumulative_basic_tool_produced += tools_produced;
+        }
+
+        if (region.wood_stock < region.wood_capacity) {
+            const auto deficit = region.wood_capacity - region.wood_stock;
+            const auto regeneration =
+                std::min(deficit, std::max<std::int64_t>(0, region.wood_regeneration_per_day) * chunk_days);
+            region.wood_stock += regeneration;
+            region.cumulative_wood_regenerated += regeneration;
+        }
+
+        const auto distributed_wild = std::max<std::int64_t>(0, wild_harvest_available - wild_remaining);
+        region.wild_food_stock = std::max<std::int64_t>(0, region.wild_food_stock - distributed_wild);
+        region.cumulative_wild_food_harvested += distributed_wild;
+        if (region.wild_food_stock < region.wild_food_capacity) {
+            const auto deficit = region.wild_food_capacity - region.wild_food_stock;
+            const auto regeneration =
+                std::min(deficit, std::max<std::int64_t>(0, region.wild_food_regeneration_per_day) * chunk_days);
+            region.wild_food_stock += regeneration;
+            region.cumulative_wild_food_regenerated += regeneration;
+        }
+    }
+
+}
+
+namespace {
+
+// Band-averaged demographic rates derived from the canonical per-age tables in
+// mortality_rate_per_10k / fertility_rate_per_10k, averaged over each band's
+// age span so aggregate execution reproduces detailed demography in the mean.
+[[nodiscard]] std::uint32_t cohort_mortality_rate_per_10k(const CohortAgeBand band) noexcept {
+    switch (band) {
+        case CohortAgeBand::Child:      return 40U;   // ages 0-17
+        case CohortAgeBand::YoungAdult: return 20U;   // ages 18-29
+        case CohortAgeBand::Adult:      return 33U;   // ages 30-59
+        case CohortAgeBand::Senior:     return 790U;  // ages 60+
+    }
+    return 20U;
+}
+
+[[nodiscard]] std::uint32_t cohort_fertility_rate_per_10k(const CohortAgeBand band) noexcept {
+    switch (band) {
+        case CohortAgeBand::YoungAdult: return 2'450U;  // ages 18-29
+        case CohortAgeBand::Adult:      return 797U;    // ages 30-59, zero past 49
+        case CohortAgeBand::Child:
+        case CohortAgeBand::Senior:
+            return 0U;
+    }
+    return 0U;
+}
+
+// Years spent in each band; drives the annual aging-out fraction.
+[[nodiscard]] std::uint64_t cohort_band_span_years(const CohortAgeBand band) noexcept {
+    switch (band) {
+        case CohortAgeBand::Child:      return 18U;
+        case CohortAgeBand::YoungAdult: return 12U;
+        case CohortAgeBand::Adult:      return 30U;
+        case CohortAgeBand::Senior:     return 0U;  // seniors exit via mortality only
+    }
+    return 0U;
+}
+
+[[nodiscard]] std::uint32_t cohort_health_mortality_modifier_per_10k(const CohortHealthBand band) noexcept {
+    switch (band) {
+        case CohortHealthBand::Low:    return 150U;
+        case CohortHealthBand::Medium: return 0U;
+        case CohortHealthBand::High:   return 0U;
+    }
+    return 0U;
+}
+
+// Deterministic proportional draw: exact integer part plus a seeded carry for
+// the fractional remainder, so repeated runs match and no rounding bias
+// accumulates across years.
+[[nodiscard]] std::uint64_t deterministic_share(
+    const std::uint64_t population,
+    const std::uint64_t numerator,
+    const std::uint64_t denominator,
+    const SimulationSeed seed) noexcept {
+    if (population == 0U || numerator == 0U || denominator == 0U) {
+        return 0U;
+    }
+    const auto scaled = population * numerator;
+    auto count = scaled / denominator;
+    const auto remainder = scaled % denominator;
+    if (remainder > 0U && seed_random_bounded(seed, denominator) < remainder) {
+        ++count;
+    }
+    return std::min(count, population);
+}
+
+}  // namespace
+
+std::unordered_set<PersonId> Simulation::collect_canonized_person_ids() const {
+    // Entities carrying durable provenance cannot be collapsed into anonymous
+    // cohorts: their exact identity is referenced by history that must survive.
+    std::unordered_set<PersonId> canonized;
+
+    for (const auto& institution : state_.institutions) {
+        canonized.insert(institution.founder_id);
+        for (const auto member_id : institution.member_ids) {
+            canonized.insert(member_id);
+        }
+    }
+
+    for (const auto& record : state_.knowledge_records) {
+        canonized.insert(record.author_id);
+    }
+
+    for (const auto& event : state_.event_log) {
+        if (event.type == EventType::DiscoveryMade) {
+            const auto& payload = std::get<DiscoveryMadeEventPayload>(event.payload);
+            canonized.insert(payload.discoverer_id);
+        } else if (event.type == EventType::InstitutionFounded) {
+            const auto& payload = std::get<InstitutionFoundedEventPayload>(event.payload);
+            canonized.insert(payload.founder_id);
+        }
+    }
+
+    canonized.erase(0U);
+    return canonized;
+}
+
+void Simulation::merge_population_cohorts() {
+    struct CohortKey {
+        RegionId region_id{};
+        SettlementId settlement_id{};
+        CohortAgeBand age_band{};
+        BiologicalSex sex{};
+        CohortOccupationGroup occupation_group{};
+        CohortHealthBand health_band{};
+        CohortWealthBand wealth_band{};
+        std::uint32_t knowledge_profile_id{};
+
+        [[nodiscard]] bool operator==(const CohortKey& other) const = default;
+    };
+
+    const auto key_of = [](const PopulationCohort& cohort) {
+        return CohortKey{
+            .region_id = cohort.region_id,
+            .settlement_id = cohort.settlement_id,
+            .age_band = cohort.age_band,
+            .sex = cohort.sex,
+            .occupation_group = cohort.occupation_group,
+            .health_band = cohort.health_band,
+            .wealth_band = cohort.wealth_band,
+            .knowledge_profile_id = cohort.knowledge_profile_id,
+        };
+    };
+
+    // Canonical ordering first, so the surviving identity for each key is a
+    // deterministic function of world state rather than of insertion order.
+    std::sort(state_.population_cohorts.begin(), state_.population_cohorts.end(), [](const PopulationCohort& lhs, const PopulationCohort& rhs) {
+        if (lhs.region_id != rhs.region_id) {
+            return lhs.region_id < rhs.region_id;
+        }
+        if (lhs.settlement_id != rhs.settlement_id) {
+            return lhs.settlement_id < rhs.settlement_id;
+        }
+        return lhs.id < rhs.id;
+    });
+
+    std::vector<PopulationCohort> merged;
+    merged.reserve(state_.population_cohorts.size());
+    for (const auto& cohort : state_.population_cohorts) {
+        if (cohort.population == 0U) {
+            continue;
+        }
+
+        // Cohorts are sorted by (region, settlement, id), so a matching key can
+        // only be in the trailing run for the same settlement. Scanning just
+        // that run keeps merging linear in world size rather than quadratic.
+        PopulationCohort* existing = nullptr;
+        for (auto it = merged.rbegin(); it != merged.rend(); ++it) {
+            if (it->region_id != cohort.region_id || it->settlement_id != cohort.settlement_id) {
+                break;
+            }
+            if (key_of(*it) == key_of(cohort)) {
+                existing = &(*it);
+                break;
+            }
+        }
+
+        if (existing == nullptr) {
+            merged.push_back(cohort);
+            continue;
+        }
+
+        existing->population += cohort.population;
+        // The lowest cohort id for a key survives: stable and order-independent.
+        existing->id = std::min(existing->id, cohort.id);
+    }
+
+    state_.population_cohorts = std::move(merged);
+}
+
+void Simulation::process_aggregate_cohort_aging(const std::uint64_t demographic_year) {
+    std::vector<PopulationCohort> aged_out;
+    aged_out.reserve(state_.population_cohorts.size());
+
+    for (auto& cohort : state_.population_cohorts) {
+        if (is_region_detailed(cohort.region_id) || cohort.population == 0U) {
+            continue;
+        }
+
+        const auto span = cohort_band_span_years(cohort.age_band);
+        if (span == 0U) {
+            continue;
+        }
+
+        const auto seed = derive_seed(
+            settlement_seed(cohort.settlement_id),
+            SeedDomain::CohortAging,
+            cohort.id ^ (demographic_year * 0x9E3779B97F4A7C15ULL));
+        const auto matured = deterministic_share(cohort.population, 1U, span, seed);
+        if (matured == 0U) {
+            continue;
+        }
+
+        cohort.population -= matured;
+
+        auto next = cohort;
+        next.population = matured;
+        next.id = next_cohort_id_++;
+        switch (cohort.age_band) {
+            case CohortAgeBand::Child:
+                next.age_band = CohortAgeBand::YoungAdult;
+                // Children take up work when they reach working age.
+                next.occupation_group = CohortOccupationGroup::Food;
+                break;
+            case CohortAgeBand::YoungAdult:
+                next.age_band = CohortAgeBand::Adult;
+                break;
+            case CohortAgeBand::Adult:
+                next.age_band = CohortAgeBand::Senior;
+                next.occupation_group = CohortOccupationGroup::Unspecified;
+                break;
+            case CohortAgeBand::Senior:
+                break;
+        }
+        aged_out.push_back(next);
+    }
+
+    for (const auto& cohort : aged_out) {
+        state_.population_cohorts.push_back(cohort);
+    }
+}
+
+void Simulation::process_aggregate_cohort_mortality(const std::uint64_t demographic_year) {
+    std::unordered_map<SettlementId, const SettlementAggregateState*> aggregate_by_settlement;
+    aggregate_by_settlement.reserve(state_.settlement_aggregates.size());
+    for (const auto& aggregate : state_.settlement_aggregates) {
+        aggregate_by_settlement.emplace(aggregate.settlement_id, &aggregate);
+    }
+
+    for (auto& cohort : state_.population_cohorts) {
+        if (is_region_detailed(cohort.region_id) || cohort.population == 0U) {
+            continue;
+        }
+
+        ++aggregate_cohort_update_count_;
+
+        auto rate = cohort_mortality_rate_per_10k(cohort.age_band) +
+                    cohort_health_mortality_modifier_per_10k(cohort.health_band);
+
+        // Food scarcity raises mortality, mirroring the detailed nutrition path.
+        const auto aggregate_it = aggregate_by_settlement.find(cohort.settlement_id);
+        if (aggregate_it != aggregate_by_settlement.end()) {
+            const auto* aggregate = aggregate_it->second;
+            if (aggregate->required_food_year > 0 && aggregate->unmet_food_year > 0) {
+                const auto stress_per_10k = static_cast<std::uint64_t>(
+                    (aggregate->unmet_food_year * 10'000) / aggregate->required_food_year);
+                rate += static_cast<std::uint32_t>(std::min<std::uint64_t>(stress_per_10k * 2U, 6'000U));
+            }
+        }
+
+        rate = std::min<std::uint32_t>(rate, 10'000U);
+
+        const auto seed = derive_seed(
+            settlement_seed(cohort.settlement_id),
+            SeedDomain::CohortMortality,
+            cohort.id ^ (demographic_year * 0xC2B2AE3D27D4EB4FULL));
+        const auto deaths = deterministic_share(cohort.population, rate, 10'000U, seed);
+        if (deaths == 0U) {
+            continue;
+        }
+
+        cohort.population -= deaths;
+        state_.total_deaths += deaths;
+        state_.aggregate_deaths_total += deaths;
+    }
+}
+
+void Simulation::process_aggregate_cohort_fertility(const std::uint64_t demographic_year) {
+    std::unordered_map<SettlementId, const SettlementAggregateState*> aggregate_by_settlement;
+    aggregate_by_settlement.reserve(state_.settlement_aggregates.size());
+    for (const auto& aggregate : state_.settlement_aggregates) {
+        aggregate_by_settlement.emplace(aggregate.settlement_id, &aggregate);
+    }
+
+    // A settlement needs adult males present for births, matching the detailed
+    // rule that a father must exist.
+    std::unordered_map<SettlementId, std::uint64_t> adult_males_by_settlement;
+    for (const auto& cohort : state_.population_cohorts) {
+        if (is_region_detailed(cohort.region_id) || cohort.sex != BiologicalSex::Male) {
+            continue;
+        }
+        if (cohort.age_band == CohortAgeBand::YoungAdult || cohort.age_band == CohortAgeBand::Adult) {
+            adult_males_by_settlement[cohort.settlement_id] += cohort.population;
+        }
+    }
+
+    std::vector<PopulationCohort> newborn_cohorts;
+    for (const auto& cohort : state_.population_cohorts) {
+        if (is_region_detailed(cohort.region_id) || cohort.population == 0U) {
+            continue;
+        }
+        if (cohort.sex != BiologicalSex::Female) {
+            continue;
+        }
+
+        auto rate = cohort_fertility_rate_per_10k(cohort.age_band);
+        if (rate == 0U) {
+            continue;
+        }
+
+        const auto males_it = adult_males_by_settlement.find(cohort.settlement_id);
+        if (males_it == adult_males_by_settlement.end() || males_it->second == 0U) {
+            continue;
+        }
+
+        // Sustained scarcity suppresses fertility.
+        const auto aggregate_it = aggregate_by_settlement.find(cohort.settlement_id);
+        if (aggregate_it != aggregate_by_settlement.end()) {
+            const auto* aggregate = aggregate_it->second;
+            if (aggregate->required_food_year > 0 && aggregate->unmet_food_year > 0) {
+                const auto stress_per_10k = static_cast<std::uint64_t>(
+                    (aggregate->unmet_food_year * 10'000) / aggregate->required_food_year);
+                const auto retained = (stress_per_10k >= 10'000U) ? 0U : (10'000U - stress_per_10k);
+                rate = static_cast<std::uint32_t>((static_cast<std::uint64_t>(rate) * retained) / 10'000U);
+            }
+        }
+        if (rate == 0U) {
+            continue;
+        }
+
+        const auto seed = derive_seed(
+            settlement_seed(cohort.settlement_id),
+            SeedDomain::CohortFertility,
+            cohort.id ^ (demographic_year * 0x8EBC6AF09C88C6E3ULL));
+        const auto births = deterministic_share(cohort.population, rate, 10'000U, seed);
+        if (births == 0U) {
+            continue;
+        }
+
+        const auto sex_seed = derive_seed(
+            settlement_seed(cohort.settlement_id),
+            SeedDomain::CohortSexSplit,
+            cohort.id ^ (demographic_year * 0x589965CC75374CC3ULL));
+        const auto female_births = deterministic_share(births, 5'000U, 10'000U, sex_seed);
+        const auto male_births = births - female_births;
+
+        const auto push_newborns = [&](const std::uint64_t count, const BiologicalSex sex) {
+            if (count == 0U) {
+                return;
+            }
+            newborn_cohorts.push_back(PopulationCohort{
+                .id = next_cohort_id_++,
+                .region_id = cohort.region_id,
+                .settlement_id = cohort.settlement_id,
+                .age_band = CohortAgeBand::Child,
+                .sex = sex,
+                .occupation_group = CohortOccupationGroup::Unspecified,
+                .health_band = cohort.health_band,
+                .wealth_band = cohort.wealth_band,
+                .knowledge_profile_id = cohort.knowledge_profile_id,
+                .population = count,
+            });
+        };
+
+        push_newborns(female_births, BiologicalSex::Female);
+        push_newborns(male_births, BiologicalSex::Male);
+
+        state_.total_births += births;
+        state_.aggregate_births_total += births;
+    }
+
+    for (const auto& cohort : newborn_cohorts) {
+        state_.population_cohorts.push_back(cohort);
+    }
+}
+
+void Simulation::process_aggregate_demography_period(const std::uint64_t demographic_year) {
+    // Aging runs first so newborns created this year stay in the Child band.
+    process_aggregate_cohort_aging(demographic_year);
+    process_aggregate_cohort_mortality(demographic_year);
+    process_aggregate_cohort_fertility(demographic_year);
+
+    merge_population_cohorts();
+
+    for (auto& aggregate : state_.settlement_aggregates) {
+        if (is_settlement_detailed(aggregate.settlement_id)) {
+            continue;
+        }
+        // Reset the yearly stress window now that it has been consumed.
+        aggregate.required_food_year = 0;
+        aggregate.unmet_food_year = 0;
+    }
+
+    for (const auto& settlement : state_.settlements) {
+        if (!is_settlement_detailed(settlement.id)) {
+            rebuild_settlement_aggregate_distribution(settlement.id);
+        }
+    }
+
+    refresh_population_count();
+}
+
+void Simulation::promote_region_to_detailed(const RegionId region_id) {
+    set_region_detail_level(region_id, SimulationDetailLevel::Detailed);
+
+    std::unordered_map<SettlementId, std::vector<HouseholdId>> households_by_settlement;
+    for (auto& household : state_.households) {
+        if (household.region_id == region_id) {
+            households_by_settlement[household.settlement_id].push_back(household.id);
+        }
+    }
+
+    auto assign_household_for_settlement = [&](const SettlementId settlement_id, const std::size_t ordinal) -> Household* {
+        auto& candidates = households_by_settlement[settlement_id];
+        for (const auto household_id : candidates) {
+            auto* household = [&]() -> Household* {
+                for (auto& entry : state_.households) {
+                    if (entry.id == household_id) {
+                        return &entry;
+                    }
+                }
+                return nullptr;
+            }();
+            if (household == nullptr) {
+                continue;
+            }
+            std::uint64_t alive_count = 0;
+            for (const auto member_id : household->member_ids) {
+                for (const auto& person : state_.people) {
+                    if (person.id == member_id && person.alive) {
+                        ++alive_count;
+                    }
+                }
+            }
+            if (alive_count < kAggregatePeoplePerHousehold) {
+                return household;
+            }
+        }
+
+        auto new_household = Household{
+            .id = next_household_id(),
+            .region_id = region_id,
+            .settlement_id = settlement_id,
+        };
+        state_.households.push_back(new_household);
+        candidates.push_back(new_household.id);
+        (void)ordinal;
+        for (auto& household : state_.households) {
+            if (household.id == new_household.id) {
+                return &household;
+            }
+        }
+        return nullptr;
+    };
+
+    std::vector<PopulationCohort> remaining;
+    remaining.reserve(state_.population_cohorts.size());
+    for (const auto& cohort : state_.population_cohorts) {
+        if (cohort.region_id != region_id) {
+            remaining.push_back(cohort);
+            continue;
+        }
+
+        std::vector<Person*> dormant;
+        for (auto& person : state_.people) {
+            if (person.source_cohort_id.has_value() && *person.source_cohort_id == cohort.id && !person.alive) {
+                dormant.push_back(&person);
+            }
+        }
+        std::sort(dormant.begin(), dormant.end(), [](const Person* lhs, const Person* rhs) {
+            return lhs->id < rhs->id;
+        });
+
+        std::uint64_t restored = 0;
+        for (auto* person : dormant) {
+            if (restored >= cohort.population) {
+                break;
+            }
+            person->alive = true;
+            auto* household = [&]() -> Household* {
+                for (auto& entry : state_.households) {
+                    if (entry.id == person->household_id) {
+                        return &entry;
+                    }
+                }
+                return nullptr;
+            }();
+            if (household != nullptr &&
+                std::find(household->member_ids.begin(), household->member_ids.end(), person->id) == household->member_ids.end()) {
+                household->member_ids.push_back(person->id);
+            }
+            ++restored;
+        }
+
+        for (std::uint64_t index = restored; index < cohort.population; ++index) {
+            const auto* settlement = find_settlement(cohort.settlement_id);
+            if (settlement == nullptr) {
+                continue;
+            }
+
+            auto* household = assign_household_for_settlement(cohort.settlement_id, static_cast<std::size_t>(index));
+            if (household == nullptr) {
+                continue;
+            }
+            const auto person_id = next_person_id();
+            const auto roll_seed = derive_seed(settlement_seed(cohort.settlement_id), SeedDomain::InitialPopulation, cohort.id ^ index);
+
+            std::uint32_t age_years = 30U;
+            if (cohort.age_band == CohortAgeBand::Child) {
+                age_years = static_cast<std::uint32_t>(seed_random_bounded(roll_seed, 18U));
+            } else if (cohort.age_band == CohortAgeBand::YoungAdult) {
+                age_years = 18U + static_cast<std::uint32_t>(seed_random_bounded(roll_seed, 12U));
+            } else if (cohort.age_band == CohortAgeBand::Adult) {
+                age_years = 30U + static_cast<std::uint32_t>(seed_random_bounded(roll_seed, 30U));
+            } else {
+                age_years = 60U + static_cast<std::uint32_t>(seed_random_bounded(roll_seed, 25U));
+            }
+
+            Occupation occupation = Occupation::None;
+            if (cohort.occupation_group == CohortOccupationGroup::Food) {
+                occupation = (seed_random_bounded(roll_seed, 2U) == 0U)
+                    ? Occupation::SubsistenceCultivator
+                    : Occupation::WildFoodGatherer;
+            } else if (cohort.occupation_group == CohortOccupationGroup::Materials) {
+                occupation = (seed_random_bounded(roll_seed, 2U) == 0U)
+                    ? Occupation::WoodGatherer
+                    : Occupation::StoneExtractor;
+            } else if (cohort.occupation_group == CohortOccupationGroup::Craft) {
+                occupation = Occupation::CraftWorker;
+            }
+
+            state_.people.push_back(Person{
+                .id = person_id,
+                .birth_year = current_year_signed() - static_cast<std::int64_t>(age_years),
+                .sex = cohort.sex,
+                .alive = true,
+                .household_id = household->id,
+                .nutrition_points = cohort.health_band == CohortHealthBand::Low ? 420 : (cohort.health_band == CohortHealthBand::Medium ? 680 : 860),
+                .health_points = cohort.health_band == CohortHealthBand::Low ? 420 : (cohort.health_band == CohortHealthBand::Medium ? 680 : 860),
+                .occupation = occupation,
+                .materialized_from_cohort = true,
+                .source_cohort_id = cohort.id,
+            });
+            household->member_ids.push_back(person_id);
+        }
+    }
+
+    state_.population_cohorts = std::move(remaining);
+
+    const auto recompute_household_wealth = [](Household& household) {
+        const auto wealth_food = std::max<std::int64_t>(0, household.resources.food_inventory.value);
+        const auto wealth_wood = std::max<std::int64_t>(0, household.owned_materials.wood.value) * kWealthValueWood;
+        const auto wealth_stone = std::max<std::int64_t>(0, household.owned_materials.stone.value) * kWealthValueStone;
+        const auto wealth_timber = std::max<std::int64_t>(0, household.owned_materials.timber.value) * kWealthValueTimber;
+        const auto wealth_tools = std::max<std::int64_t>(0, household.owned_materials.basic_tool.value) * kWealthValueBasicTool;
+        household.derived_wealth_points = wealth_food + wealth_wood + wealth_stone + wealth_timber + wealth_tools;
+    };
+
+    for (const auto& settlement : state_.settlements) {
+        if (settlement.region_id != region_id) {
+            continue;
+        }
+
+        std::vector<Household*> settlement_households;
+        for (auto& household : state_.households) {
+            if (household.region_id == region_id && household.settlement_id == settlement.id) {
+                settlement_households.push_back(&household);
+            }
+        }
+
+        if (settlement_households.empty()) {
+            continue;
+        }
+
+        std::sort(settlement_households.begin(), settlement_households.end(), [](const Household* lhs, const Household* rhs) {
+            return lhs->id < rhs->id;
+        });
+
+        Household* canonical_owner = settlement_households.front();
+        for (auto* household : settlement_households) {
+            if (!household->member_ids.empty()) {
+                canonical_owner = household;
+                break;
+            }
+        }
+
+        for (auto* household : settlement_households) {
+            household->owned_materials = SettlementMaterialInventory{};
+        }
+        canonical_owner->owned_materials = settlement.materials;
+
+        // Hand the aggregate food ledger back to households and clear it, so
+        // stored food is counted exactly once across the LOD transition.
+        for (auto& aggregate : state_.settlement_aggregates) {
+            if (aggregate.settlement_id != settlement.id) {
+                continue;
+            }
+
+            auto food_remaining = std::max<std::int64_t>(0, aggregate.food_inventory);
+            const auto household_share =
+                food_remaining / static_cast<std::int64_t>(settlement_households.size());
+            for (auto* household : settlement_households) {
+                household->resources.food_inventory.value += household_share;
+                food_remaining -= household_share;
+            }
+            // Deterministic remainder to the lowest-id household.
+            settlement_households.front()->resources.food_inventory.value += food_remaining;
+
+            canonical_owner->resources.food_produced_total += aggregate.food_produced_total;
+            canonical_owner->resources.food_consumed_total += aggregate.food_consumed_total;
+            canonical_owner->resources.unmet_food_total += aggregate.unmet_food_total;
+
+            aggregate.food_inventory = 0;
+            aggregate.food_produced_total = 0;
+            aggregate.food_consumed_total = 0;
+            aggregate.unmet_food_total = 0;
+            aggregate.required_food_year = 0;
+            aggregate.unmet_food_year = 0;
+            aggregate.wealth_points_total = 0;
+            aggregate.household_count = 0;
+            aggregate.small_household_count = 0;
+            aggregate.medium_household_count = 0;
+            aggregate.large_household_count = 0;
+            aggregate.labour_low_household_count = 0;
+            aggregate.labour_medium_household_count = 0;
+            aggregate.labour_high_household_count = 0;
+            aggregate.wealth_low_household_count = 0;
+            aggregate.wealth_medium_household_count = 0;
+            aggregate.wealth_high_household_count = 0;
+            aggregate.food_buffer_low_household_count = 0;
+            aggregate.food_buffer_medium_household_count = 0;
+            aggregate.food_buffer_high_household_count = 0;
+            aggregate.labour_capacity = 0;
+            aggregate.labour_demand = 0;
+            aggregate.labour_allocated = 0;
+        }
+
+        for (auto* household : settlement_households) {
+            recompute_household_wealth(*household);
+        }
+    }
+
+    refresh_population_count();
+    refresh_food_aggregates();
+    refresh_labour_aggregates();
+    refresh_material_aggregates();
+    refresh_economic_aggregates();
+}
+
+void Simulation::demote_region_to_settlement_aggregate(const RegionId region_id) {
+    set_region_detail_level(region_id, SimulationDetailLevel::SettlementAggregate);
+
+    struct CohortBuild {
+        PopulationCohort template_value{};
+        std::uint64_t population{};
+    };
+
+    std::unordered_map<CohortId, CohortBuild> by_source_cohort;
+
+    std::unordered_map<HouseholdId, const Household*> household_by_id;
+    household_by_id.reserve(state_.households.size());
+    for (const auto& household : state_.households) {
+        household_by_id.emplace(household.id, &household);
+    }
+
+    // Every living person in the region folds into aggregate representation --
+    // not only those previously materialized from a cohort. Otherwise a
+    // natively-simulated settlement would keep running per-person loops while
+    // nominally marked as an aggregate.
+    struct FoldKey {
+        SettlementId settlement_id{};
+        CohortAgeBand age_band{};
+        BiologicalSex sex{};
+        CohortOccupationGroup occupation_group{};
+        CohortHealthBand health_band{};
+        CohortWealthBand wealth_band{};
+
+        [[nodiscard]] bool operator==(const FoldKey& other) const = default;
+    };
+
+    // Deterministic assignment of a cohort id for anonymous people that have no
+    // prior cohort anchor, keyed by canonical bucket and ordered by person id.
+    std::vector<std::pair<FoldKey, CohortId>> fold_key_to_cohort;
+    const auto cohort_id_for_key = [&](const FoldKey& key) {
+        for (const auto& [candidate, cohort_id] : fold_key_to_cohort) {
+            if (candidate == key) {
+                return cohort_id;
+            }
+        }
+        const auto cohort_id = next_cohort_id_++;
+        fold_key_to_cohort.emplace_back(key, cohort_id);
+        return cohort_id;
+    };
+
+    // Canonized entities keep their exact identity and stay resident through the
+    // transition; only anonymous population folds into cohorts.
+    const auto canonized_ids = collect_canonized_person_ids();
+
+    std::vector<Person*> fold_order;
+    fold_order.reserve(state_.people.size());
+    for (auto& person : state_.people) {
+        if (!person.alive || canonized_ids.contains(person.id)) {
+            continue;
+        }
+        const auto household_it = household_by_id.find(person.household_id);
+        if (household_it == household_by_id.end() || household_it->second->region_id != region_id) {
+            continue;
+        }
+        fold_order.push_back(&person);
+    }
+    std::sort(fold_order.begin(), fold_order.end(), [](const Person* lhs, const Person* rhs) {
+        return lhs->id < rhs->id;
+    });
+
+    for (auto* person_ptr : fold_order) {
+        auto& person = *person_ptr;
+        const auto household_it = household_by_id.find(person.household_id);
+        const auto* household = household_it->second;
+
+        const auto key = FoldKey{
+            .settlement_id = household->settlement_id,
+            .age_band = age_band_from_years(age_years(person)),
+            .sex = person.sex,
+            .occupation_group = occupation_group_from_person(person.occupation),
+            .health_band = health_band_from_points(person.health_points),
+            .wealth_band = wealth_band_from_points(household->derived_wealth_points),
+        };
+
+        // Reuse an existing cohort anchor when this person was promoted from
+        // one, so repeated demote/promote cycles never reroll identity.
+        const auto cohort_id = person.source_cohort_id.has_value()
+            ? *person.source_cohort_id
+            : cohort_id_for_key(key);
+
+        if (!by_source_cohort.contains(cohort_id)) {
+            by_source_cohort.emplace(cohort_id, CohortBuild{
+                .template_value = PopulationCohort{
+                    .id = cohort_id,
+                    .region_id = region_id,
+                    .settlement_id = key.settlement_id,
+                    .age_band = key.age_band,
+                    .sex = key.sex,
+                    .occupation_group = key.occupation_group,
+                    .health_band = key.health_band,
+                    .wealth_band = key.wealth_band,
+                    .knowledge_profile_id = 1U,
+                    .population = 0U,
+                },
+                .population = 0U,
+            });
+        }
+
+        ++by_source_cohort[cohort_id].population;
+        person.source_cohort_id = cohort_id;
+        remove_from_household(person.household_id, person.id);
+        person.alive = false;
+        person.occupation = Occupation::None;
+    }
+
+    // Exact conservation: household food, materials and wealth move into the
+    // settlement aggregate ledger rather than vanishing with the detail level.
+    std::unordered_map<SettlementId, SettlementAggregateState*> aggregate_by_settlement;
+    aggregate_by_settlement.reserve(state_.settlement_aggregates.size());
+    for (auto& aggregate : state_.settlement_aggregates) {
+        aggregate_by_settlement.emplace(aggregate.settlement_id, &aggregate);
+    }
+
+    for (auto& household : state_.households) {
+        if (household.region_id != region_id) {
+            continue;
+        }
+        // Households still holding canonized residents keep their exact
+        // resources; only fully-folded households hand theirs to the aggregate.
+        if (!household.member_ids.empty()) {
+            continue;
+        }
+
+        auto* settlement = find_settlement_mutable(household.settlement_id);
+        const auto aggregate_it = aggregate_by_settlement.find(household.settlement_id);
+        if (aggregate_it != aggregate_by_settlement.end()) {
+            auto* aggregate = aggregate_it->second;
+            aggregate->food_inventory += std::max<std::int64_t>(0, household.resources.food_inventory.value);
+            aggregate->food_produced_total += household.resources.food_produced_total;
+            aggregate->food_consumed_total += household.resources.food_consumed_total;
+            aggregate->unmet_food_total += household.resources.unmet_food_total;
+            aggregate->wealth_points_total += household.derived_wealth_points;
+        }
+
+        if (settlement != nullptr) {
+            settlement->materials.wood.value += household.owned_materials.wood.value;
+            settlement->materials.stone.value += household.owned_materials.stone.value;
+            settlement->materials.timber.value += household.owned_materials.timber.value;
+            settlement->materials.basic_tool.value += household.owned_materials.basic_tool.value;
+        }
+
+        household.resources = HouseholdResourceState{};
+        household.owned_materials = SettlementMaterialInventory{};
+        household.derived_wealth_points = 0;
+    }
+
+    std::vector<PopulationCohort> retained;
+    retained.reserve(state_.population_cohorts.size() + by_source_cohort.size());
+    for (const auto& cohort : state_.population_cohorts) {
+        if (cohort.region_id != region_id) {
+            retained.push_back(cohort);
+        }
+    }
+    for (const auto& [cohort_id, build] : by_source_cohort) {
+        auto cohort = build.template_value;
+        cohort.population = build.population;
+        retained.push_back(cohort);
+        if (cohort_id >= next_cohort_id_) {
+            next_cohort_id_ = cohort_id + 1U;
+        }
+    }
+
+    state_.population_cohorts = std::move(retained);
+
+    for (const auto& settlement : state_.settlements) {
+        if (settlement.region_id == region_id) {
+            rebuild_settlement_aggregate_distribution(settlement.id);
+        }
+    }
+
     refresh_population_count();
     refresh_food_aggregates();
     refresh_labour_aggregates();
@@ -3107,6 +4328,10 @@ void Simulation::apply_person_nutrition_and_health(
     Person& person,
     const std::int64_t required_food,
     const std::int64_t allocated_food) {
+    // Canonical per-person daily processing site. Instrumented so tests can
+    // prove aggregate settlements never reach this path.
+    ++person_daily_update_count_;
+
     const auto required = std::max<std::int64_t>(required_food, 0);
     const auto allocated = std::max<std::int64_t>(allocated_food, 0);
 
@@ -3550,6 +4775,207 @@ void Simulation::initialize_settlements() {
     });
 }
 
+void Simulation::initialize_region_lod_states() {
+    state_.region_lod_states.clear();
+    state_.region_lod_states.reserve(state_.regions.size());
+    for (const auto& region : state_.regions) {
+        state_.region_lod_states.push_back(RegionLodState{.region_id = region.id, .detail_level = SimulationDetailLevel::Detailed});
+    }
+    std::sort(state_.region_lod_states.begin(), state_.region_lod_states.end(), [](const RegionLodState& lhs, const RegionLodState& rhs) {
+        return lhs.region_id < rhs.region_id;
+    });
+    state_.detail_level = SimulationDetailLevel::Detailed;
+}
+
+void Simulation::initialize_settlement_aggregates() {
+    state_.settlement_aggregates.clear();
+    state_.settlement_aggregates.reserve(state_.settlements.size());
+    for (const auto& settlement : state_.settlements) {
+        state_.settlement_aggregates.push_back(SettlementAggregateState{
+            .settlement_id = settlement.id,
+            .region_id = settlement.region_id,
+            .household_count = 0U,
+            .small_household_count = 0U,
+            .medium_household_count = 0U,
+            .large_household_count = 0U,
+            .food_inventory = 0,
+            .food_produced_total = 0,
+            .food_consumed_total = 0,
+            .unmet_food_total = 0,
+            .labour_capacity = 0,
+            .labour_demand = 0,
+            .labour_allocated = 0,
+        });
+    }
+    std::sort(state_.settlement_aggregates.begin(), state_.settlement_aggregates.end(), [](const SettlementAggregateState& lhs, const SettlementAggregateState& rhs) {
+        return lhs.settlement_id < rhs.settlement_id;
+    });
+}
+
+bool Simulation::is_region_detailed(const RegionId region_id) const noexcept {
+    return region_detail_level(region_id) == SimulationDetailLevel::Detailed;
+}
+
+bool Simulation::is_settlement_detailed(const SettlementId settlement_id) const noexcept {
+    const auto* settlement = find_settlement(settlement_id);
+    if (settlement == nullptr) {
+        return true;
+    }
+    return is_region_detailed(settlement->region_id);
+}
+
+bool Simulation::is_household_detailed(const HouseholdId household_id) const noexcept {
+    for (const auto& household : state_.households) {
+        if (household.id == household_id) {
+            return is_region_detailed(household.region_id);
+        }
+    }
+    return true;
+}
+
+bool Simulation::is_person_detailed(const Person& person) const noexcept {
+    return is_household_detailed(person.household_id);
+}
+
+void Simulation::rebuild_settlement_aggregate_distribution(const SettlementId settlement_id) {
+    SettlementAggregateState* aggregate = nullptr;
+    for (auto& candidate : state_.settlement_aggregates) {
+        if (candidate.settlement_id == settlement_id) {
+            aggregate = &candidate;
+            break;
+        }
+    }
+
+    const auto* settlement = find_settlement(settlement_id);
+    if (aggregate == nullptr && settlement != nullptr) {
+        state_.settlement_aggregates.push_back(SettlementAggregateState{
+            .settlement_id = settlement_id,
+            .region_id = settlement->region_id,
+        });
+        aggregate = &state_.settlement_aggregates.back();
+    }
+
+    if (aggregate == nullptr) {
+        return;
+    }
+
+    std::uint64_t aggregate_population = 0;
+    std::uint64_t dependent_population = 0;   // children and seniors
+    std::uint64_t working_population = 0;     // young adults and adults
+    std::uint64_t wealth_low_population = 0;
+    std::uint64_t wealth_medium_population = 0;
+    std::uint64_t wealth_high_population = 0;
+    for (const auto& cohort : state_.population_cohorts) {
+        if (cohort.settlement_id != settlement_id) {
+            continue;
+        }
+        aggregate_population += cohort.population;
+        if (cohort.age_band == CohortAgeBand::Child || cohort.age_band == CohortAgeBand::Senior) {
+            dependent_population += cohort.population;
+        } else {
+            working_population += cohort.population;
+        }
+        switch (cohort.wealth_band) {
+            case CohortWealthBand::Low:    wealth_low_population += cohort.population; break;
+            case CohortWealthBand::Medium: wealth_medium_population += cohort.population; break;
+            case CohortWealthBand::High:   wealth_high_population += cohort.population; break;
+        }
+    }
+
+    const auto household_count = ceil_div_u64(aggregate_population, kAggregatePeoplePerHousehold);
+    aggregate->household_count = household_count;
+
+    // Size distribution tracks the dependency ratio: settlements carrying more
+    // children and seniors hold proportionally more large households.
+    if (household_count == 0U) {
+        aggregate->small_household_count = 0U;
+        aggregate->medium_household_count = 0U;
+        aggregate->large_household_count = 0U;
+    } else {
+        const auto dependent_per_10k = (aggregate_population == 0U)
+            ? 0U
+            : (dependent_population * 10'000U) / aggregate_population;
+        const auto large_share_per_10k = std::min<std::uint64_t>(6'000U, dependent_per_10k);
+        const auto small_share_per_10k = 10'000U - large_share_per_10k -
+            std::min<std::uint64_t>(10'000U - large_share_per_10k, 3'400U);
+        aggregate->large_household_count = (household_count * large_share_per_10k) / 10'000U;
+        aggregate->small_household_count = (household_count * small_share_per_10k) / 10'000U;
+        aggregate->medium_household_count =
+            household_count - aggregate->large_household_count - aggregate->small_household_count;
+    }
+
+    // Labour-capacity distribution from the working-age share.
+    const auto working_per_10k = (aggregate_population == 0U)
+        ? 0U
+        : (working_population * 10'000U) / aggregate_population;
+    aggregate->labour_high_household_count = (household_count * working_per_10k) / 10'000U;
+    const auto labour_remainder = household_count - aggregate->labour_high_household_count;
+    aggregate->labour_medium_household_count = labour_remainder / 2U;
+    aggregate->labour_low_household_count = labour_remainder - aggregate->labour_medium_household_count;
+
+    // Wealth distribution from the cohort wealth bands actually present.
+    if (aggregate_population == 0U) {
+        aggregate->wealth_low_household_count = 0U;
+        aggregate->wealth_medium_household_count = 0U;
+        aggregate->wealth_high_household_count = 0U;
+    } else {
+        aggregate->wealth_low_household_count =
+            (household_count * wealth_low_population) / aggregate_population;
+        aggregate->wealth_high_household_count =
+            (household_count * wealth_high_population) / aggregate_population;
+        aggregate->wealth_medium_household_count =
+            household_count - aggregate->wealth_low_household_count - aggregate->wealth_high_household_count;
+        (void)wealth_medium_population;
+    }
+
+    // Food-buffer distribution: days of stored food per household relative to
+    // the settlement's daily requirement.
+    if (household_count == 0U) {
+        aggregate->food_buffer_low_household_count = 0U;
+        aggregate->food_buffer_medium_household_count = 0U;
+        aggregate->food_buffer_high_household_count = 0U;
+    } else {
+        const auto daily_requirement = std::max<std::int64_t>(1, static_cast<std::int64_t>(aggregate_population) * 2);
+        const auto buffer_days_per_100 =
+            (std::max<std::int64_t>(0, aggregate->food_inventory) * 100) / daily_requirement;
+        if (buffer_days_per_100 >= 300) {
+            aggregate->food_buffer_high_household_count = household_count;
+            aggregate->food_buffer_medium_household_count = 0U;
+            aggregate->food_buffer_low_household_count = 0U;
+        } else if (buffer_days_per_100 >= 100) {
+            aggregate->food_buffer_medium_household_count = household_count;
+            aggregate->food_buffer_high_household_count = 0U;
+            aggregate->food_buffer_low_household_count = 0U;
+        } else {
+            aggregate->food_buffer_low_household_count = household_count;
+            aggregate->food_buffer_medium_household_count = 0U;
+            aggregate->food_buffer_high_household_count = 0U;
+        }
+    }
+
+    if (settlement != nullptr) {
+        aggregate->productive_access_points = static_cast<std::int64_t>(settlement->access_share_points);
+    }
+
+    std::sort(state_.settlement_aggregates.begin(), state_.settlement_aggregates.end(), [](const SettlementAggregateState& lhs, const SettlementAggregateState& rhs) {
+        return lhs.settlement_id < rhs.settlement_id;
+    });
+}
+
+void Simulation::rebuild_global_detail_level() {
+    SimulationDetailLevel level = SimulationDetailLevel::Detailed;
+    for (const auto& region_lod : state_.region_lod_states) {
+        if (region_lod.detail_level == SimulationDetailLevel::RegionalCohort) {
+            level = SimulationDetailLevel::RegionalCohort;
+            break;
+        }
+        if (region_lod.detail_level == SimulationDetailLevel::SettlementAggregate) {
+            level = SimulationDetailLevel::SettlementAggregate;
+        }
+    }
+    state_.detail_level = level;
+}
+
 RegionEnvironmentState* Simulation::find_region_mutable(const RegionId region_id) noexcept {
     for (auto& region : state_.regions) {
         if (region.id == region_id) {
@@ -3633,6 +5059,16 @@ std::uint32_t Simulation::settlement_pressure_per_10k(const Settlement& settleme
         }
     }
 
+    for (const auto& cohort : state_.population_cohorts) {
+        if (cohort.settlement_id != settlement.id) {
+            continue;
+        }
+        const auto cohort_required = static_cast<std::int64_t>(std::min<std::uint64_t>(
+            cohort.population,
+            static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() / 2U))) * 2;
+        total_required += cohort_required;
+    }
+
     if (total_required <= 0) {
         return 0U;
     }
@@ -3668,6 +5104,17 @@ void Simulation::process_settlement_extinction() {
                     }
                 }
             }
+        }
+
+        std::uint64_t aggregate_members = 0;
+        for (const auto& cohort : state_.population_cohorts) {
+            if (cohort.settlement_id == settlement.id) {
+                aggregate_members += cohort.population;
+            }
+        }
+
+        if (aggregate_members > 0U) {
+            continue;
         }
 
         if (alive_members == 0U) {
@@ -3847,6 +5294,13 @@ void Simulation::process_settlement_founding(const std::uint64_t demographic_yea
             .region_id = region_id,
             .active = true,
             .access_share_points = assigned_share,
+        });
+        state_.settlement_aggregates.push_back(SettlementAggregateState{
+            .settlement_id = new_settlement_id,
+            .region_id = region_id,
+        });
+        std::sort(state_.settlement_aggregates.begin(), state_.settlement_aggregates.end(), [](const SettlementAggregateState& lhs, const SettlementAggregateState& rhs) {
+            return lhs.settlement_id < rhs.settlement_id;
         });
 
         std::sort(source_alive_households.begin(), source_alive_households.end(), [&](const Household* lhs, const Household* rhs) {
@@ -4369,6 +5823,43 @@ void Simulation::refresh_labour_aggregates() {
         state_.gathering_labour_allocated += gathering_allocated;
     }
 
+    // Aggregate settlements contribute their workforce once here, derived from
+    // cohort composition, rather than accumulating inside the food cadence.
+    for (const auto& cohort : state_.population_cohorts) {
+        if (is_region_detailed(cohort.region_id) || cohort.population == 0U) {
+            continue;
+        }
+        if (cohort.age_band != CohortAgeBand::YoungAdult && cohort.age_band != CohortAgeBand::Adult) {
+            continue;
+        }
+
+        const auto eligible_workers = cohort.population;
+        state_.eligible_workers += eligible_workers;
+        switch (cohort.occupation_group) {
+            case CohortOccupationGroup::Food:
+                state_.active_workers += eligible_workers;
+                state_.cultivators += (eligible_workers * kAggregateCultivatorSharePer10k) / 10'000U;
+                state_.gatherers += (eligible_workers * kAggregateGathererSharePer10k) / 10'000U;
+                break;
+            case CohortOccupationGroup::Materials:
+                state_.active_workers += eligible_workers;
+                state_.wood_gatherers += (eligible_workers * kAggregateWoodSharePer10k) / 10'000U;
+                state_.stone_extractors += (eligible_workers * kAggregateStoneSharePer10k) / 10'000U;
+                break;
+            case CohortOccupationGroup::Craft:
+                state_.active_workers += eligible_workers;
+                state_.craft_workers += eligible_workers;
+                break;
+            case CohortOccupationGroup::Unspecified:
+                state_.unallocated_workers += eligible_workers;
+                break;
+        }
+    }
+
+    // World labour allocation totals describe detailed execution only. Aggregate
+    // settlements advance on their own chunk cadence, so their labour figures
+    // stay in the per-settlement records rather than being folded in here where
+    // the two cadences would desync between yearly refreshes.
     state_.total_labour_allocated = state_.cultivation_labour_allocated + state_.gathering_labour_allocated;
     state_.labour_shortfall = std::max<std::int64_t>(0, state_.total_labour_demand - state_.total_labour_allocated);
     state_.material_labour_allocated =
@@ -4390,10 +5881,27 @@ void Simulation::process_mortality(const std::uint64_t demographic_year) {
         household_by_id.emplace(household.id, &household);
     }
 
+    std::unordered_map<HouseholdId, bool> household_detailed;
+    household_detailed.reserve(state_.households.size());
+    for (const auto& household : state_.households) {
+        household_detailed.emplace(household.id, is_region_detailed(household.region_id));
+    }
+    const auto person_is_detailed = [&](const Person& person) {
+        const auto it = household_detailed.find(person.household_id);
+        return it == household_detailed.end() || it->second;
+    };
+
     for (auto& person : state_.people) {
         if (!person.alive) {
             continue;
         }
+
+        // LOD gate: aggregate regions run cohort mortality, not per-person rolls.
+        if (!person_is_detailed(person)) {
+            continue;
+        }
+
+        ++person_demography_update_count_;
 
         const auto baseline = mortality_rate_per_10k(age_years(person));
         const auto food_penalty = mortality_penalty_from_person_health_per_10k(person);
@@ -4451,10 +5959,27 @@ void Simulation::process_births(const std::uint64_t demographic_year) {
         }
     }
 
+    std::unordered_map<HouseholdId, bool> household_detailed;
+    household_detailed.reserve(state_.households.size());
+    for (const auto& household : state_.households) {
+        household_detailed.emplace(household.id, is_region_detailed(household.region_id));
+    }
+    const auto person_is_detailed = [&](const Person& person) {
+        const auto it = household_detailed.find(person.household_id);
+        return it == household_detailed.end() || it->second;
+    };
+
     for (const auto& person : state_.people) {
         if (!person.alive || person.sex != BiologicalSex::Female) {
             continue;
         }
+
+        // LOD gate: aggregate regions run cohort fertility, not per-person rolls.
+        if (!person_is_detailed(person)) {
+            continue;
+        }
+
+        ++person_demography_update_count_;
 
         const auto fertility_rate = effective_fertility_rate_per_10k(person);
         if (fertility_rate == 0U) {
@@ -5235,7 +6760,13 @@ void Simulation::refresh_population_count() noexcept {
             ++alive_count;
         }
     }
-    state_.population = alive_count;
+
+    std::uint64_t cohort_population = 0;
+    for (const auto& cohort : state_.population_cohorts) {
+        cohort_population += cohort.population;
+    }
+
+    state_.population = alive_count + cohort_population;
 }
 
 void Simulation::refresh_food_aggregates() noexcept {
@@ -5270,6 +6801,20 @@ void Simulation::refresh_food_aggregates() noexcept {
 
         if (person.nutrition_points < 550 || person.health_points < 500) {
             ++state_.population_under_food_stress;
+        }
+    }
+
+    for (const auto& aggregate : state_.settlement_aggregates) {
+        state_.total_food_stored += std::max<std::int64_t>(0, aggregate.food_inventory);
+        state_.total_food_produced += std::max<std::int64_t>(0, aggregate.food_produced_total);
+        state_.total_food_consumed += std::max<std::int64_t>(0, aggregate.food_consumed_total);
+        state_.total_unmet_food += std::max<std::int64_t>(0, aggregate.unmet_food_total);
+        if (aggregate.unmet_food_total > 0) {
+            ++state_.households_in_shortage;
+            const auto stressed_households = std::min<std::uint64_t>(aggregate.household_count, static_cast<std::uint64_t>(aggregate.unmet_food_total / 2));
+            state_.population_under_food_stress += std::min<std::uint64_t>(
+                stressed_households * kAggregatePeoplePerHousehold,
+                aggregate.household_count * kAggregatePeoplePerHousehold);
         }
     }
 }

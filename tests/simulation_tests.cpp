@@ -1060,6 +1060,7 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
     require(lhs.detail_level == rhs.detail_level, context);
     require(lhs.region_lod_states.size() == rhs.region_lod_states.size(), context);
     require(lhs.population_cohorts.size() == rhs.population_cohorts.size(), context);
+    require(lhs.settlement_aggregates.size() == rhs.settlement_aggregates.size(), context);
     require(lhs.people.size() == rhs.people.size(), context);
     require(lhs.households.size() == rhs.households.size(), context);
     require(lhs.regions.size() == rhs.regions.size(), context);
@@ -1109,6 +1110,39 @@ void require_world_state_equal(const universe::WorldState& lhs, const universe::
         require(a.health_points == b.health_points, context);
         require(a.consecutive_undernourished_days == b.consecutive_undernourished_days, context);
         require(a.occupation == b.occupation, context);
+        require(a.materialized_from_cohort == b.materialized_from_cohort, context);
+        require(a.source_cohort_id == b.source_cohort_id, context);
+    }
+
+    for (std::size_t i = 0; i < lhs.settlement_aggregates.size(); ++i) {
+        const auto& a = lhs.settlement_aggregates[i];
+        const auto& b = rhs.settlement_aggregates[i];
+        require(a.settlement_id == b.settlement_id, context);
+        require(a.region_id == b.region_id, context);
+        require(a.household_count == b.household_count, context);
+        require(a.small_household_count == b.small_household_count, context);
+        require(a.medium_household_count == b.medium_household_count, context);
+        require(a.large_household_count == b.large_household_count, context);
+        require(a.food_inventory == b.food_inventory, context);
+        require(a.food_produced_total == b.food_produced_total, context);
+        require(a.food_consumed_total == b.food_consumed_total, context);
+        require(a.unmet_food_total == b.unmet_food_total, context);
+        require(a.labour_capacity == b.labour_capacity, context);
+        require(a.labour_demand == b.labour_demand, context);
+        require(a.labour_allocated == b.labour_allocated, context);
+        require(a.labour_low_household_count == b.labour_low_household_count, context);
+        require(a.labour_medium_household_count == b.labour_medium_household_count, context);
+        require(a.labour_high_household_count == b.labour_high_household_count, context);
+        require(a.wealth_low_household_count == b.wealth_low_household_count, context);
+        require(a.wealth_medium_household_count == b.wealth_medium_household_count, context);
+        require(a.wealth_high_household_count == b.wealth_high_household_count, context);
+        require(a.food_buffer_low_household_count == b.food_buffer_low_household_count, context);
+        require(a.food_buffer_medium_household_count == b.food_buffer_medium_household_count, context);
+        require(a.food_buffer_high_household_count == b.food_buffer_high_household_count, context);
+        require(a.wealth_points_total == b.wealth_points_total, context);
+        require(a.productive_access_points == b.productive_access_points, context);
+        require(a.required_food_year == b.required_food_year, context);
+        require(a.unmet_food_year == b.unmet_food_year, context);
     }
 
     for (std::size_t i = 0; i < lhs.households.size(); ++i) {
@@ -2743,26 +2777,43 @@ int main() {
             universe::SnapshotErrorCode::InvalidStructure,
             "malformed collection lengths must be rejected");
 
-        constexpr std::size_t lod_tail_size = 25U;
-        require(valid.size() > lod_tail_size, "snapshot must include M4A LOD trailing fields");
-        const auto lod_next_cohort_id_offset = valid.size() - lod_tail_size;
-        const auto lod_detail_level_offset = lod_next_cohort_id_offset + 8U;
+        // The payload ends with aggregate_births_total then aggregate_deaths_total.
+        constexpr std::size_t aggregate_demography_tail_size = 16U;
+        require(
+            valid.size() > aggregate_demography_tail_size,
+            "snapshot must include the aggregate demography tail");
+        const auto aggregate_births_offset = valid.size() - aggregate_demography_tail_size;
+        const auto aggregate_deaths_offset = valid.size() - 8U;
 
-        auto invalid_lod_detail_level = clone_bytes(valid);
-        invalid_lod_detail_level[lod_detail_level_offset] = std::byte{9};
-        refresh_snapshot_payload_hash(invalid_lod_detail_level);
+        auto excessive_aggregate_births = clone_bytes(valid);
+        write_u64_le(excessive_aggregate_births, aggregate_births_offset, 1'000'000'000ULL);
+        refresh_snapshot_payload_hash(excessive_aggregate_births);
         require_snapshot_load_fails(
-            invalid_lod_detail_level,
-            universe::SnapshotErrorCode::InvalidEnum,
-            "invalid world LOD detail enum must be rejected");
-
-        auto invalid_next_cohort_id = clone_bytes(valid);
-        write_u64_le(invalid_next_cohort_id, lod_next_cohort_id_offset, 0U);
-        refresh_snapshot_payload_hash(invalid_next_cohort_id);
-        require_snapshot_load_fails(
-            invalid_next_cohort_id,
+            excessive_aggregate_births,
             universe::SnapshotErrorCode::InvalidState,
-            "invalid next cohort id must be rejected");
+            "aggregate births exceeding canonical totals must be rejected");
+
+        auto excessive_aggregate_deaths = clone_bytes(valid);
+        write_u64_le(excessive_aggregate_deaths, aggregate_deaths_offset, 1'000'000'000ULL);
+        refresh_snapshot_payload_hash(excessive_aggregate_deaths);
+        require_snapshot_load_fails(
+            excessive_aggregate_deaths,
+            universe::SnapshotErrorCode::InvalidState,
+            "aggregate deaths exceeding canonical totals must be rejected");
+
+        auto truncated_aggregate_tail = clone_bytes(valid);
+        truncated_aggregate_tail.resize(truncated_aggregate_tail.size() - 4U);
+        // The declared payload size must shrink with the buffer, otherwise the
+        // hash refresh would read past the end.
+        write_u64_le(
+            truncated_aggregate_tail,
+            8U,
+            static_cast<std::uint64_t>(truncated_aggregate_tail.size() - 24U));
+        refresh_snapshot_payload_hash(truncated_aggregate_tail);
+        require_snapshot_load_fails(
+            truncated_aggregate_tail,
+            universe::SnapshotErrorCode::TruncatedData,
+            "a truncated aggregate demography tail must be rejected");
     }
 
     {
@@ -3077,6 +3128,394 @@ int main() {
             invalid_next_knowledge_id,
             universe::SnapshotErrorCode::InvalidState,
             "invalid next knowledge id must be rejected");
+    }
+
+    {
+        auto aggregate_config = config;
+        aggregate_config.initial_population = 0;
+        aggregate_config.initial_region_count = 1;
+        aggregate_config.base_region_area_units = 140;
+
+        universe::Simulation aggregate_only{aggregate_config};
+        require(aggregate_only.state().people.empty(), "aggregate-only scenario starts with no detailed people");
+        require(aggregate_only.state().households.empty(), "aggregate-only scenario starts with no detailed households");
+        require(!aggregate_only.state().regions.empty(), "aggregate-only scenario requires at least one region");
+
+        const auto region_id = aggregate_only.state().regions.front().id;
+        aggregate_only.add_aggregate_population(region_id, 0U, 10'000U);
+        require(aggregate_only.aggregate_population() == 10'000U, "aggregate population must be injected exactly");
+        require(aggregate_only.detailed_population() == 0U, "aggregate-only scenario should remain zero-detailed");
+
+        aggregate_only.reset_lod_instrumentation();
+        aggregate_only.run_years(5);
+
+        require(aggregate_only.state().people.empty(), "aggregate execution must not silently materialize detailed people");
+        require(aggregate_only.state().households.empty(), "aggregate execution must not silently create detailed households");
+        require(aggregate_only.state().total_food_produced > 0, "aggregate execution must produce food without person loops");
+
+        // The decisive anti-facade assertion: aggregate settlements must never
+        // reach the per-person daily or per-person demographic code paths.
+        require(
+            aggregate_only.person_daily_update_count() == 0U,
+            "aggregate execution must never run per-person daily nutrition/health processing");
+        require(
+            aggregate_only.person_demography_update_count() == 0U,
+            "aggregate execution must never run per-person mortality/fertility rolls");
+        require(
+            aggregate_only.aggregate_settlement_update_count() > 0U,
+            "aggregate execution must actually process settlement aggregates");
+        require(
+            aggregate_only.aggregate_cohort_update_count() > 0U,
+            "aggregate execution must actually process population cohorts");
+
+        // Aggregate population is simulated, not frozen: cohorts must age, die
+        // and reproduce rather than sitting at their injected value.
+        require(
+            aggregate_only.state().total_deaths > 0U,
+            "aggregate execution must produce cohort deaths");
+        require(
+            aggregate_only.state().total_births > 0U,
+            "aggregate execution must produce cohort births");
+        require(
+            aggregate_only.aggregate_population() == aggregate_only.state().population,
+            "aggregate-only population must be accounted entirely by cohorts");
+    }
+
+    {
+        // Aggregate execution cost must scale with settlements, not people:
+        // a 10x larger represented population must not cost 10x more work.
+        auto scaling_config = config;
+        scaling_config.initial_population = 0;
+        scaling_config.initial_region_count = 1;
+        scaling_config.base_region_area_units = 1'400;
+
+        universe::Simulation small{scaling_config};
+        small.add_aggregate_population(small.state().regions.front().id, 0U, 10'000U);
+        small.reset_lod_instrumentation();
+        small.run_years(5);
+
+        universe::Simulation large{scaling_config};
+        large.add_aggregate_population(large.state().regions.front().id, 0U, 100'000U);
+        large.reset_lod_instrumentation();
+        large.run_years(5);
+
+        require(
+            small.person_daily_update_count() == 0U && large.person_daily_update_count() == 0U,
+            "neither aggregate scale may run per-person daily loops");
+        require(
+            large.aggregate_settlement_update_count() == small.aggregate_settlement_update_count(),
+            "aggregate settlement work must be independent of represented population size");
+        // Both scales must actually be simulated rather than held at their
+        // injected values, and must stay fully cohort-represented.
+        require(
+            small.state().population != 10'000U && large.state().population != 100'000U,
+            "aggregate populations at both scales must actually evolve");
+        require(
+            small.aggregate_population() == small.state().population &&
+                large.aggregate_population() == large.state().population,
+            "aggregate populations at both scales must remain cohort-represented");
+    }
+
+    {
+        // Demoting a natively-detailed region must actually stop per-person
+        // execution -- the exact failure mode where aggregate state is added
+        // alongside a still-running detailed simulation.
+        auto demote_config = config;
+        demote_config.initial_population = 200;
+        demote_config.initial_region_count = 1;
+        demote_config.base_region_area_units = 140;
+
+        universe::Simulation sim{demote_config};
+        const auto region_id = sim.state().regions.front().id;
+        sim.run_years(2);
+
+        sim.reset_lod_instrumentation();
+        sim.run_years(1);
+        require(
+            sim.person_daily_update_count() > 0U,
+            "detailed regions must run per-person daily processing before demotion");
+
+        const auto alive_before = sim.detailed_population();
+        require(alive_before > 0U, "detailed region must hold living people before demotion");
+
+        sim.demote_region_to_settlement_aggregate(region_id);
+        // Anonymous population folds into cohorts; canonized entities (record
+        // authors, discoverers, institution members) stay exact by contract.
+        const auto canonized_survivors = sim.detailed_population();
+        require(
+            sim.aggregate_population() > 0U,
+            "demotion must fold anonymous population into cohorts");
+        require(
+            sim.aggregate_population() + canonized_survivors == alive_before,
+            "demotion must conserve population exactly across cohorts and canonized entities");
+        require(
+            canonized_survivors < alive_before,
+            "demotion must not leave the whole population in detailed form");
+
+        sim.reset_lod_instrumentation();
+        sim.run_years(3);
+        require(
+            sim.person_daily_update_count() == 0U,
+            "a demoted region must not keep running per-person daily loops underneath");
+        require(
+            sim.person_demography_update_count() == 0U,
+            "a demoted region must not keep running per-person demography underneath");
+        require(
+            sim.aggregate_settlement_update_count() > 0U,
+            "a demoted region must be executed by the aggregate path");
+    }
+
+    {
+        // Conservation across a full detailed -> aggregate -> detailed cycle.
+        auto conservation_config = config;
+        conservation_config.initial_population = 200;
+        conservation_config.initial_region_count = 1;
+        conservation_config.base_region_area_units = 140;
+
+        universe::Simulation sim{conservation_config};
+        const auto region_id = sim.state().regions.front().id;
+        sim.run_years(3);
+
+        // Settlement inventory and household ownership are separate ledgers, so
+        // the physically conserved quantity is their sum.
+        const auto total_material = [](const universe::WorldState& state, const bool wood) {
+            std::int64_t total = 0;
+            for (const auto& settlement : state.settlements) {
+                total += wood ? settlement.materials.wood.value : settlement.materials.stone.value;
+            }
+            for (const auto& household : state.households) {
+                total += wood ? household.owned_materials.wood.value
+                              : household.owned_materials.stone.value;
+            }
+            return total;
+        };
+
+        const auto population_before = sim.state().population;
+        const auto food_stored_before = sim.state().total_food_stored;
+        const auto wood_before = total_material(sim.state(), true);
+        const auto stone_before = total_material(sim.state(), false);
+        const auto births_before = sim.state().total_births;
+        const auto deaths_before = sim.state().total_deaths;
+
+        sim.demote_region_to_settlement_aggregate(region_id);
+
+        require(sim.state().population == population_before, "demotion must conserve population");
+        require(sim.state().total_food_stored == food_stored_before, "demotion must conserve stored food");
+        require(total_material(sim.state(), true) == wood_before, "demotion must conserve wood");
+        require(total_material(sim.state(), false) == stone_before, "demotion must conserve stone");
+        require(sim.state().total_births == births_before, "demotion must not invent births");
+        require(sim.state().total_deaths == deaths_before, "demotion must not invent deaths");
+
+        const auto population_aggregate = sim.state().population;
+        const auto food_stored_aggregate = sim.state().total_food_stored;
+
+        const auto canonized_survivors = sim.detailed_population();
+        require(
+            canonized_survivors > 0U,
+            "canonized entities must survive demotion in exact detailed form");
+
+        // Canonized survivors must be exactly the entities carrying durable
+        // provenance: institution founders/members, record authors, discoverers.
+        std::unordered_set<universe::PersonId> provenance_anchors;
+        for (const auto& institution : sim.institutions()) {
+            provenance_anchors.insert(institution.founder_id);
+            for (const auto member_id : institution.member_ids) {
+                provenance_anchors.insert(member_id);
+            }
+        }
+        for (const auto& record : sim.knowledge_records()) {
+            provenance_anchors.insert(record.author_id);
+        }
+        for (const auto& event : sim.state().event_log) {
+            if (event.type == universe::EventType::DiscoveryMade) {
+                provenance_anchors.insert(
+                    std::get<universe::DiscoveryMadeEventPayload>(event.payload).discoverer_id);
+            } else if (event.type == universe::EventType::InstitutionFounded) {
+                provenance_anchors.insert(
+                    std::get<universe::InstitutionFoundedEventPayload>(event.payload).founder_id);
+            }
+        }
+        for (const auto& person : sim.state().people) {
+            if (person.alive) {
+                require(
+                    provenance_anchors.contains(person.id),
+                    "only provenance-anchored entities may stay detailed in an aggregate region");
+            }
+        }
+
+        sim.promote_region_to_detailed(region_id);
+
+        require(sim.state().population == population_aggregate, "promotion must conserve population");
+        require(sim.state().total_food_stored == food_stored_aggregate, "promotion must conserve stored food");
+        require(sim.aggregate_population() == 0U, "promotion must leave no residual cohorts in the region");
+        require(sim.detailed_population() == population_aggregate, "promotion must realize the full population");
+    }
+
+    {
+        // Cohort representation must stay bounded: repeated aging and births
+        // must merge back into canonical buckets rather than growing forever.
+        auto bounded_config = config;
+        bounded_config.initial_population = 0;
+        bounded_config.initial_region_count = 1;
+        bounded_config.base_region_area_units = 1'400;
+
+        universe::Simulation sim{bounded_config};
+        sim.add_aggregate_population(sim.state().regions.front().id, 0U, 10'000U);
+
+        sim.run_years(5);
+        const auto cohorts_after_5 = sim.state().population_cohorts.size();
+        sim.run_years(45);
+        const auto cohorts_after_50 = sim.state().population_cohorts.size();
+
+        require(cohorts_after_5 > 0U, "aggregate execution must retain cohorts");
+        require(
+            cohorts_after_50 <= cohorts_after_5 * 2U,
+            "cohort count must stay bounded rather than growing with simulated years");
+        require(
+            cohorts_after_50 < 64U,
+            "cohort count must stay within the canonical bucket space for one settlement");
+    }
+
+    {
+        // Aggregate settlements advance on a chunked cadence; save/load taken
+        // mid-chunk must not change the trajectory.
+        auto cadence_config = config;
+        cadence_config.initial_population = 0;
+        cadence_config.initial_region_count = 1;
+        cadence_config.base_region_area_units = 1'400;
+
+        universe::Simulation direct{cadence_config};
+        direct.add_aggregate_population(direct.state().regions.front().id, 0U, 10'000U);
+        direct.advance(universe::days(1'000));
+
+        universe::Simulation segmented{cadence_config};
+        segmented.add_aggregate_population(segmented.state().regions.front().id, 0U, 10'000U);
+        // 407 and 593 are deliberately not multiples of the aggregate chunk.
+        segmented.advance(universe::days(407));
+        segmented = load_from_snapshot_or_fail(
+            segmented.save_snapshot(),
+            "mid-chunk aggregate snapshot must load");
+        segmented.advance(universe::days(593));
+
+        require_world_state_equal(
+            direct.state(),
+            segmented.state(),
+            "aggregate chunked cadence must survive save/load taken mid-chunk");
+        require(
+            direct.save_snapshot() == segmented.save_snapshot(),
+            "mid-chunk segmented aggregate run must serialize identically");
+    }
+
+    {
+        auto aggregate_config = config;
+        aggregate_config.initial_population = 0;
+        aggregate_config.initial_region_count = 1;
+        aggregate_config.base_region_area_units = 140;
+
+        universe::Simulation lhs{aggregate_config};
+        universe::Simulation rhs{aggregate_config};
+        const auto region_id_lhs = lhs.state().regions.front().id;
+        const auto region_id_rhs = rhs.state().regions.front().id;
+        lhs.add_aggregate_population(region_id_lhs, 0U, 100'000U);
+        rhs.add_aggregate_population(region_id_rhs, 0U, 100'000U);
+        lhs.run_years(8);
+        rhs.run_years(8);
+
+        require_world_state_equal(lhs.state(), rhs.state(), "aggregate execution must be deterministic");
+        require(lhs.save_snapshot() == rhs.save_snapshot(), "aggregate deterministic runs must serialize identically");
+    }
+
+    {
+        auto promotion_config = config;
+        promotion_config.initial_population = 0;
+        promotion_config.initial_region_count = 1;
+        promotion_config.base_region_area_units = 140;
+
+        universe::Simulation promotion_run{promotion_config};
+        const auto region_id = promotion_run.state().regions.front().id;
+        promotion_run.add_aggregate_population(region_id, 0U, 10'000U);
+        promotion_run.run_years(2);
+
+        promotion_run.promote_region_to_detailed(region_id);
+        require(promotion_run.aggregate_population() == 0U, "promoted region should consume aggregate cohorts");
+        require(promotion_run.detailed_population() > 0U, "promoted region should realize detailed people");
+
+        std::vector<universe::PersonId> first_promoted_ids;
+        for (const auto& person : promotion_run.state().people) {
+            if (person.alive && person.materialized_from_cohort) {
+                first_promoted_ids.push_back(person.id);
+            }
+        }
+        std::sort(first_promoted_ids.begin(), first_promoted_ids.end());
+        require(!first_promoted_ids.empty(), "promotion must produce cohort-materialized detailed identities");
+
+        promotion_run.demote_region_to_settlement_aggregate(region_id);
+        require(promotion_run.aggregate_population() > 0U, "demotion must restore aggregate cohort representation");
+
+        const auto demoted_snapshot = promotion_run.save_snapshot();
+        auto resumed = load_from_snapshot_or_fail(demoted_snapshot, "demoted aggregate snapshot must load");
+        resumed.promote_region_to_detailed(region_id);
+
+        std::vector<universe::PersonId> promoted_again_ids;
+        for (const auto& person : resumed.state().people) {
+            if (person.alive && person.materialized_from_cohort) {
+                promoted_again_ids.push_back(person.id);
+            }
+        }
+        std::sort(promoted_again_ids.begin(), promoted_again_ids.end());
+        require(
+            first_promoted_ids == promoted_again_ids,
+            "promotion after demote/save/load must reactivate the same materialized identities without rerolling");
+    }
+
+    {
+        auto transition_config = config;
+        transition_config.initial_population = 0;
+        transition_config.initial_region_count = 1;
+        transition_config.base_region_area_units = 140;
+
+        universe::Simulation direct{transition_config};
+        const auto region_id = direct.state().regions.front().id;
+        direct.add_aggregate_population(region_id, 0U, 10'000U);
+        direct.run_years(3);
+        direct.promote_region_to_detailed(region_id);
+        direct.run_years(2);
+        direct.demote_region_to_settlement_aggregate(region_id);
+        direct.run_years(4);
+
+        universe::Simulation segmented{transition_config};
+        segmented.add_aggregate_population(region_id, 0U, 10'000U);
+        segmented.run_years(1);
+        segmented = load_from_snapshot_or_fail(
+            segmented.save_snapshot(),
+            "mixed LOD segmented path: year-1 aggregate snapshot must load");
+
+        segmented.run_years(2);
+        segmented.promote_region_to_detailed(region_id);
+        segmented = load_from_snapshot_or_fail(
+            segmented.save_snapshot(),
+            "mixed LOD segmented path: post-promotion snapshot must load");
+
+        segmented.run_years(1);
+        segmented = load_from_snapshot_or_fail(
+            segmented.save_snapshot(),
+            "mixed LOD segmented path: post-detailed snapshot must load");
+
+        segmented.run_years(1);
+        segmented.demote_region_to_settlement_aggregate(region_id);
+        segmented = load_from_snapshot_or_fail(
+            segmented.save_snapshot(),
+            "mixed LOD segmented path: post-demotion snapshot must load");
+
+        segmented.run_years(4);
+
+        require_world_state_equal(
+            direct.state(),
+            segmented.state(),
+            "mixed LOD transition schedule should remain deterministic across save/load segmentation");
+        require(
+            direct.save_snapshot() == segmented.save_snapshot(),
+            "mixed LOD deterministic paths must serialize identically");
     }
 
     universe::Simulation a{config};

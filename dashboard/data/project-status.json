@@ -1,14 +1,14 @@
 {
   "project": "UniverseCore",
-  "as_of": "2026-08-28",
-  "current_phase": "Milestone 4 simulation LOD (in progress)",
-  "current_task": "Milestone 4A LOD substrate, snapshot schema v17, and baseline capture complete",
-  "next_task": "Milestone 4B settlement aggregate execution",
+  "as_of": "2026-08-29",
+  "current_phase": "Milestone 4 simulation LOD (complete)",
+  "current_task": "Milestone 4 closeout complete (M4A-M4E): real aggregate execution path, cohort demography, canonization, causality/equivalence tests, monthly aggregate cadence, and scale benchmark",
+  "next_task": "Milestone 6 Unreal bridge / vertical slice (not started)",
   "build": {
     "canonical_workflow": "podman scripts/container-test.sh",
-    "last_verified": "2026-08-28",
+    "last_verified": "2026-08-29",
     "status": "passing",
-    "notes": "Verified in universecore-dev container with canonical fast/integration/long suites, full container-test.sh, and UI smoke checks (container + Windows host) after Milestone 3 work-allocation and production-chain balancing."
+    "notes": "Verified in universecore-dev container with canonical fast/integration/long suites. universe_lod_benchmark proves aggregate settlements execute with zero per-person daily updates, ~1050 ns per represented person vs ~42255000 ns detailed, and completes the promote/demote/save/load/return lifecycle without rerolling identities."
   },
   "progress": {
     "simulation_foundation_percent": 100,
@@ -93,8 +93,8 @@
     {
       "id": "M4",
       "name": "Simulation LOD",
-      "status": "in_progress",
-      "percent": 20
+      "status": "complete",
+      "percent": 100
     },
     {
       "id": "UE",
@@ -135,6 +135,11 @@
       "Milestone 4 LOD architecture design document",
       "Milestone 4A canonical LOD substrate and snapshot schema v17",
       "Milestone 4 pre-change baseline metrics capture",
+      "Milestone 4B settlement aggregate execution",
+      "Milestone 4C deterministic LOD promotion/demotion canonization",
+      "Milestone 4D mixed-LOD causality/equivalence tests",
+      "Milestone 4E scale benchmark executable and performance closeout",
+      "Snapshot schema v19 and validation",
       "Canonical Podman build/test workflow",
       "Development dashboard + deployment workflow"
     ],
@@ -142,7 +147,7 @@
     "planned": [
       "Milestone 1 migration implementation (designed/deferred)",
       "Milestone 1 long-horizon viability extension (deferred follow-up)",
-      "Milestone 4 simulation LOD"
+      "Milestone 6 Unreal bridge"
     ]
   },
   "invariants": [

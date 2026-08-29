@@ -30,6 +30,9 @@ endif()
 add_executable(universe_sim src/main.cpp)
 target_link_libraries(universe_sim PRIVATE universe_core)
 
+add_executable(universe_lod_benchmark src/lod_benchmark.cpp)
+target_link_libraries(universe_lod_benchmark PRIVATE universe_core)
+
 add_library(universe_ui_support
     src/ui/simulation_controller.cpp
 )
@@ -112,6 +115,10 @@ if(UNIVERSECORE_BUILD_TESTS)
     target_link_libraries(universe_core_tests PRIVATE universe_core universe_ui_support)
     add_test(NAME universe_core_tests_long COMMAND universe_core_tests)
     set_tests_properties(universe_core_tests_long PROPERTIES LABELS "long")
+
+    # Milestone 4 LOD scale benchmark doubles as the mixed-LOD lifecycle gate.
+    add_test(NAME universe_lod_benchmark COMMAND universe_lod_benchmark)
+    set_tests_properties(universe_lod_benchmark PROPERTIES LABELS "long")
 
     if(UNIVERSECORE_BUILD_UI)
         add_test(NAME universe_ui_smoke COMMAND universe_ui --smoke-test)

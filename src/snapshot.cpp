@@ -881,6 +881,60 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
         payload.write_u64(cohort->population);
     }
 
+    payload.write_u64(static_cast<std::uint64_t>(people_order.size()));
+    for (const auto* person : people_order) {
+        payload.write_u64(person->id);
+        payload.write_bool(person->materialized_from_cohort);
+        payload.write_bool(person->source_cohort_id.has_value());
+        if (person->source_cohort_id.has_value()) {
+            payload.write_u64(*person->source_cohort_id);
+        }
+    }
+
+    std::vector<const SettlementAggregateState*> settlement_aggregate_order;
+    settlement_aggregate_order.reserve(simulation.state_.settlement_aggregates.size());
+    for (const auto& aggregate : simulation.state_.settlement_aggregates) {
+        settlement_aggregate_order.push_back(&aggregate);
+    }
+    std::sort(settlement_aggregate_order.begin(), settlement_aggregate_order.end(), [](const SettlementAggregateState* lhs, const SettlementAggregateState* rhs) {
+        return lhs->settlement_id < rhs->settlement_id;
+    });
+
+    payload.write_u64(static_cast<std::uint64_t>(settlement_aggregate_order.size()));
+    for (const auto* aggregate : settlement_aggregate_order) {
+        payload.write_u64(aggregate->settlement_id);
+        payload.write_u64(aggregate->region_id);
+        payload.write_u64(aggregate->household_count);
+        payload.write_u64(aggregate->small_household_count);
+        payload.write_u64(aggregate->medium_household_count);
+        payload.write_u64(aggregate->large_household_count);
+        payload.write_i64(aggregate->food_inventory);
+        payload.write_i64(aggregate->food_produced_total);
+        payload.write_i64(aggregate->food_consumed_total);
+        payload.write_i64(aggregate->unmet_food_total);
+        payload.write_i64(aggregate->labour_capacity);
+        payload.write_i64(aggregate->labour_demand);
+        payload.write_i64(aggregate->labour_allocated);
+        payload.write_u64(aggregate->labour_low_household_count);
+        payload.write_u64(aggregate->labour_medium_household_count);
+        payload.write_u64(aggregate->labour_high_household_count);
+        payload.write_u64(aggregate->wealth_low_household_count);
+        payload.write_u64(aggregate->wealth_medium_household_count);
+        payload.write_u64(aggregate->wealth_high_household_count);
+        payload.write_u64(aggregate->food_buffer_low_household_count);
+        payload.write_u64(aggregate->food_buffer_medium_household_count);
+        payload.write_u64(aggregate->food_buffer_high_household_count);
+        payload.write_i64(aggregate->wealth_points_total);
+        payload.write_i64(aggregate->productive_access_points);
+        payload.write_i64(aggregate->required_food_year);
+        payload.write_i64(aggregate->unmet_food_year);
+    }
+
+    // Aggregate demography totals are written last so earlier field offsets stay
+    // stable across schema revisions.
+    payload.write_u64(simulation.state_.aggregate_births_total);
+    payload.write_u64(simulation.state_.aggregate_deaths_total);
+
     auto payload_bytes = payload.take();
     const auto payload_hash = fnv1a64(payload_bytes);
 
@@ -2366,6 +2420,139 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         restored_state.population_cohorts.push_back(cohort);
     }
 
+    std::uint64_t person_lod_metadata_count = 0;
+    if (!payload_reader.read_u64(person_lod_metadata_count)) {
+        return load_error(SnapshotErrorCode::TruncatedData, "Snapshot person LOD metadata section is truncated");
+    }
+    if (person_lod_metadata_count != restored_state.people.size()) {
+        return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot person LOD metadata count mismatch");
+    }
+
+    std::unordered_map<PersonId, std::size_t> person_index_by_id;
+    person_index_by_id.reserve(restored_state.people.size());
+    for (std::size_t index = 0; index < restored_state.people.size(); ++index) {
+        person_index_by_id.emplace(restored_state.people[index].id, index);
+    }
+
+    std::unordered_set<PersonId> metadata_ids;
+    metadata_ids.reserve(restored_state.people.size());
+    for (std::uint64_t i = 0; i < person_lod_metadata_count; ++i) {
+        PersonId person_id = 0;
+        bool materialized_from_cohort = false;
+        bool has_source_cohort = false;
+        CohortId source_cohort_id = 0;
+        if (!payload_reader.read_u64(person_id) ||
+            !payload_reader.read_bool(materialized_from_cohort) ||
+            !payload_reader.read_bool(has_source_cohort)) {
+            return load_error(SnapshotErrorCode::TruncatedData, "Snapshot person LOD metadata record is truncated");
+        }
+        if (has_source_cohort && !payload_reader.read_u64(source_cohort_id)) {
+            return load_error(SnapshotErrorCode::TruncatedData, "Snapshot person source cohort id is truncated");
+        }
+        if (!metadata_ids.insert(person_id).second) {
+            return load_error(SnapshotErrorCode::DuplicateId, "Snapshot person LOD metadata contains duplicate person ids");
+        }
+        if (!person_index_by_id.contains(person_id)) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot person LOD metadata references unknown person");
+        }
+        if (has_source_cohort && !is_valid_cohort_id(source_cohort_id)) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot person source cohort id must be non-zero");
+        }
+
+        auto& person = restored_state.people[person_index_by_id[person_id]];
+        person.materialized_from_cohort = materialized_from_cohort;
+        person.source_cohort_id = has_source_cohort ? std::optional<CohortId>{source_cohort_id} : std::nullopt;
+        if (person.materialized_from_cohort && !person.source_cohort_id.has_value()) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot materialized person must retain source cohort id");
+        }
+    }
+
+    std::uint64_t settlement_aggregate_count = 0;
+    if (!payload_reader.read_u64(settlement_aggregate_count)) {
+        return load_error(SnapshotErrorCode::TruncatedData, "Snapshot settlement aggregate section is truncated");
+    }
+    if (settlement_aggregate_count != restored_state.settlements.size()) {
+        return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot settlement aggregate count mismatch");
+    }
+
+    restored_state.settlement_aggregates.clear();
+    restored_state.settlement_aggregates.reserve(static_cast<std::size_t>(settlement_aggregate_count));
+    std::unordered_set<SettlementId> aggregate_ids;
+    for (std::uint64_t i = 0; i < settlement_aggregate_count; ++i) {
+        SettlementAggregateState aggregate{};
+        if (!payload_reader.read_u64(aggregate.settlement_id) ||
+            !payload_reader.read_u64(aggregate.region_id) ||
+            !payload_reader.read_u64(aggregate.household_count) ||
+            !payload_reader.read_u64(aggregate.small_household_count) ||
+            !payload_reader.read_u64(aggregate.medium_household_count) ||
+            !payload_reader.read_u64(aggregate.large_household_count) ||
+            !payload_reader.read_i64(aggregate.food_inventory) ||
+            !payload_reader.read_i64(aggregate.food_produced_total) ||
+            !payload_reader.read_i64(aggregate.food_consumed_total) ||
+            !payload_reader.read_i64(aggregate.unmet_food_total) ||
+            !payload_reader.read_i64(aggregate.labour_capacity) ||
+            !payload_reader.read_i64(aggregate.labour_demand) ||
+            !payload_reader.read_i64(aggregate.labour_allocated) ||
+            !payload_reader.read_u64(aggregate.labour_low_household_count) ||
+            !payload_reader.read_u64(aggregate.labour_medium_household_count) ||
+            !payload_reader.read_u64(aggregate.labour_high_household_count) ||
+            !payload_reader.read_u64(aggregate.wealth_low_household_count) ||
+            !payload_reader.read_u64(aggregate.wealth_medium_household_count) ||
+            !payload_reader.read_u64(aggregate.wealth_high_household_count) ||
+            !payload_reader.read_u64(aggregate.food_buffer_low_household_count) ||
+            !payload_reader.read_u64(aggregate.food_buffer_medium_household_count) ||
+            !payload_reader.read_u64(aggregate.food_buffer_high_household_count) ||
+            !payload_reader.read_i64(aggregate.wealth_points_total) ||
+            !payload_reader.read_i64(aggregate.productive_access_points) ||
+            !payload_reader.read_i64(aggregate.required_food_year) ||
+            !payload_reader.read_i64(aggregate.unmet_food_year)) {
+            return load_error(SnapshotErrorCode::TruncatedData, "Snapshot settlement aggregate record is truncated");
+        }
+
+        if (!aggregate_ids.insert(aggregate.settlement_id).second) {
+            return load_error(SnapshotErrorCode::DuplicateId, "Snapshot settlement aggregate contains duplicate settlement ids");
+        }
+        if (!settlement_mutable_by_id.contains(aggregate.settlement_id)) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot settlement aggregate references unknown settlement");
+        }
+        if (settlement_mutable_by_id.at(aggregate.settlement_id)->region_id != aggregate.region_id) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot settlement aggregate region mismatch");
+        }
+        if (aggregate.small_household_count + aggregate.medium_household_count + aggregate.large_household_count != aggregate.household_count) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot settlement aggregate household bands are inconsistent");
+        }
+        if (aggregate.food_inventory < 0 || aggregate.food_produced_total < 0 || aggregate.food_consumed_total < 0 ||
+            aggregate.unmet_food_total < 0 || aggregate.labour_capacity < 0 || aggregate.labour_demand < 0 || aggregate.labour_allocated < 0) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot settlement aggregate values must be non-negative");
+        }
+        if (aggregate.wealth_points_total < 0 || aggregate.productive_access_points < 0 ||
+            aggregate.required_food_year < 0 || aggregate.unmet_food_year < 0) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot settlement aggregate economic values must be non-negative");
+        }
+        if (aggregate.unmet_food_year > aggregate.required_food_year) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot settlement aggregate unmet food exceeds yearly requirement");
+        }
+        if (aggregate.labour_low_household_count + aggregate.labour_medium_household_count +
+                aggregate.labour_high_household_count != aggregate.household_count) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot settlement aggregate labour bands are inconsistent");
+        }
+        if (aggregate.wealth_low_household_count + aggregate.wealth_medium_household_count +
+                aggregate.wealth_high_household_count != aggregate.household_count) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot settlement aggregate wealth bands are inconsistent");
+        }
+        if (aggregate.food_buffer_low_household_count + aggregate.food_buffer_medium_household_count +
+                aggregate.food_buffer_high_household_count != aggregate.household_count) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot settlement aggregate food buffer bands are inconsistent");
+        }
+
+        restored_state.settlement_aggregates.push_back(aggregate);
+    }
+
+    if (!payload_reader.read_u64(restored_state.aggregate_births_total) ||
+        !payload_reader.read_u64(restored_state.aggregate_deaths_total)) {
+        return load_error(SnapshotErrorCode::TruncatedData, "Snapshot aggregate demography totals are truncated");
+    }
+
     if (!payload_reader.fully_consumed()) {
         return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot payload has trailing undecoded bytes");
     }
@@ -2414,7 +2601,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         }
     }
     const auto expected_next_cohort_id = max_cohort_id + 1U;
-    if (next_cohort_id != expected_next_cohort_id) {
+    if (next_cohort_id < expected_next_cohort_id) {
         return load_error(SnapshotErrorCode::InvalidState, "Snapshot next cohort id is inconsistent");
     }
 
@@ -2752,8 +2939,13 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         if (!restored_state.population_cohorts.empty()) {
             return load_error(SnapshotErrorCode::InvalidState, "Snapshot detailed mode must not contain aggregate cohorts");
         }
-        if (!restored_state.region_lod_states.empty()) {
-            return load_error(SnapshotErrorCode::InvalidState, "Snapshot detailed mode must not contain region LOD overrides");
+        if (restored_state.region_lod_states.size() != restored_state.regions.size()) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot detailed mode must include one LOD entry per region");
+        }
+        for (const auto& region_lod : restored_state.region_lod_states) {
+            if (region_lod.detail_level != SimulationDetailLevel::Detailed) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot detailed mode cannot include non-detailed region LOD entries");
+            }
         }
         if (restored_state.population != alive_count) {
             return load_error(SnapshotErrorCode::InvalidState, "Snapshot population does not match alive person count");
@@ -3427,7 +3619,15 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         return load_error(SnapshotErrorCode::InvalidState, "Snapshot next knowledge id is inconsistent");
     }
 
-    if (restored_state.total_births != birth_event_count || restored_state.total_deaths != death_event_count) {
+    if (restored_state.aggregate_births_total > restored_state.total_births ||
+        restored_state.aggregate_deaths_total > restored_state.total_deaths) {
+        return load_error(SnapshotErrorCode::InvalidState, "Snapshot aggregate demography exceeds canonical totals");
+    }
+
+    // Aggregate cohort demography is intentionally event-free, so the journal
+    // reconciles against the detailed portion of the canonical totals.
+    if (restored_state.total_births - restored_state.aggregate_births_total != birth_event_count ||
+        restored_state.total_deaths - restored_state.aggregate_deaths_total != death_event_count) {
         return load_error(SnapshotErrorCode::InvalidState, "Snapshot event totals do not match cumulative counters");
     }
 
@@ -3548,6 +3748,22 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         }
     }
 
+    for (const auto& aggregate : restored_state.settlement_aggregates) {
+        total_food_stored += std::max<std::int64_t>(0, aggregate.food_inventory);
+        total_food_produced += std::max<std::int64_t>(0, aggregate.food_produced_total);
+        total_food_consumed += std::max<std::int64_t>(0, aggregate.food_consumed_total);
+        total_unmet_food += std::max<std::int64_t>(0, aggregate.unmet_food_total);
+        if (aggregate.unmet_food_total > 0) {
+            ++households_in_shortage;
+            const auto stressed_households = std::min<std::uint64_t>(
+                aggregate.household_count,
+                static_cast<std::uint64_t>(aggregate.unmet_food_total / 2));
+            population_under_food_stress += std::min<std::uint64_t>(
+                stressed_households * 5U,
+                aggregate.household_count * 5U);
+        }
+    }
+
     if (restored_state.total_food_stored != total_food_stored ||
         restored_state.total_food_produced != total_food_produced ||
         restored_state.total_food_consumed != total_food_consumed ||
@@ -3633,10 +3849,11 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
             return load_error(SnapshotErrorCode::InvalidState, "Snapshot settlement economic values are out of range");
         }
 
-        if (owned_wood_by_settlement[settlement.id] != settlement.materials.wood.value ||
-            owned_stone_by_settlement[settlement.id] != settlement.materials.stone.value ||
-            owned_timber_by_settlement[settlement.id] != settlement.materials.timber.value ||
-            owned_tools_by_settlement[settlement.id] != settlement.materials.basic_tool.value) {
+        if (cohort_population == 0U &&
+            (owned_wood_by_settlement[settlement.id] != settlement.materials.wood.value ||
+             owned_stone_by_settlement[settlement.id] != settlement.materials.stone.value ||
+             owned_timber_by_settlement[settlement.id] != settlement.materials.timber.value ||
+             owned_tools_by_settlement[settlement.id] != settlement.materials.basic_tool.value)) {
             return load_error(SnapshotErrorCode::InvalidState, "Snapshot household ownership partition does not match settlement inventory");
         }
 
@@ -3744,6 +3961,9 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
             return lhs.settlement_id < rhs.settlement_id;
         }
         return lhs.id < rhs.id;
+    });
+    std::sort(restored_state.settlement_aggregates.begin(), restored_state.settlement_aggregates.end(), [](const SettlementAggregateState& lhs, const SettlementAggregateState& rhs) {
+        return lhs.settlement_id < rhs.settlement_id;
     });
     for (auto& institution : restored_state.institutions) {
         std::sort(institution.member_ids.begin(), institution.member_ids.end());

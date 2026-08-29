@@ -116,13 +116,26 @@ Exit criteria: settlement growth is constrained by real resources and labour rat
 
 ## Milestone 4: Simulation LOD
 
-- [ ] cohort representation
-- [ ] individual ↔ cohort promotion/demotion
-- [ ] household aggregation
-- [ ] causality preservation tests
-- [ ] time acceleration policies
+Status: **complete**
+
+- [x] cohort representation
+- [x] individual ↔ cohort promotion/demotion
+- [x] household aggregation
+- [x] causality preservation tests
+- [x] time acceleration policies
 
 Exit criteria: simulate a much larger off-screen population cheaply, resolve a region to individuals, and preserve statistical/history consistency.
+
+Verified by `universe_lod_benchmark`: ~200 detailed people, ~10,000 and ~100,000 aggregate
+population advance together; a region promotes to detailed, demotes, survives save/load, and
+reactivates its prior identities without rerolling. Aggregate execution costs ~1,050 ns per
+represented person against ~42,255,000 ns for detailed simulation.
+
+Scope notes:
+
+- `RegionalCohort` is defined as a resolution level but only `Detailed` and
+  `SettlementAggregate` have execution paths.
+- Aggregate populations are Malthusian; regions must be sized for the population they carry.
 
 ## Milestone 5: First AI cognition
 

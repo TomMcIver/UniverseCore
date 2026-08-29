@@ -232,3 +232,107 @@ Milestone 4 is complete when UniverseCore can:
 - simulate much larger off-screen population cheaply
 - resolve selected regions to detailed individuals deterministically
 - preserve conservation/history consistency across LOD transitions and save/load
+
+## Aggregate execution model (M4B/M4C/M4E as built)
+
+### Execution separation
+
+Aggregate execution is a distinct code path, not a data mirror of detailed simulation:
+
+- `process_aggregate_food_period` runs per settlement, never per person.
+- `process_aggregate_demography_period` runs per cohort, never per person.
+- Detailed systems (`process_food_period`, `process_mortality`, `process_births`) skip any
+  household whose region is not `Detailed`.
+
+Two non-canonical counters (`person_daily_update_count`, `person_demography_update_count`)
+are incremented at the canonical per-person processing sites so tests can assert that
+aggregate regions reach them exactly zero times. They are never serialized and never
+influence outcomes.
+
+### Aggregate demography
+
+Cohort rates are band averages of the canonical per-age tables, so aggregate execution
+reproduces detailed demography in the mean:
+
+| Band | Ages | Mortality /10k | Fertility /10k |
+| --- | --- | --- | --- |
+| Child | 0-17 | 40 | 0 |
+| YoungAdult | 18-29 | 20 | 2,450 |
+| Adult | 30-59 | 33 | 797 |
+| Senior | 60+ | 790 | 0 |
+
+Fractional outcomes use a seeded carry (`deterministic_share`), so results are deterministic
+and free of rounding bias. Food scarcity raises mortality and suppresses fertility through a
+per-year `required_food_year` / `unmet_food_year` window, preserving the M3 economic feedback.
+
+Cohorts are merged each year by canonical key, with the lowest id surviving. This keeps cohort
+count bounded by the bucket space rather than growing with simulated years.
+
+### Canonization
+
+`collect_canonized_person_ids` protects entities carrying durable provenance -- institution
+founders and members, record authors, and discoverers. These keep exact detailed identity
+across demotion; only anonymous population folds into cohorts.
+
+### Conservation across transitions
+
+Demotion moves household food, materials and wealth into the settlement aggregate ledger;
+promotion hands them back and clears the aggregate, so stored food is counted exactly once.
+Aggregate births and deaths are tracked separately (`aggregate_births_total` /
+`aggregate_deaths_total`) because anonymous mass transitions deliberately emit no per-person
+events; the event journal reconciles against the detailed portion of the canonical totals.
+
+### Time acceleration
+
+Aggregate settlements advance in 30-day chunks (`kAggregateFoodPeriodDays`); detailed regions
+keep the daily cadence. Per-day flows are scaled by the chunk length so totals stay exact, and
+the chunk phase derives from the absolute day counter so save/load mid-chunk is safe.
+
+## M4 closeout verification
+
+Canonical verification (Podman `./scripts/container-test.sh`): fast, integration and long
+suites pass.
+
+M4D mixed-LOD causality/equivalence coverage:
+
+- aggregate-only execution proven free of per-person loops via instrumentation counters
+- demotion of a natively-detailed region proven to stop per-person execution
+- conservation of population, stored food, wood and stone across demote/promote
+- canonized provenance anchors retained in exact detailed form
+- cohort count bounded across 50 simulated years
+- deterministic aggregate repeatability at 100k represented population
+- promotion/demotion save/load identity reactivation without rerolling
+- mixed LOD transition equivalence across save/load segmentation, including mid-chunk saves
+
+M4E benchmark evidence (`universe_lod_benchmark`, 100 simulation years, seed 42, Release):
+
+| Scenario | elapsed_ms | start pop | end pop | person_daily_updates |
+| --- | --- | --- | --- | --- |
+| `detailed_200` | 8,451 | 200 | 433 | 12,987,795 |
+| `aggregate_10000` | 37 | 10,000 | 104,839 | 0 |
+| `aggregate_100000` | 105 | 100,000 | 762,874 | 0 |
+
+Cost per represented person: ~42,255,000 ns detailed vs ~1,050 ns aggregate.
+
+The mixed-LOD lifecycle demonstration in the same executable advances ~200 detailed people
+alongside ~10,000 and ~100,000 aggregate population, then promotes a region to detailed
+(3,019 individuals realized), demotes it, saves, loads, returns 10 years later, and reactivates
+3,018 of the 3,019 prior identities (the difference is one intervening death), with a
+byte-identical deterministic replay.
+
+### Known limitations
+
+- Aggregate population is Malthusian: a region whose carrying capacity cannot support its
+  represented population collapses toward capacity. Benchmark scenarios size regions
+  accordingly.
+- Detailed 200-person runs at `base_region_area_units = 140` still go extinct near year 100.
+  This is the pre-existing Milestone 1 deferred item (long-horizon viability across broader
+  seed distributions), not an LOD regression; benchmarks use area 1,000 where detailed runs
+  are stable.
+- World-level labour allocation totals (`total_labour_capacity`, `total_labour_demand`,
+  `total_labour_allocated`) describe detailed execution only. Aggregate settlements advance on
+  their own chunk cadence, so their labour figures live in the per-settlement
+  `settlement_aggregates` records; folding them into the world totals would desync between
+  yearly refreshes. Cohort workforce composition is still reported in the world worker counts.
+- `RegionalCohort` remains a declared resolution level; only `Detailed` and
+  `SettlementAggregate` have execution paths.

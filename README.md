@@ -192,6 +192,32 @@ This writes:
 - `horizon_summary.csv`
 - `summary.txt`
 
+Run the Milestone 4 LOD benchmark scenarios (100 years each for detailed 200, aggregate 10k, aggregate 100k):
+
+```bash
+podman run --rm \
+	-v "${PWD}:/workspace" \
+	-w /workspace \
+	universecore-dev \
+	bash -lc 'cmake -S . -B build/container -G Ninja -DCMAKE_BUILD_TYPE=Release >/dev/null && cmake --build build/container --target universe_lod_benchmark >/dev/null && ./build/container/universe_lod_benchmark'
+```
+
+The benchmark prints `M4_LOD_BENCHMARK|...` lines with elapsed milliseconds, represented
+population and per-person loop counts by scenario, followed by `M4_LOD_DEMO|...` lines for the
+mixed-LOD lifecycle demonstration (detailed + 10k + 100k aggregate advancing together, then
+promote / demote / save / load / return). It exits non-zero if any check fails.
+
+Representative Release results (seed 42, 100 simulation years):
+
+| Scenario | elapsed_ms | start pop | end pop | per-person daily updates |
+| --- | --- | --- | --- | --- |
+| `detailed_200` | 8,451 | 200 | 433 | 12,987,795 |
+| `aggregate_10000` | 37 | 10,000 | 104,839 | 0 |
+| `aggregate_100000` | 105 | 100,000 | 762,874 | 0 |
+
+The zero per-person update counts are the load-bearing evidence that aggregate settlements run
+their own execution path rather than the detailed person loops.
+
 To print recent canonical simulation events from the run:
 
 ```bash
