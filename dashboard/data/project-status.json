@@ -159,6 +159,12 @@
   ],
   "recent_verified_commits": [
     {
+      "hash": "ffde014",
+      "date": "2026-08-29",
+      "summary": "Complete Milestone 4 simulation LOD with real aggregate execution",
+      "verified": true
+    },
+    {
       "hash": "c21f610",
       "date": "2026-08-28",
       "summary": "Complete Milestone 3 work allocation and production-chain closeout",
