@@ -4,6 +4,12 @@ Headless simulation core for a procedural, physically grounded civilization-to-m
 
 The project deliberately starts without Unreal Engine. The initial objective is to prove deterministic world generation, population dynamics, persistent history, simulation level-of-detail, and AI-agent integration independently of rendering.
 
+## Browser renderer MVP
+
+An initial PlayCanvas + TypeScript web client vertical slice is available as a renderer/inspection layer over native C++ simulation.
+
+See `docs/PLAYCANVAS_WEB_CLIENT.md` for architecture, run commands, protocol, and extension rules.
+
 ## Current milestone
 
 **Milestone 3 complete: deterministic economy and settlement growth foundation (stopping before Milestone 4)**

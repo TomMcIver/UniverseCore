@@ -1,0 +1,20 @@
+{
+  "name": "universecore-web-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "bridge": "node server/ws-bridge.mjs"
+  },
+  "dependencies": {
+    "playcanvas": "^2.12.2",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2",
+    "vite": "^7.1.3"
+  }
+}

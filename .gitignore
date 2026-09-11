@@ -16,6 +16,11 @@
 # Windows
 Thumbs.db
 
+# Web client artifacts
+apps/web-client/node_modules/
+apps/web-client/dist/
+apps/web-client/*.tsbuildinfo
+
 # Generated simulation outputs
 *.simstate
 *.snapshot

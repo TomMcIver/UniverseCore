@@ -1,0 +1,93 @@
+html,
+body,
+#app {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  background: #0a0e14;
+  color: #d6deeb;
+  font-family: Inter, Segoe UI, Arial, sans-serif;
+}
+
+.layout {
+  display: grid;
+  grid-template-rows: 48px 1fr 132px;
+  height: 100%;
+}
+
+.topbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 12px;
+  background: rgba(15, 20, 30, 0.95);
+  border-bottom: 1px solid #1f2a3a;
+}
+
+.topbar button {
+  background: #192338;
+  color: #d6deeb;
+  border: 1px solid #2f3f58;
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.content {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  min-height: 0;
+}
+
+#viewport {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.inspector {
+  background: rgba(15, 20, 30, 0.95);
+  border-left: 1px solid #1f2a3a;
+  padding: 10px;
+  overflow: auto;
+}
+
+.events {
+  background: rgba(15, 20, 30, 0.95);
+  border-top: 1px solid #1f2a3a;
+  font-size: 12px;
+  overflow: auto;
+  padding: 8px 10px;
+}
+
+.event-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  margin: 0 0 4px;
+  border: 1px solid #2a3850;
+  border-radius: 6px;
+  background: #162133;
+  color: #d6deeb;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.debug {
+  position: absolute;
+  right: 332px;
+  top: 56px;
+  width: 260px;
+  background: rgba(0, 0, 0, 0.82);
+  color: #95e1ff;
+  border: 1px solid #2f3f58;
+  border-radius: 8px;
+  padding: 8px;
+  font-size: 12px;
+  display: grid;
+  gap: 4px;
+}
+
+.hidden {
+  display: none;
+}
