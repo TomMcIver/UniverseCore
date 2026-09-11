@@ -33,8 +33,12 @@ target_link_libraries(universe_sim PRIVATE universe_core)
 add_executable(universe_lod_benchmark src/lod_benchmark.cpp)
 target_link_libraries(universe_lod_benchmark PRIVATE universe_core)
 
+add_executable(universe_ui_bridge src/ui_bridge_main.cpp)
+target_link_libraries(universe_ui_bridge PRIVATE universe_ui_support)
+
 add_library(universe_ui_support
     src/ui/simulation_controller.cpp
+    src/ui/web_protocol.cpp
 )
 
 target_include_directories(universe_ui_support
@@ -105,6 +109,11 @@ if(UNIVERSECORE_BUILD_TESTS)
     target_link_libraries(universe_core_tests_fast PRIVATE universe_core)
     add_test(NAME universe_core_tests_fast COMMAND universe_core_tests_fast)
     set_tests_properties(universe_core_tests_fast PROPERTIES LABELS "fast")
+
+    add_executable(universe_ui_protocol_tests tests/ui_protocol_tests.cpp)
+    target_link_libraries(universe_ui_protocol_tests PRIVATE universe_ui_support)
+    add_test(NAME universe_ui_protocol_tests COMMAND universe_ui_protocol_tests)
+    set_tests_properties(universe_ui_protocol_tests PROPERTIES LABELS "fast")
 
     add_executable(universe_core_tests_integration tests/integration_tests.cpp)
     target_link_libraries(universe_core_tests_integration PRIVATE universe_core)

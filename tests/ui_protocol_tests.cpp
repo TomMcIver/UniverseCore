@@ -1,0 +1,110 @@
+#include "universe/ui/simulation_controller.hpp"
+#include "universe/ui/web_protocol.hpp"
+
+#include <cstdint>
+#include <iostream>
+#include <optional>
+#include <string>
+
+namespace {
+
+bool test_parse_known_command() {
+    std::string error;
+    const auto command = universe::ui::parse_client_command("{\"type\":\"pause\"}", error);
+    return command.has_value() && command->type == universe::ui::ClientCommandType::Pause;
+}
+
+bool test_reject_unknown_command() {
+    std::string error;
+    const auto command = universe::ui::parse_client_command("{\"type\":\"nope\"}", error);
+    return !command.has_value() && !error.empty();
+}
+
+bool test_reject_bad_speed() {
+    std::string error;
+    const auto command = universe::ui::parse_client_command("{\"type\":\"set_speed\",\"speed\":0}", error);
+    return !command.has_value() && error == "Invalid speed";
+}
+
+bool test_parse_entity_details_command() {
+    std::string error;
+    const auto command = universe::ui::parse_client_command(
+        "{\"type\":\"request_entity_details\",\"entityId\":42}",
+        error);
+    return command.has_value() &&
+        command->type == universe::ui::ClientCommandType::RequestEntityDetails &&
+        command->entity_id == 42U;
+}
+
+bool test_snapshot_is_read_only() {
+    universe::ui::SimulationController controller{universe::SimulationConfig{.seed = 42, .initial_population = 200}};
+    const auto before = controller.summary();
+    const auto snapshot_a = universe::ui::build_world_snapshot(controller);
+    const auto snapshot_b = universe::ui::build_world_snapshot(controller);
+    const auto after = controller.summary();
+
+    if (before.year != after.year || before.population != after.population || before.births != after.births || before.deaths != after.deaths) {
+        return false;
+    }
+
+    if (snapshot_a.tick != snapshot_b.tick || snapshot_a.population != snapshot_b.population) {
+        return false;
+    }
+
+    if (snapshot_a.agents.empty() || snapshot_b.agents.empty()) {
+        return false;
+    }
+
+    return snapshot_a.agents.front().id == snapshot_b.agents.front().id;
+}
+
+bool test_protocol_version_in_message() {
+    const auto hello = universe::ui::make_hello_message(1U);
+    return hello.find("\"protocolVersion\":1") != std::string::npos;
+}
+
+bool test_determinism_with_observer_idle() {
+    universe::Simulation baseline{universe::SimulationConfig{.seed = 42, .initial_population = 200}};
+    universe::Simulation observed{universe::SimulationConfig{.seed = 42, .initial_population = 200}};
+    universe::ui::SimulationController observer_controller{universe::SimulationConfig{.seed = 42, .initial_population = 200}};
+
+    for (std::uint32_t day = 0; day < 720U; ++day) {
+        baseline.advance(universe::days(1));
+        observed.advance(universe::days(1));
+        observer_controller.advance_days(1);
+        static_cast<void>(universe::ui::build_world_snapshot(observer_controller));
+    }
+
+    const auto baseline_snapshot = baseline.save_snapshot();
+    const auto observed_snapshot = observed.save_snapshot();
+    const auto observer_snapshot = observer_controller.simulation().save_snapshot();
+
+    const auto baseline_hash = universe::snapshot_hash64(baseline_snapshot);
+    const auto observed_hash = universe::snapshot_hash64(observed_snapshot);
+    const auto observer_hash = universe::snapshot_hash64(observer_snapshot);
+
+    std::cout << "UI_DETERMINISM_A_BASELINE_HASH=" << baseline_hash << '\n';
+    std::cout << "UI_DETERMINISM_B_CONNECTED_IDLE_HASH=" << observer_hash << '\n';
+
+    return baseline_hash == observed_hash && baseline_hash == observer_hash;
+}
+
+}  // namespace
+
+int main() {
+    const bool ok =
+        test_parse_known_command() &&
+        test_reject_unknown_command() &&
+        test_reject_bad_speed() &&
+        test_parse_entity_details_command() &&
+        test_snapshot_is_read_only() &&
+        test_protocol_version_in_message() &&
+        test_determinism_with_observer_idle();
+
+    if (!ok) {
+        std::cerr << "ui protocol tests failed\n";
+        return 1;
+    }
+
+    return 0;
+}
