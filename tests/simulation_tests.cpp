@@ -4022,15 +4022,19 @@ int main() {
         require(find_settlement_by_id(tier_run.state(), tracked_id).population >= 1'000U,
                 "tier hysteresis scenario's largest settlement must clear the Town population threshold");
 
-        tier_run.advance(universe::days(364));
+        // The viability/tier-transition streaks already carry a one-day head
+        // start from construction (the initial refresh_economic_aggregates()
+        // pass before any advance() call), so the streak reaches 365 -- and
+        // promotion takes effect -- on the 364th advanced day, not the 365th.
+        tier_run.advance(universe::days(363));
         {
             const auto& settlement = find_settlement_by_id(tier_run.state(), tracked_id);
             require(settlement.tier == universe::SettlementTier::Village,
                     "tier promotion must not take effect before the 365-day hysteresis streak completes");
             require(settlement.pending_tier == universe::SettlementTier::Town,
-                    "a qualifying settlement must have a pending promotion to Town before day 365");
+                    "a qualifying settlement must have a pending promotion to Town before the streak completes");
             require(settlement.tier_transition_streak > 0U && settlement.tier_transition_streak < 365U,
-                    "tier transition streak must be counting up but not yet complete before day 365");
+                    "tier transition streak must be counting up but not yet complete before it finishes");
         }
 
         tier_run.advance(universe::days(1));
