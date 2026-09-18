@@ -2,6 +2,7 @@ class_name WorldView
 extends Node3D
 
 const UniverseProtocol := preload("res://scripts/net/universe_protocol.gd")
+const BuildingAssets := preload("res://scripts/world/building_assets.gd")
 
 ## Renders UniverseCore's authoritative world state as placeholder geometry.
 ## Ticket #15 scope: full replace on every snapshot (both initial_snapshot
@@ -69,39 +70,25 @@ func _clear_all() -> void:
 	_building_data.clear()
 
 func _spawn_agent(agent: Dictionary) -> void:
-	var body := CSGCylinder3D.new()
-	body.radius = 0.35
-	body.height = 1.7
-	var material := StandardMaterial3D.new()
-	material.albedo_color = Color(0.55, 0.35, 0.4) if agent.get("sex", "Female") == "Female" else Color(0.3, 0.25, 0.2)
-	body.material = material
+	var visual := BuildingAssets.make_person(str(agent.get("sex", "Female")))
 
 	var id := int(agent.get("id", 0))
-	var area := _make_pickable_area("agent", id, body, Vector3(0.7, 1.7, 0.7))
+	var area := _make_pickable_area("agent", id, visual, Vector3(1.0, 1.8, 0.7))
 	area.position = UniverseProtocol.position_from(agent)
 	add_child(area)
 	_agent_nodes[id] = area
 
 func _spawn_settlement(settlement: Dictionary) -> void:
-	var marker := CSGCylinder3D.new()
-	marker.radius = 1.5
-	marker.height = 0.2
+	var marker := BuildingAssets.make_settlement_marker()
 	marker.position = UniverseProtocol.position_from(settlement)
-	var material := StandardMaterial3D.new()
-	material.albedo_color = Color(0.6, 0.55, 0.35)
-	marker.material = material
 	add_child(marker)
 	_settlement_nodes[int(settlement.get("id", 0))] = marker
 
 func _spawn_building(building: Dictionary) -> void:
-	var box := CSGBox3D.new()
-	box.size = Vector3(3.0, 3.2, 3.0)
-	var material := StandardMaterial3D.new()
-	material.albedo_color = Color(0.55, 0.47, 0.37)
-	box.material = material
+	var visual := BuildingAssets.make_building(str(building.get("type", "Dwelling")))
 
 	var id := int(building.get("id", 0))
-	var area := _make_pickable_area("building", id, box, Vector3(3.0, 3.2, 3.0))
+	var area := _make_pickable_area("building", id, visual, Vector3(2.5, 3.2, 2.5))
 	area.position = UniverseProtocol.position_from(building)
 	add_child(area)
 	_building_nodes[id] = area

@@ -13,6 +13,7 @@ const InspectorPanelScript := preload("res://scripts/ui/inspector_panel.gd")
 const EventLogScript := preload("res://scripts/ui/event_log.gd")
 const TerrainGeneratorScript := preload("res://scripts/terrain_generator.gd")
 const OrbitCameraScript := preload("res://scripts/orbit_camera.gd")
+const DayNight := preload("res://scripts/world/day_night.gd")
 
 var _client: Node
 var _world_view: Node3D
@@ -20,6 +21,8 @@ var _hud: Control
 var _inspector: PanelContainer
 var _event_log: PanelContainer
 var _terrain: MeshInstance3D
+var _sun: DirectionalLight3D
+var _world_environment: WorldEnvironment
 
 func _ready() -> void:
 	_setup_environment()
@@ -114,19 +117,19 @@ func _setup_environment() -> void:
 	environment.fog_density = 0.01
 	environment.fog_sun_scatter = 0.2
 
-	var world_environment := WorldEnvironment.new()
-	world_environment.name = "WorldEnvironment"
-	world_environment.environment = environment
-	add_child(world_environment)
+	_world_environment = WorldEnvironment.new()
+	_world_environment.name = "WorldEnvironment"
+	_world_environment.environment = environment
+	add_child(_world_environment)
 
 func _setup_sun() -> void:
-	var sun := DirectionalLight3D.new()
-	sun.name = "Sun"
-	sun.rotation_degrees = Vector3(-55.0, -35.0, 0.0)
-	sun.light_energy = 1.1
-	sun.light_color = Color(1.0, 0.95, 0.85)
-	sun.shadow_enabled = true
-	add_child(sun)
+	_sun = DirectionalLight3D.new()
+	_sun.name = "Sun"
+	_sun.rotation_degrees = Vector3(-55.0, -35.0, 0.0)
+	_sun.light_energy = 1.1
+	_sun.light_color = Color(1.0, 0.95, 0.85)
+	_sun.shadow_enabled = true
+	add_child(_sun)
 
 func _setup_terrain() -> void:
 	_terrain = MeshInstance3D.new()
@@ -140,6 +143,13 @@ func _setup_camera() -> void:
 	camera.set_script(OrbitCameraScript)
 	camera.current = true
 	add_child(camera)
+
+func _apply_day_night(tick: int) -> void:
+	var lighting := DayNight.sample(tick)
+	_sun.light_color = lighting.sun_color
+	_sun.light_energy = lighting.sun_energy
+	_world_environment.environment.ambient_light_energy = lighting.ambient_energy
+	_world_environment.environment.fog_light_color = lighting.fog_color
 
 func _on_connected() -> void:
 	_hud.set_connection_status("Connected")
@@ -158,14 +168,13 @@ func _on_message_received(message: Dictionary) -> void:
 		"initial_snapshot", "world_delta":
 			_world_view.apply_snapshot(payload)
 			_terrain.generate_from_regions(payload.get("regions", []), payload.get("settlements", []))
-			_hud.set_world_info(
-				int(payload.get("year", 0)),
-				int(message.get("tick", 0)),
-				int(payload.get("population", 0))
-			)
+			var tick := int(message.get("tick", 0))
+			_apply_day_night(tick)
+			_hud.set_world_info(int(payload.get("year", 0)), tick, int(payload.get("population", 0)))
 		"simulation_status":
 			var paused: bool = payload.get("paused", true)
 			var speed: int = int(payload.get("speed", 1))
+			_apply_day_night(int(message.get("tick", 0)))
 			_hud.set_connection_status("Connected -- %s (%dx)" % ["Paused" if paused else "Running", speed])
 		"entity_details":
 			_inspector.show_agent_details(payload)

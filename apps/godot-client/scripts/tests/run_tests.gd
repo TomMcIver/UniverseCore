@@ -7,6 +7,7 @@ const FakeSocket := preload("res://scripts/tests/fake_socket.gd")
 const InspectorPanel := preload("res://scripts/ui/inspector_panel.gd")
 const EventLog := preload("res://scripts/ui/event_log.gd")
 const TerrainGenerator := preload("res://scripts/terrain_generator.gd")
+const DayNight := preload("res://scripts/world/day_night.gd")
 
 ## Minimal headless test runner for the Godot client's pure/testable seams
 ## (UniverseProtocol encode/decode, WorldView spawn/replace logic).
@@ -51,6 +52,8 @@ func _initialize() -> void:
 	_run_test("terrain derives region centers from settlement positions", Callable(self, "_test_terrain_region_centers_from_settlements"))
 	_run_test("terrain height/color genuinely differ between environment classes", Callable(self, "_test_terrain_sample_varies_by_class"))
 	_run_test("terrain color reflects wild-food richness within the same class", Callable(self, "_test_terrain_sample_richness_affects_color"))
+	_run_test("day_night is brightest at midday and dimmest at midnight", Callable(self, "_test_day_night_midday_vs_midnight"))
+	_run_test("day_night wraps correctly across multiple simulated days", Callable(self, "_test_day_night_wraps_across_days"))
 
 	print("\n%d/%d tests passed" % [_total - _failures, _total])
 	quit(1 if _failures > 0 else 0)
@@ -296,3 +299,22 @@ func _test_terrain_sample_richness_affects_color() -> void:
 	var poor: Dictionary = terrain._region_driven_sample({"environmentClass": "Woodland", "wildFoodCapacity": 100, "wildFoodStock": 0}, 1.0)
 	_assert_eq(rich.color != poor.color, true, "wild food richness should affect color even within the same environment class")
 	_assert_eq(rich.height, poor.height, "richness should not affect height, only color")
+
+func _test_day_night_midday_vs_midnight() -> void:
+	var midday_tick := 0
+	var midnight_tick := DayNight.DAY_TICKS / 2
+	var midday := DayNight.sample(midday_tick)
+	var midnight := DayNight.sample(midnight_tick)
+	_assert_eq(midday.sun_energy > midnight.sun_energy, true, "midday should be brighter than midnight")
+	_assert_eq(midday.ambient_energy > midnight.ambient_energy, true, "midday ambient should be brighter than midnight")
+	_assert_eq(DayNight.daylight_amount(midday_tick) > 0.99, true, "midday daylight amount should be ~1.0")
+	_assert_eq(DayNight.daylight_amount(midnight_tick) < 0.01, true, "midnight daylight amount should be ~0.0")
+
+func _test_day_night_wraps_across_days() -> void:
+	var tick_day_3_midday := DayNight.DAY_TICKS * 3 + DayNight.DAY_TICKS / 2
+	var tick_day_0_midday := DayNight.DAY_TICKS / 2
+	_assert_eq(
+		is_equal_approx(DayNight.daylight_amount(tick_day_3_midday), DayNight.daylight_amount(tick_day_0_midday)),
+		true,
+		"the same time-of-day should read the same daylight amount regardless of which day it falls on"
+	)

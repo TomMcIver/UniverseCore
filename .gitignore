@@ -21,6 +21,10 @@ apps/web-client/node_modules/
 apps/web-client/dist/
 apps/web-client/*.tsbuildinfo
 
+# Godot client editor cache (regenerated locally; .import/.uid files are
+# still committed since Godot expects those alongside their source assets)
+apps/godot-client/.godot/
+
 # Generated simulation outputs
 *.simstate
 *.snapshot
