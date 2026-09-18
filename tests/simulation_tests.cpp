@@ -4112,6 +4112,8 @@ int main() {
         };
 
         const auto members_before = total_alive_members(merge_run.state());
+        const auto births_before = merge_run.state().total_births;
+        const auto deaths_before = merge_run.state().total_deaths;
 
         // At this world scale, settlements only drift close enough together
         // (and both hold a sustained enough viability streak) to qualify for
@@ -4139,8 +4141,12 @@ int main() {
         require(merge_events > 0U, "close, sustained-viability settlements must eventually merge");
 
         verify_settlement_invariants(merge_run.state());
-        require(total_alive_members(merge_run.state()) == members_before,
-                "merging must not lose or duplicate any living household member");
+        const auto births_during_run = merge_run.state().total_births - births_before;
+        const auto deaths_during_run = merge_run.state().total_deaths - deaths_before;
+        const auto expected_members_after =
+            members_before + births_during_run - static_cast<std::uint64_t>(deaths_during_run);
+        require(total_alive_members(merge_run.state()) == expected_members_after,
+                "merging must not lose or duplicate any living household member beyond ordinary births/deaths");
 
         // Viability exclusion: every absorbed settlement must have actually held
         // the required sustained viability streak (>= 365 days) at merge time --
