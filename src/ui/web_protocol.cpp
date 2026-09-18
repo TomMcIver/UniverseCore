@@ -256,29 +256,99 @@ WorldSnapshotView build_world_snapshot(const SimulationController& controller) {
     // logic with no real geographic simulation behind it; a genuinely
     // better answer would give regions/settlements real positions in
     // UniverseCore itself, which is a larger change than this pass.
-    snapshot.settlements.reserve(settlements.size());
+    //
+    // Within a region, settlements are placed with Poisson-disc-style
+    // rejection sampling (try a deterministic sequence of candidate spots,
+    // widening the search radius each attempt, accept the first one far
+    // enough from every settlement already placed in this region) rather
+    // than independent random placement -- which had no minimum-distance
+    // enforcement at all and could, and did, place two settlements (and
+    // therefore their buildings) close enough to visibly overlap.
+    std::unordered_map<RegionId, std::vector<const Settlement*>> settlements_by_region;
+    settlements_by_region.reserve(settlements.size());
     for (const auto& settlement : settlements) {
-        const auto region_angle_hash = stable_mix64(settlement.region_id * 0x2545F4914F6CDD1DULL);
-        const auto region_radius_hash = stable_mix64(settlement.region_id * 0x9E3779B97F4A7C15ULL);
+        settlements_by_region[settlement.region_id].push_back(&settlement);
+    }
+    for (auto& region_entry : settlements_by_region) {
+        std::sort(region_entry.second.begin(), region_entry.second.end(), [](const Settlement* lhs, const Settlement* rhs) {
+            return lhs->id < rhs->id;
+        });
+    }
+
+    constexpr float min_settlement_distance = 14.0F;
+    constexpr int max_placement_attempts = 24;
+    constexpr float settlement_golden_angle_radians = 2.39996323F;
+
+    snapshot.settlements.reserve(settlements.size());
+    for (const auto& region_entry : settlements_by_region) {
+        const auto region_id = region_entry.first;
+        const auto region_angle_hash = stable_mix64(region_id * 0x2545F4914F6CDD1DULL);
+        const auto region_radius_hash = stable_mix64(region_id * 0x9E3779B97F4A7C15ULL);
         const auto region_angle = normalized01(region_angle_hash) * 6.28318530718F;
         const auto region_radius = 45.0F + (normalized01(region_radius_hash) * 70.0F);
         const auto region_center_x = std::cos(region_angle) * region_radius;
         const auto region_center_z = std::sin(region_angle) * region_radius;
 
-        const auto local_angle_hash = stable_mix64(settlement.id * 0xBF58476D1CE4E5B9ULL);
-        const auto local_radius_hash = stable_mix64(settlement.id * 0x94D049BB133111EBULL);
-        const auto local_angle = normalized01(local_angle_hash) * 6.28318530718F;
-        const auto local_radius = 6.0F + (normalized01(local_radius_hash) * 16.0F);
+        std::vector<std::pair<float, float>> placed_local_positions;
+        placed_local_positions.reserve(region_entry.second.size());
 
-        snapshot.settlements.push_back(SettlementRenderView{
-            .id = settlement.id,
-            .region_id = settlement.region_id,
-            .active = settlement.active,
-            .access_share_points = settlement.access_share_points,
-            .x = region_center_x + (std::cos(local_angle) * local_radius),
-            .y = 0.0F,
-            .z = region_center_z + (std::sin(local_angle) * local_radius),
-        });
+        for (const auto* settlement : region_entry.second) {
+            float chosen_x = 0.0F;
+            float chosen_z = 0.0F;
+            bool placed = false;
+
+            for (int attempt = 0; attempt < max_placement_attempts; ++attempt) {
+                const auto attempt_salt = static_cast<std::uint64_t>(attempt);
+                const auto local_angle_hash = stable_mix64((settlement->id * 0xBF58476D1CE4E5B9ULL) ^ attempt_salt);
+                const auto local_radius_hash = stable_mix64((settlement->id * 0x94D049BB133111EBULL) ^ attempt_salt);
+                const auto local_angle = normalized01(local_angle_hash) * 6.28318530718F;
+                const auto local_radius = 6.0F +
+                    (normalized01(local_radius_hash) * (16.0F + (static_cast<float>(attempt) * 3.0F)));
+                const auto candidate_x = std::cos(local_angle) * local_radius;
+                const auto candidate_z = std::sin(local_angle) * local_radius;
+
+                bool far_enough = true;
+                for (const auto& placed_position : placed_local_positions) {
+                    const auto dx = candidate_x - placed_position.first;
+                    const auto dz = candidate_z - placed_position.second;
+                    if (((dx * dx) + (dz * dz)) < (min_settlement_distance * min_settlement_distance)) {
+                        far_enough = false;
+                        break;
+                    }
+                }
+
+                if (far_enough) {
+                    chosen_x = candidate_x;
+                    chosen_z = candidate_z;
+                    placed = true;
+                    break;
+                }
+            }
+
+            if (!placed) {
+                // Deterministic fallback if a crowded region exhausts every
+                // attempt: push it out along a golden-angle spiral by
+                // placement order, which still guarantees separation
+                // instead of silently accepting the last rejected spot.
+                const auto index = static_cast<float>(placed_local_positions.size());
+                const auto angle = index * settlement_golden_angle_radians;
+                const auto radius = 20.0F + (std::sqrt(index) * 8.0F);
+                chosen_x = std::cos(angle) * radius;
+                chosen_z = std::sin(angle) * radius;
+            }
+
+            placed_local_positions.emplace_back(chosen_x, chosen_z);
+
+            snapshot.settlements.push_back(SettlementRenderView{
+                .id = settlement->id,
+                .region_id = settlement->region_id,
+                .active = settlement->active,
+                .access_share_points = settlement->access_share_points,
+                .x = region_center_x + chosen_x,
+                .y = 0.0F,
+                .z = region_center_z + chosen_z,
+            });
+        }
     }
 
     std::unordered_map<SettlementId, SettlementRenderView> settlement_view_by_id;
