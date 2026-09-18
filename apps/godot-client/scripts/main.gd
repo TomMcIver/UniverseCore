@@ -9,12 +9,16 @@ const UniverseClientScript := preload("res://scripts/net/universe_client.gd")
 const UniverseProtocol := preload("res://scripts/net/universe_protocol.gd")
 const WorldViewScript := preload("res://scripts/world/world_view.gd")
 const HudScript := preload("res://scripts/ui/hud.gd")
+const InspectorPanelScript := preload("res://scripts/ui/inspector_panel.gd")
+const EventLogScript := preload("res://scripts/ui/event_log.gd")
 const TerrainGeneratorScript := preload("res://scripts/terrain_generator.gd")
 const OrbitCameraScript := preload("res://scripts/orbit_camera.gd")
 
 var _client: Node
 var _world_view: Node3D
 var _hud: Control
+var _inspector: PanelContainer
+var _event_log: PanelContainer
 
 func _ready() -> void:
 	_setup_environment()
@@ -30,6 +34,18 @@ func _ready() -> void:
 	_hud.name = "Hud"
 	_hud.set_anchors_preset(Control.PRESET_FULL_RECT)
 	add_child(_hud)
+
+	_inspector = InspectorPanelScript.new()
+	_inspector.name = "Inspector"
+	_inspector.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	_inspector.position = Vector2(-232, 12)
+	_hud.add_child(_inspector)
+
+	_event_log = EventLogScript.new()
+	_event_log.name = "EventLog"
+	_event_log.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	_event_log.position = Vector2(12, -172)
+	_hud.add_child(_event_log)
 
 	_client = UniverseClientScript.new()
 	_client.name = "UniverseClient"
@@ -54,6 +70,18 @@ func _ready() -> void:
 	var dir_env := OS.get_environment("UNIVERSECORE_SCREENSHOT_DIR")
 	if schedule_env != "" and dir_env != "":
 		_run_screenshot_schedule(schedule_env, dir_env)
+
+	# Debug/verification only, env-var gated: simulate a click at a fixed
+	# screen point without a real mouse, so the full pick -> request ->
+	# inspector round trip can be captured in a screenshot. "x,y,delay".
+	var debug_click_env := OS.get_environment("UNIVERSECORE_DEBUG_CLICK")
+	if debug_click_env != "":
+		_run_debug_click(debug_click_env)
+
+func _run_debug_click(debug_click_env: String) -> void:
+	var parts := debug_click_env.split(",")
+	await get_tree().create_timer(float(parts[2])).timeout
+	_handle_click(Vector2(float(parts[0]), float(parts[1])))
 
 func _run_screenshot_schedule(schedule_env: String, dir: String) -> void:
 	var previous_seconds := 0.0
@@ -137,7 +165,42 @@ func _on_message_received(message: Dictionary) -> void:
 			var paused: bool = payload.get("paused", true)
 			var speed: int = int(payload.get("speed", 1))
 			_hud.set_connection_status("Connected -- %s (%dx)" % ["Paused" if paused else "Running", speed])
+		"entity_details":
+			_inspector.show_agent_details(payload)
+		"world_event":
+			_event_log.append_event(payload)
 		"error":
 			push_warning("UniverseCore error: %s" % payload.get("message", "unknown"))
 		_:
 			pass
+
+func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
+		_handle_click(event.position)
+
+func _handle_click(screen_position: Vector2) -> void:
+	var camera := get_viewport().get_camera_3d()
+	if camera == null:
+		return
+
+	var from := camera.project_ray_origin(screen_position)
+	var to := from + camera.project_ray_normal(screen_position) * 1000.0
+	var query := PhysicsRayQueryParameters3D.create(from, to)
+	query.collide_with_areas = true
+	query.collide_with_bodies = false
+
+	var result := get_world_3d().direct_space_state.intersect_ray(query)
+	if result.is_empty():
+		return
+
+	var collider = result.get("collider")
+	if collider == null or not collider.has_meta("entity_type"):
+		return
+
+	var entity_type: String = collider.get_meta("entity_type")
+	var entity_id: int = int(collider.get_meta("entity_id"))
+
+	if entity_type == "agent":
+		_client.send_command(UniverseProtocol.command_request_entity_details(entity_id))
+	elif entity_type == "building":
+		_inspector.show_building_details(_world_view.building_data(entity_id))

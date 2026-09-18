@@ -4,6 +4,8 @@ const UniverseProtocol := preload("res://scripts/net/universe_protocol.gd")
 const WorldView := preload("res://scripts/world/world_view.gd")
 const UniverseClient := preload("res://scripts/net/universe_client.gd")
 const FakeSocket := preload("res://scripts/tests/fake_socket.gd")
+const InspectorPanel := preload("res://scripts/ui/inspector_panel.gd")
+const EventLog := preload("res://scripts/ui/event_log.gd")
 
 ## Minimal headless test runner for the Godot client's pure/testable seams
 ## (UniverseProtocol encode/decode, WorldView spawn/replace logic).
@@ -39,6 +41,11 @@ func _initialize() -> void:
 	_run_test("send_command succeeds and reaches the socket while connected", Callable(self, "_test_send_command_while_connected"))
 	_run_test("client reconnects after the retry interval elapses while closed", Callable(self, "_test_client_reconnects_after_interval"))
 	_run_test("client emits disconnected exactly once when the connection drops", Callable(self, "_test_client_emits_disconnected_once"))
+	_run_test("world_view spawns agents/buildings as pickable areas with entity metadata", Callable(self, "_test_world_view_pickable_metadata"))
+	_run_test("world_view exposes raw building data for the inspector (no server round trip)", Callable(self, "_test_world_view_building_data"))
+	_run_test("inspector panel formats agent details", Callable(self, "_test_inspector_agent_details"))
+	_run_test("inspector panel formats building details", Callable(self, "_test_inspector_building_details"))
+	_run_test("event log appends and counts entries", Callable(self, "_test_event_log_append"))
 
 	print("\n%d/%d tests passed" % [_total - _failures, _total])
 	quit(1 if _failures > 0 else 0)
@@ -186,3 +193,70 @@ func _test_client_emits_disconnected_once() -> void:
 	client._process(0.5)
 	client._process(0.5)
 	_assert_eq(disconnect_count[0], 1)
+
+func _test_world_view_pickable_metadata() -> void:
+	var view := WorldView.new()
+	root.add_child(view)
+	view.apply_snapshot({
+		"agents": [{"id": 5, "sex": "Male", "position": {"x": 1.0, "y": 0.9, "z": 2.0}}],
+		"settlements": [],
+		"buildings": [{"id": 9, "type": "Granary", "state": "Complete", "position": {"x": 3.0, "y": 0.0, "z": 4.0}}],
+	})
+	var agent_area: Area3D = view.get_child(0)
+	_assert_eq(agent_area.get_meta("entity_type"), "agent")
+	_assert_eq(int(agent_area.get_meta("entity_id")), 5)
+	var building_area: Area3D = view.get_child(1)
+	_assert_eq(building_area.get_meta("entity_type"), "building")
+	_assert_eq(int(building_area.get_meta("entity_id")), 9)
+	view.queue_free()
+
+func _test_world_view_building_data() -> void:
+	var view := WorldView.new()
+	root.add_child(view)
+	view.apply_snapshot({
+		"agents": [],
+		"settlements": [],
+		"buildings": [{"id": 9, "type": "Granary", "state": "Complete", "progress": 1.0, "position": {}}],
+	})
+	_assert_eq(view.building_data(9).get("type"), "Granary")
+	_assert_eq(view.building_data(404), {})
+	view.queue_free()
+
+func _test_inspector_agent_details() -> void:
+	var inspector := InspectorPanel.new()
+	root.add_child(inspector)
+	inspector.show_agent_details({
+		"id": 1, "age": 34, "sex": "Female", "occupation": "SubsistenceCultivator",
+		"alive": true, "householdId": 1, "settlementId": 4, "regionId": 2,
+		"nutrition": 820, "health": 877, "memoryCount": 0, "knowledgeCount": 0,
+		"family": {"motherId": 0, "fatherId": 0},
+		"settlement": {"active": true, "accessSharePoints": 4082},
+	})
+	var text: String = inspector._content.text
+	_assert_eq(text.find("ID: 1") >= 0, true, "expected ID line")
+	_assert_eq(text.find("Age: 34") >= 0, true, "expected Age line")
+	_assert_eq(text.find("Mother: Unavailable") >= 0, true, "zero mother id should read Unavailable")
+	inspector.queue_free()
+
+func _test_inspector_building_details() -> void:
+	var inspector := InspectorPanel.new()
+	root.add_child(inspector)
+	inspector.show_building_details({
+		"id": 9, "type": "Granary", "state": "Complete", "progress": 1.0,
+		"settlementId": 4, "regionId": 2, "settlementCommonsOwned": true, "ownerHouseholdId": 0,
+	})
+	var text: String = inspector._content.text
+	_assert_eq(text.find("Type: Granary") >= 0, true, "expected Type line")
+	_assert_eq(text.find("Progress: 100%") >= 0, true, "expected Progress line")
+	_assert_eq(text.find("Owner household: None") >= 0, true, "zero owner id should read None")
+	inspector.queue_free()
+
+func _test_event_log_append() -> void:
+	var log := EventLog.new()
+	root.add_child(log)
+	_assert_eq(log.entry_count(), 0)
+	log.append_event({"eventType": "Birth", "entityId": 42})
+	_assert_eq(log.entry_count(), 1)
+	log.append_event({"eventType": "SettlementFounded"})
+	_assert_eq(log.entry_count(), 2)
+	log.queue_free()

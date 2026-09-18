@@ -15,7 +15,7 @@ var _status_label: Label
 var _world_label: Label
 var _feedback_label: Label
 
-func _ready() -> void:
+func _init() -> void:
 	var panel := PanelContainer.new()
 	panel.set_anchors_preset(Control.PRESET_TOP_LEFT)
 	panel.position = Vector2(12, 12)
