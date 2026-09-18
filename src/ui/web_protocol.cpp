@@ -238,34 +238,46 @@ WorldSnapshotView build_world_snapshot(const SimulationController& controller) {
         household_by_id.emplace(household.id, &household);
     }
 
-    std::unordered_map<SettlementId, std::uint64_t> settlement_order_index;
-    settlement_order_index.reserve(settlements.size());
-    std::uint64_t settlement_slot = 0;
-    for (const auto& settlement : settlements) {
-        settlement_order_index.emplace(settlement.id, settlement_slot);
-        ++settlement_slot;
-    }
-
     WorldSnapshotView snapshot{};
     snapshot.tick = static_cast<std::uint64_t>(summary.time.ticks < 0 ? 0 : summary.time.ticks);
     snapshot.year = summary.year;
     snapshot.population = summary.population;
 
+    // Presentation-only placement (this is the universe::ui adapter layer,
+    // not canonical simulation state -- UniverseCore has no geographic
+    // coordinate system for regions/settlements yet). Previously every
+    // settlement sat on one uniform ring regardless of region, which read
+    // as an obviously artificial perfect circle rather than anything
+    // resembling how settlements actually cluster. Each region instead
+    // gets its own deterministic cluster center (hashed from region_id,
+    // spread widely so regions don't overlap each other), and settlements
+    // scatter locally around their own region's center -- several
+    // separate clusters instead of one ring. Still entirely presentation
+    // logic with no real geographic simulation behind it; a genuinely
+    // better answer would give regions/settlements real positions in
+    // UniverseCore itself, which is a larger change than this pass.
     snapshot.settlements.reserve(settlements.size());
     for (const auto& settlement : settlements) {
-        const auto ring_slot = settlement_order_index[settlement.id] % 24ULL;
-        const auto ring_index = settlement_order_index[settlement.id] / 24ULL;
-        const auto angle = static_cast<float>(ring_slot) * (6.28318530718F / 24.0F);
-        const auto radius = 36.0F + static_cast<float>(ring_index * 16ULL);
+        const auto region_angle_hash = stable_mix64(settlement.region_id * 0x2545F4914F6CDD1DULL);
+        const auto region_radius_hash = stable_mix64(settlement.region_id * 0x9E3779B97F4A7C15ULL);
+        const auto region_angle = normalized01(region_angle_hash) * 6.28318530718F;
+        const auto region_radius = 45.0F + (normalized01(region_radius_hash) * 70.0F);
+        const auto region_center_x = std::cos(region_angle) * region_radius;
+        const auto region_center_z = std::sin(region_angle) * region_radius;
+
+        const auto local_angle_hash = stable_mix64(settlement.id * 0xBF58476D1CE4E5B9ULL);
+        const auto local_radius_hash = stable_mix64(settlement.id * 0x94D049BB133111EBULL);
+        const auto local_angle = normalized01(local_angle_hash) * 6.28318530718F;
+        const auto local_radius = 6.0F + (normalized01(local_radius_hash) * 16.0F);
 
         snapshot.settlements.push_back(SettlementRenderView{
             .id = settlement.id,
             .region_id = settlement.region_id,
             .active = settlement.active,
             .access_share_points = settlement.access_share_points,
-            .x = std::cos(angle) * radius,
+            .x = region_center_x + (std::cos(local_angle) * local_radius),
             .y = 0.0F,
-            .z = std::sin(angle) * radius,
+            .z = region_center_z + (std::sin(local_angle) * local_radius),
         });
     }
 
@@ -332,6 +344,18 @@ WorldSnapshotView build_world_snapshot(const SimulationController& controller) {
         return lhs.id < rhs.id;
     });
 
+    // Buildings within a settlement used to scatter at an independent
+    // random (angle, radius) each -- with no collision avoidance at all,
+    // which visibly placed buildings on top of each other once real
+    // asset models replaced the old placeholder boxes. A golden-angle
+    // spiral (radius grows with sqrt(index), angle advances by the
+    // golden angle each step) is a standard even-spacing technique
+    // (phyllotaxis/sunflower-seed packing) that guarantees increasing
+    // separation between consecutive buildings in the same settlement,
+    // deterministically, with no retry/rejection logic needed.
+    std::unordered_map<SettlementId, std::uint64_t> building_slot_within_settlement;
+    constexpr float golden_angle_radians = 2.39996323F;
+
     snapshot.buildings.reserve(buildings.size());
     for (const auto& building : buildings) {
         const auto settlement_it = settlement_view_by_id.find(building.settlement_id);
@@ -340,10 +364,9 @@ WorldSnapshotView build_world_snapshot(const SimulationController& controller) {
         }
 
         const auto settlement = settlement_it->second;
-        const auto b1 = stable_mix64(building.id * 0xBF58476D1CE4E5B9ULL);
-        const auto b2 = stable_mix64(building.id * 0x9E3779B97F4A7C15ULL);
-        const auto angle = normalized01(b1) * 6.28318530718F;
-        const auto radius = 5.0F + (normalized01(b2) * 7.0F);
+        const auto building_index = building_slot_within_settlement[building.settlement_id]++;
+        const auto angle = static_cast<float>(building_index) * golden_angle_radians;
+        const auto radius = 4.0F + (std::sqrt(static_cast<float>(building_index)) * 3.2F);
         const auto x = settlement.x + (std::cos(angle) * radius);
         const auto z = settlement.z + (std::sin(angle) * radius);
 

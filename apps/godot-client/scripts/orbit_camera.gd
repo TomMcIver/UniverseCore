@@ -17,7 +17,7 @@ extends Camera3D
 @export var zoom_speed: float = 10.0
 @export var key_zoom_speed: float = 15.0
 @export var min_height: float = 8.0
-@export var max_height: float = 60.0
+@export var max_height: float = 120.0
 @export var pitch_degrees: float = -50.0
 
 var _height: float = 28.0

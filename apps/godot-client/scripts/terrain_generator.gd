@@ -28,8 +28,12 @@ extends MeshInstance3D
 ##   settlements; each terrain vertex takes its parameters from whichever
 ##   region center is nearest (a simple Voronoi-style assignment).
 
-@export var width: int = 60
-@export var depth: int = 60
+## 150x150 world units, sized to comfortably cover the region-clustered
+## settlement layout (web_protocol.cpp: region cluster centers up to
+## radius 115, plus up to 22 more local scatter -- ~137 worst case) since
+## the previous fix for settlements being placed on one uniform ring.
+@export var width: int = 150
+@export var depth: int = 150
 @export var cell_size: float = 2.0
 @export var height_scale: float = 4.5
 @export var noise_seed: int = 1337
