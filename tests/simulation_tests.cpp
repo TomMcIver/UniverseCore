@@ -324,6 +324,8 @@ void verify_resource_invariants(const universe::WorldState& state, const std::in
     std::unordered_map<universe::SettlementId, std::int64_t> owned_tools_by_settlement;
     for (const auto& settlement : state.settlements) {
         settlement_ids.insert(settlement.id);
+        require(settlement.position_x >= -1'000'000 && settlement.position_x <= 1'000'000, "settlement position x must be in canonical world bounds");
+        require(settlement.position_z >= -1'000'000 && settlement.position_z <= 1'000'000, "settlement position z must be in canonical world bounds");
         total_basic_tool_broken += settlement.cumulative_basic_tool_broken;
         require(settlement.commons_food.value >= 0, "settlement commons food must be non-negative");
         require(settlement.last_transfer_food_volume >= 0, "settlement transfer volume must be non-negative");
@@ -357,6 +359,8 @@ void verify_resource_invariants(const universe::WorldState& state, const std::in
         require(region.id > 0, "region id must be non-zero");
         require(region_ids.insert(region.id).second, "region ids must be unique");
         require(region.land_area_units > 0, "region area must be positive");
+        require(region.position_x >= -1'000'000 && region.position_x <= 1'000'000, "region position x must be in canonical world bounds");
+        require(region.position_z >= -1'000'000 && region.position_z <= 1'000'000, "region position z must be in canonical world bounds");
         require(region.productive_capacity_per_day >= 0, "region productive capacity must be non-negative");
         require(region.wild_food_capacity >= 0, "region wild capacity must be non-negative");
         require(region.wild_food_stock >= 0, "region wild stock must be non-negative");
@@ -1450,7 +1454,7 @@ EventSectionInfo locate_event_section(const universe::WorldState& state) {
     });
 
     cursor += 8U;
-    cursor += region_order.size() * 73U;
+    cursor += region_order.size() * 89U;
 
     std::vector<const universe::Settlement*> settlement_order;
     settlement_order.reserve(state.settlements.size());
@@ -1462,7 +1466,7 @@ EventSectionInfo locate_event_section(const universe::WorldState& state) {
     });
 
     cursor += 8U;
-    cursor += settlement_order.size() * 21U;
+    cursor += settlement_order.size() * 37U;
 
     std::vector<const universe::SimulationEvent*> event_order;
     event_order.reserve(state.event_log.size());
@@ -3805,6 +3809,89 @@ int main() {
     require(
         long_run_survived + long_run_extinct == long_run_seeds.size(),
         "long-horizon seed accounting must remain consistent");
+
+    {
+        auto geography_config = universe::SimulationConfig{.seed = 4242U, .initial_population = 200U};
+        geography_config.initial_region_count = 6;
+        geography_config.base_region_area_units = 140;
+
+        universe::Simulation geography_run{geography_config};
+        const auto& state = geography_run.state();
+
+        require(state.regions.size() >= 2, "canonical geography test requires multiple regions");
+
+        std::unordered_set<std::int64_t> distinct_region_x;
+        for (const auto& region : state.regions) {
+            distinct_region_x.insert(region.position_x);
+        }
+        require(distinct_region_x.size() > 1, "regions must not all collapse onto the same x position");
+
+        for (std::size_t i = 0; i < state.regions.size(); ++i) {
+            for (std::size_t j = i + 1; j < state.regions.size(); ++j) {
+                const auto dx = state.regions[i].position_x - state.regions[j].position_x;
+                const auto dz = state.regions[i].position_z - state.regions[j].position_z;
+                const auto distance_squared = (dx * dx) + (dz * dz);
+                require(distance_squared > 0, "two distinct regions must not share the exact same canonical position");
+            }
+        }
+
+        std::unordered_map<universe::RegionId, std::vector<std::pair<std::int64_t, std::int64_t>>> settlement_positions_by_region;
+        for (const auto& settlement : state.settlements) {
+            settlement_positions_by_region[settlement.region_id].emplace_back(settlement.position_x, settlement.position_z);
+        }
+        for (const auto& [region_id, positions] : settlement_positions_by_region) {
+            const auto region_it = std::find_if(
+                state.regions.begin(), state.regions.end(),
+                [region_id](const universe::RegionEnvironmentState& candidate) { return candidate.id == region_id; });
+            require(region_it != state.regions.end(), "settlement region id must reference an existing region");
+            const auto* region = &(*region_it);
+
+            for (const auto& [settlement_x, settlement_z] : positions) {
+                const auto dx = settlement_x - region->position_x;
+                const auto dz = settlement_z - region->position_z;
+                const auto distance_squared = (dx * dx) + (dz * dz);
+                require(distance_squared <= (2'000 * 2'000), "settlement position must stay reasonably close to its region's position");
+            }
+
+            for (std::size_t i = 0; i < positions.size(); ++i) {
+                for (std::size_t j = i + 1; j < positions.size(); ++j) {
+                    const auto dx = positions[i].first - positions[j].first;
+                    const auto dz = positions[i].second - positions[j].second;
+                    const auto distance_squared = (dx * dx) + (dz * dz);
+                    require(distance_squared > 0, "two distinct settlements in the same region must not share the exact same position");
+                }
+            }
+        }
+
+        universe::Simulation geography_repeat{geography_config};
+        require(
+            geography_run.save_snapshot() == geography_repeat.save_snapshot(),
+            "canonical region/settlement position derivation must be deterministic for a given seed");
+
+        auto different_seed_config = geography_config;
+        different_seed_config.seed = 9999U;
+        universe::Simulation geography_different_seed{different_seed_config};
+        require(
+            geography_run.save_snapshot() != geography_different_seed.save_snapshot(),
+            "a different seed must produce different canonical geography");
+
+        const auto bytes = geography_run.save_snapshot();
+        auto loaded = load_from_snapshot_or_fail(bytes, "geography snapshot must round-trip");
+        require(loaded.state().regions.size() == state.regions.size(), "round-tripped snapshot must preserve region count");
+        for (std::size_t i = 0; i < state.regions.size(); ++i) {
+            require(loaded.state().regions[i].position_x == state.regions[i].position_x, "round-tripped region position x must be preserved");
+            require(loaded.state().regions[i].position_z == state.regions[i].position_z, "round-tripped region position z must be preserved");
+        }
+        require(loaded.state().settlements.size() == state.settlements.size(), "round-tripped snapshot must preserve settlement count");
+        for (std::size_t i = 0; i < state.settlements.size(); ++i) {
+            require(
+                loaded.state().settlements[i].position_x == state.settlements[i].position_x,
+                "round-tripped settlement position x must be preserved");
+            require(
+                loaded.state().settlements[i].position_z == state.settlements[i].position_z,
+                "round-tripped settlement position z must be preserved");
+        }
+    }
 
     std::cout << "All UniverseCore tests passed.\n";
     return 0;

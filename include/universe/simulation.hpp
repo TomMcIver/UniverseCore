@@ -175,6 +175,8 @@ struct Settlement {
     SettlementId id{};
     RegionId region_id{};
     bool active{true};
+    std::int64_t position_x{};
+    std::int64_t position_z{};
     std::uint32_t access_share_points{};
     SettlementMaterialInventory materials{};
     std::int64_t tool_wear_work_units{};
@@ -238,6 +240,8 @@ enum class EnvironmentClass : std::uint8_t {
 struct RegionEnvironmentState {
     RegionId id{};
     std::int64_t land_area_units{};
+    std::int64_t position_x{};
+    std::int64_t position_z{};
     EnvironmentClass environment_class{EnvironmentClass::ProductiveArable};
     std::int64_t productive_capacity_per_day{};
     std::int64_t wild_food_capacity{};
@@ -688,8 +692,11 @@ private:
     void refresh_environment_aggregates() noexcept;
     void refresh_material_aggregates() noexcept;
     void initialize_regions();
+    void assign_region_positions();
     void assign_households_to_regions();
     void initialize_settlements();
+    void assign_settlement_positions(RegionId region_id, const std::vector<SettlementId>& settlement_ids);
+    void assign_position_for_new_settlement(SettlementId settlement_id, RegionId region_id);
     void initialize_region_lod_states();
     void initialize_settlement_aggregates();
     [[nodiscard]] bool is_region_detailed(RegionId region_id) const noexcept;

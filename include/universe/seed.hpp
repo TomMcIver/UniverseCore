@@ -61,6 +61,8 @@ enum class SeedDomain : std::uint64_t {
     CohortAging = 0x4F0AC69D31B2E750ULL,
     CohortSexSplit = 0xA85D31F70C94BE26ULL,
     CohortRealization = 0x1C63BE85A4F209D7ULL,
+    RegionPosition = 0x5AE837C6D1B0F294ULL,
+    SettlementPosition = 0xE29B47C0A6D3158FULL,
 };
 
 [[nodiscard]] constexpr std::uint64_t mix_u64(const std::uint64_t value) noexcept {

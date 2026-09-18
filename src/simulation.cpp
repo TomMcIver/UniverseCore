@@ -18,6 +18,88 @@ constexpr std::int32_t kOccupationMinimumNutritionPoints = 160;
 constexpr std::int32_t kOccupationMinimumHealthPoints = 160;
 constexpr std::int64_t kMinRegionAreaUnits = 10;
 constexpr std::int64_t kMaxRegionAreaUnits = 10'000;
+
+// Canonical geography constants (ticket #24/#25): position is derived,
+// deterministic (x, z) in fixed-width integer "world units", not floating
+// point, per the project's ban on floats in canonical state. Scoped to a
+// single settled area on one world (per UniverseCore issue #23's resolution),
+// not a multi-planet coordinate hierarchy.
+constexpr std::int64_t kWorldHalfExtentUnits = 4'000;
+constexpr std::int64_t kMinRegionDistanceUnits = 220;
+constexpr std::int64_t kMinSettlementDistanceUnits = 24;
+constexpr std::uint32_t kPositionPlacementMaxAttempts = 48;
+constexpr std::uint32_t kPositionPlacementWidenEvery = 8;
+
+struct Point2D {
+    std::int64_t x{};
+    std::int64_t z{};
+};
+
+[[nodiscard]] std::int64_t squared_distance(const Point2D lhs, const Point2D rhs) noexcept {
+    const auto dx = lhs.x - rhs.x;
+    const auto dz = lhs.z - rhs.z;
+    return (dx * dx) + (dz * dz);
+}
+
+// Deterministic min-distance rejection sampling: try candidates drawn from
+// derive_seed(seed, domain, attempt), widening the search box every
+// kPositionPlacementWidenEvery attempts, accepting the first candidate at
+// least min_distance from every already-placed point. Falls back to a fixed
+// octant lattice (still deterministic, still separated) if every attempt is
+// rejected, mirroring the presentation layer's golden-angle-spiral fallback.
+[[nodiscard]] Point2D pick_spaced_position(
+    const SimulationSeed seed,
+    const SeedDomain domain,
+    const std::int64_t center_x,
+    const std::int64_t center_z,
+    const std::int64_t initial_radius,
+    const std::int64_t min_distance,
+    const std::vector<Point2D>& placed) noexcept {
+    auto radius = std::max<std::int64_t>(initial_radius, min_distance);
+    for (std::uint32_t attempt = 0; attempt < kPositionPlacementMaxAttempts; ++attempt) {
+        const auto span = static_cast<std::uint64_t>((radius * 2) + 1);
+        const auto x_seed = derive_seed(seed, domain, static_cast<std::uint64_t>(attempt) << 1U);
+        const auto z_seed = derive_seed(seed, domain, (static_cast<std::uint64_t>(attempt) << 1U) | 1U);
+        const auto offset_x = static_cast<std::int64_t>(seed_random_bounded(x_seed, span)) - radius;
+        const auto offset_z = static_cast<std::int64_t>(seed_random_bounded(z_seed, span)) - radius;
+        const Point2D candidate{center_x + offset_x, center_z + offset_z};
+
+        bool far_enough = true;
+        for (const auto& other : placed) {
+            if (squared_distance(candidate, other) < (min_distance * min_distance)) {
+                far_enough = false;
+                break;
+            }
+        }
+        if (far_enough) {
+            return candidate;
+        }
+        if (attempt % kPositionPlacementWidenEvery == (kPositionPlacementWidenEvery - 1U)) {
+            radius += min_distance;
+        }
+    }
+
+    static constexpr std::array<Point2D, 8> kOctantDirections{{
+        {1, 0}, {1, 1}, {0, 1}, {-1, 1}, {-1, 0}, {-1, -1}, {0, -1}, {1, -1},
+    }};
+    const auto index = static_cast<std::int64_t>(placed.size());
+    const auto ring = (index / 8) + 1;
+    const auto slot = static_cast<std::size_t>(index % 8);
+    const auto fallback_radius = min_distance * ring;
+    const auto direction = kOctantDirections[slot];
+    return Point2D{center_x + (direction.x * fallback_radius), center_z + (direction.z * fallback_radius)};
+}
+
+[[nodiscard]] std::int64_t settlement_initial_placement_radius(const RegionEnvironmentState& region) noexcept {
+    return std::max<std::int64_t>(kMinSettlementDistanceUnits, region.land_area_units / 4);
+}
+
+[[nodiscard]] Point2D place_settlement_point(
+    const RegionEnvironmentState& region, const SimulationSeed settlement_seed_value, const std::vector<Point2D>& placed) {
+    return pick_spaced_position(
+        settlement_seed_value, SeedDomain::SettlementPosition, region.position_x, region.position_z,
+        settlement_initial_placement_radius(region), kMinSettlementDistanceUnits, placed);
+}
 constexpr std::uint32_t kSettlementShareScale = 10'000;
 constexpr std::uint32_t kInitialAllocatedSettlementShare = 8'500;
 constexpr std::uint32_t kHighPressureThresholdPer10k = 8'500;
@@ -755,6 +837,7 @@ void Simulation::add_aggregate_population(
             .active = true,
             .access_share_points = available_share,
         });
+        assign_position_for_new_settlement(effective_settlement_id, region_id);
         state_.settlement_aggregates.push_back(SettlementAggregateState{
             .settlement_id = effective_settlement_id,
             .region_id = region_id,
@@ -4630,6 +4713,19 @@ void Simulation::initialize_regions() {
     std::sort(state_.regions.begin(), state_.regions.end(), [](const RegionEnvironmentState& lhs, const RegionEnvironmentState& rhs) {
         return lhs.id < rhs.id;
     });
+    assign_region_positions();
+}
+
+void Simulation::assign_region_positions() {
+    std::vector<Point2D> placed;
+    placed.reserve(state_.regions.size());
+    for (auto& region : state_.regions) {
+        const auto point = pick_spaced_position(
+            region_seed(region.id), SeedDomain::RegionPosition, 0, 0, kWorldHalfExtentUnits, kMinRegionDistanceUnits, placed);
+        region.position_x = point.x;
+        region.position_z = point.z;
+        placed.push_back(point);
+    }
 }
 
 void Simulation::assign_households_to_regions() {
@@ -4714,6 +4810,8 @@ void Simulation::initialize_settlements() {
             settlement_ids.push_back(settlement_id);
         }
 
+        assign_settlement_positions(region_id, settlement_ids);
+
         for (auto* household : region_households) {
             const auto assignment_seed = derive_seed(household_seed(household->id), SeedDomain::SettlementAssignment, 0U);
             const auto settlement_index = static_cast<std::size_t>(seed_random_bounded(assignment_seed, settlement_ids.size()));
@@ -4773,6 +4871,45 @@ void Simulation::initialize_settlements() {
     std::sort(state_.settlements.begin(), state_.settlements.end(), [](const Settlement& lhs, const Settlement& rhs) {
         return lhs.id < rhs.id;
     });
+}
+
+void Simulation::assign_settlement_positions(const RegionId region_id, const std::vector<SettlementId>& settlement_ids) {
+    const auto* region = find_region(region_id);
+    if (region == nullptr) {
+        return;
+    }
+
+    std::vector<Point2D> placed;
+    placed.reserve(settlement_ids.size());
+    for (const auto settlement_id : settlement_ids) {
+        auto* settlement = find_settlement_mutable(settlement_id);
+        if (settlement == nullptr) {
+            continue;
+        }
+        const auto point = place_settlement_point(*region, settlement_seed(settlement_id), placed);
+        settlement->position_x = point.x;
+        settlement->position_z = point.z;
+        placed.push_back(point);
+    }
+}
+
+void Simulation::assign_position_for_new_settlement(const SettlementId settlement_id, const RegionId region_id) {
+    const auto* region = find_region(region_id);
+    auto* settlement = find_settlement_mutable(settlement_id);
+    if (region == nullptr || settlement == nullptr) {
+        return;
+    }
+
+    std::vector<Point2D> placed;
+    for (const auto& existing : state_.settlements) {
+        if (existing.region_id == region_id && existing.id != settlement_id) {
+            placed.push_back(Point2D{existing.position_x, existing.position_z});
+        }
+    }
+
+    const auto point = place_settlement_point(*region, settlement_seed(settlement_id), placed);
+    settlement->position_x = point.x;
+    settlement->position_z = point.z;
 }
 
 void Simulation::initialize_region_lod_states() {
@@ -5295,6 +5432,7 @@ void Simulation::process_settlement_founding(const std::uint64_t demographic_yea
             .active = true,
             .access_share_points = assigned_share,
         });
+        assign_position_for_new_settlement(new_settlement_id, region_id);
         state_.settlement_aggregates.push_back(SettlementAggregateState{
             .settlement_id = new_settlement_id,
             .region_id = region_id,

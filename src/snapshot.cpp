@@ -19,6 +19,13 @@ namespace {
 
 constexpr std::uint32_t kSnapshotMagic = 0x524F4355U;  // "UCOR" little-endian
 constexpr std::size_t kHeaderSize = 4U + 2U + 2U + 8U + 8U;
+
+// Generous sanity bound for canonical region/settlement position, deliberately
+// far outside simulation.cpp's actual placement radius (a few thousand units)
+// rather than tightly coupled to it, since that constant is private to
+// simulation.cpp's translation unit -- this just rejects corrupt/overflowed
+// snapshot bytes, not real placement geometry.
+constexpr std::int64_t kMaxSnapshotPositionMagnitude = 1'000'000;
 constexpr std::int64_t kToolWearWorkUnitsPerBreak = 24;
 constexpr std::int64_t kWealthValueWood = 2;
 constexpr std::int64_t kWealthValueStone = 2;
@@ -451,6 +458,8 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
     for (const auto* region : region_order) {
         payload.write_u64(region->id);
         payload.write_i64(region->land_area_units);
+        payload.write_i64(region->position_x);
+        payload.write_i64(region->position_z);
         payload.write_u8(static_cast<std::uint8_t>(region->environment_class));
         payload.write_i64(region->productive_capacity_per_day);
         payload.write_i64(region->wild_food_capacity);
@@ -475,6 +484,8 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
         payload.write_u64(settlement->id);
         payload.write_u64(settlement->region_id);
         payload.write_bool(settlement->active);
+        payload.write_i64(settlement->position_x);
+        payload.write_i64(settlement->position_z);
         payload.write_u32(settlement->access_share_points);
     }
 
@@ -1252,7 +1263,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         return load_error(SnapshotErrorCode::TruncatedData, "Snapshot region section is truncated");
     }
 
-    if (region_count > payload_reader.remaining() / 64U) {
+    if (region_count > payload_reader.remaining() / 80U) {
         return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot region section has invalid length");
     }
 
@@ -1266,6 +1277,8 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
 
         if (!payload_reader.read_u64(region.id) ||
             !payload_reader.read_i64(region.land_area_units) ||
+            !payload_reader.read_i64(region.position_x) ||
+            !payload_reader.read_i64(region.position_z) ||
             !payload_reader.read_u8(environment_class_raw) ||
             !payload_reader.read_i64(region.productive_capacity_per_day) ||
             !payload_reader.read_i64(region.wild_food_capacity) ||
@@ -1287,6 +1300,11 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
             return load_error(SnapshotErrorCode::InvalidEnum, "Snapshot region environment class is invalid");
         }
         region.environment_class = static_cast<EnvironmentClass>(environment_class_raw);
+
+        if (region.position_x < -kMaxSnapshotPositionMagnitude || region.position_x > kMaxSnapshotPositionMagnitude ||
+            region.position_z < -kMaxSnapshotPositionMagnitude || region.position_z > kMaxSnapshotPositionMagnitude) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot region position is out of range");
+        }
 
         if (region.land_area_units <= 0 ||
             region.productive_capacity_per_day < 0 ||
@@ -1310,7 +1328,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         return load_error(SnapshotErrorCode::TruncatedData, "Snapshot settlement section is truncated");
     }
 
-    if (settlement_count > payload_reader.remaining() / 21U) {
+    if (settlement_count > payload_reader.remaining() / 37U) {
         return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot settlement section has invalid length");
     }
 
@@ -1323,6 +1341,8 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         if (!payload_reader.read_u64(settlement.id) ||
             !payload_reader.read_u64(settlement.region_id) ||
             !payload_reader.read_bool(settlement.active) ||
+            !payload_reader.read_i64(settlement.position_x) ||
+            !payload_reader.read_i64(settlement.position_z) ||
             !payload_reader.read_u32(settlement.access_share_points)) {
             return load_error(SnapshotErrorCode::TruncatedData, "Snapshot settlement record is truncated");
         }
@@ -1335,6 +1355,10 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         }
         if (settlement.access_share_points > 10'000U) {
             return load_error(SnapshotErrorCode::InvalidState, "Snapshot settlement share points are out of range");
+        }
+        if (settlement.position_x < -kMaxSnapshotPositionMagnitude || settlement.position_x > kMaxSnapshotPositionMagnitude ||
+            settlement.position_z < -kMaxSnapshotPositionMagnitude || settlement.position_z > kMaxSnapshotPositionMagnitude) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot settlement position is out of range");
         }
         if (!settlement.active && settlement.access_share_points != 0U) {
             return load_error(SnapshotErrorCode::InvalidState, "Snapshot extinct settlement must not retain active share allocation");
