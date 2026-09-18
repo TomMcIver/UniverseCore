@@ -138,6 +138,44 @@ namespace {
     return "Unknown";
 }
 
+[[nodiscard]] std::string building_type_label(const BuildingType type) {
+    switch (type) {
+        case BuildingType::Dwelling:
+            return "Dwelling";
+        case BuildingType::FoodStore:
+            return "FoodStore";
+        case BuildingType::Workshop:
+            return "Workshop";
+    }
+    return "Unknown";
+}
+
+[[nodiscard]] std::string environment_class_label(const EnvironmentClass environment_class) {
+    switch (environment_class) {
+        case EnvironmentClass::ProductiveArable:
+            return "ProductiveArable";
+        case EnvironmentClass::Woodland:
+            return "Woodland";
+        case EnvironmentClass::Marginal:
+            return "Marginal";
+        case EnvironmentClass::WaterWetland:
+            return "WaterWetland";
+    }
+    return "Unknown";
+}
+
+[[nodiscard]] std::string building_state_label(const ConstructionState state) {
+    switch (state) {
+        case ConstructionState::Planned:
+            return "Planned";
+        case ConstructionState::ActiveConstruction:
+            return "ActiveConstruction";
+        case ConstructionState::Complete:
+            return "Complete";
+    }
+    return "Unknown";
+}
+
 [[nodiscard]] std::string event_type_label(const EventType event_type) {
     switch (event_type) {
         case EventType::Birth:
@@ -191,6 +229,8 @@ WorldSnapshotView build_world_snapshot(const SimulationController& controller) {
     const auto people = controller.people();
     const auto households = controller.households();
     const auto settlements = controller.settlements();
+    const auto buildings = controller.buildings();
+    const auto regions = controller.regions();
 
     std::unordered_map<HouseholdId, const Household*> household_by_id;
     household_by_id.reserve(households.size());
@@ -235,6 +275,10 @@ WorldSnapshotView build_world_snapshot(const SimulationController& controller) {
         settlement_view_by_id.emplace(settlement.id, settlement);
     }
 
+    const auto day_ticks = static_cast<std::uint64_t>(days(1).ticks > 0 ? days(1).ticks : 1);
+    const auto tick_within_day = snapshot.tick % day_ticks;
+    const auto day_phase = static_cast<float>(tick_within_day) / static_cast<float>(day_ticks);
+
     snapshot.agents.reserve(people.size());
     for (const auto& person : people) {
         const auto household_it = household_by_id.find(person.household_id);
@@ -251,8 +295,23 @@ WorldSnapshotView build_world_snapshot(const SimulationController& controller) {
         const auto h1 = stable_mix64(person.id * 0x9E3779B97F4A7C15ULL);
         const auto h2 = stable_mix64(person.id * 0xD6E8FEB86659FD93ULL);
 
-        const auto jitter_x = (normalized01(h1) - 0.5F) * 8.0F;
-        const auto jitter_z = (normalized01(h2) - 0.5F) * 8.0F;
+        const auto stationary_x = (normalized01(h1) - 0.5F) * 2.0F;
+        const auto stationary_z = (normalized01(h2) - 0.5F) * 2.0F;
+        const auto base_angle = normalized01(stable_mix64(person.id ^ 0xA24BAED4963EE407ULL)) * 6.28318530718F;
+
+        float speed_scale = 0.1F;
+        if (person.occupation == Occupation::SubsistenceCultivator ||
+            person.occupation == Occupation::WildFoodGatherer ||
+            person.occupation == Occupation::WoodGatherer ||
+            person.occupation == Occupation::StoneExtractor ||
+            person.occupation == Occupation::CraftWorker) {
+            speed_scale = 2.0F;
+        }
+
+        const auto movement_radius = person.alive ? (1.2F + normalized01(stable_mix64(person.id ^ 0x94D049BB133111EBULL)) * 2.8F) : 0.3F;
+        const auto phase = base_angle + (day_phase * 6.28318530718F * speed_scale);
+        const auto jitter_x = stationary_x + (std::cos(phase) * movement_radius);
+        const auto jitter_z = stationary_z + (std::sin(phase) * movement_radius);
 
         snapshot.agents.push_back(AgentRenderView{
             .id = person.id,
@@ -272,6 +331,63 @@ WorldSnapshotView build_world_snapshot(const SimulationController& controller) {
     std::sort(snapshot.agents.begin(), snapshot.agents.end(), [](const AgentRenderView& lhs, const AgentRenderView& rhs) {
         return lhs.id < rhs.id;
     });
+
+    snapshot.buildings.reserve(buildings.size());
+    for (const auto& building : buildings) {
+        const auto settlement_it = settlement_view_by_id.find(building.settlement_id);
+        if (settlement_it == settlement_view_by_id.end()) {
+            continue;
+        }
+
+        const auto settlement = settlement_it->second;
+        const auto b1 = stable_mix64(building.id * 0xBF58476D1CE4E5B9ULL);
+        const auto b2 = stable_mix64(building.id * 0x9E3779B97F4A7C15ULL);
+        const auto angle = normalized01(b1) * 6.28318530718F;
+        const auto radius = 5.0F + (normalized01(b2) * 7.0F);
+        const auto x = settlement.x + (std::cos(angle) * radius);
+        const auto z = settlement.z + (std::sin(angle) * radius);
+
+        float progress = 0.0F;
+        if (building.labour_required > 0) {
+            const auto clamped = std::clamp<std::int64_t>(building.labour_completed, 0, building.labour_required);
+            progress = static_cast<float>(clamped) / static_cast<float>(building.labour_required);
+        } else if (building.state == ConstructionState::Complete) {
+            progress = 1.0F;
+        }
+
+        snapshot.buildings.push_back(BuildingRenderView{
+            .id = building.id,
+            .settlement_id = building.settlement_id,
+            .region_id = settlement.region_id,
+            .type = building_type_label(building.type),
+            .state = building_state_label(building.state),
+            .settlement_commons_owned = building.settlement_commons_owned,
+            .owner_household_id = building.owner_household_id.has_value() ? *building.owner_household_id : 0U,
+            .progress = std::clamp(progress, 0.0F, 1.0F),
+            .x = x,
+            .y = 0.0F,
+            .z = z,
+        });
+    }
+
+    std::sort(snapshot.buildings.begin(), snapshot.buildings.end(), [](const BuildingRenderView& lhs, const BuildingRenderView& rhs) {
+        return lhs.id < rhs.id;
+    });
+
+    snapshot.regions.reserve(regions.size());
+    for (const auto& region : regions) {
+        snapshot.regions.push_back(RegionRenderView{
+            .id = region.id,
+            .environment_class = environment_class_label(region.environment_class),
+            .land_area_units = region.land_area_units,
+            .wild_food_capacity = region.wild_food_capacity,
+            .wild_food_stock = region.wild_food_stock,
+            .wood_capacity = region.wood_capacity,
+            .wood_stock = region.wood_stock,
+            .stone_capacity = region.stone_capacity,
+            .stone_remaining = region.stone_remaining,
+        });
+    }
 
     return snapshot;
 }
@@ -381,6 +497,41 @@ std::string make_snapshot_message(
             << ",\"active\":" << (settlement.active ? "true" : "false")
             << ",\"accessSharePoints\":" << settlement.access_share_points
             << ",\"position\":{\"x\":" << settlement.x << ",\"y\":" << settlement.y << ",\"z\":" << settlement.z << "}}";
+    }
+
+    out << "],\"buildings\":[";
+    for (std::size_t i = 0; i < snapshot.buildings.size(); ++i) {
+        const auto& building = snapshot.buildings[i];
+        if (i > 0U) {
+            out << ',';
+        }
+        out << "{\"id\":" << building.id
+            << ",\"settlementId\":" << building.settlement_id
+            << ",\"regionId\":" << building.region_id
+            << ",\"type\":\"" << building.type << "\""
+            << ",\"state\":\"" << building.state << "\""
+            << ",\"settlementCommonsOwned\":" << (building.settlement_commons_owned ? "true" : "false")
+            << ",\"ownerHouseholdId\":" << building.owner_household_id
+            << ",\"progress\":" << building.progress
+            << ",\"position\":{\"x\":" << building.x << ",\"y\":" << building.y << ",\"z\":" << building.z << "}}";
+    }
+
+    out << "],\"regions\":[";
+    for (std::size_t i = 0; i < snapshot.regions.size(); ++i) {
+        const auto& region = snapshot.regions[i];
+        if (i > 0U) {
+            out << ',';
+        }
+        out << "{\"id\":" << region.id
+            << ",\"environmentClass\":\"" << region.environment_class << "\""
+            << ",\"landAreaUnits\":" << region.land_area_units
+            << ",\"wildFoodCapacity\":" << region.wild_food_capacity
+            << ",\"wildFoodStock\":" << region.wild_food_stock
+            << ",\"woodCapacity\":" << region.wood_capacity
+            << ",\"woodStock\":" << region.wood_stock
+            << ",\"stoneCapacity\":" << region.stone_capacity
+            << ",\"stoneRemaining\":" << region.stone_remaining
+            << "}";
     }
 
     out << "]}}";

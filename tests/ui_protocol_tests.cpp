@@ -58,6 +58,36 @@ bool test_snapshot_is_read_only() {
     return snapshot_a.agents.front().id == snapshot_b.agents.front().id;
 }
 
+bool test_snapshot_includes_varying_region_environment_data() {
+    // Ticket #18: the Godot client needs real region environment data
+    // (not just a bare regionId) to drive terrain that actually differs
+    // between regions. This asserts the data both exists and genuinely
+    // varies across regions in a real 200-person world, and that it
+    // serializes onto the wire with the expected keys.
+    universe::ui::SimulationController controller{universe::SimulationConfig{.seed = 42, .initial_population = 200}};
+    const auto snapshot = universe::ui::build_world_snapshot(controller);
+
+    if (snapshot.regions.empty()) {
+        return false;
+    }
+
+    bool found_varying_field = false;
+    for (std::size_t i = 1; i < snapshot.regions.size(); ++i) {
+        if (snapshot.regions[i].environment_class != snapshot.regions[0].environment_class ||
+            snapshot.regions[i].wild_food_capacity != snapshot.regions[0].wild_food_capacity) {
+            found_varying_field = true;
+            break;
+        }
+    }
+
+    const auto message = universe::ui::make_snapshot_message(1U, snapshot, true);
+    const bool has_regions_key = message.find("\"regions\":[") != std::string::npos;
+    const bool has_environment_class_key = message.find("\"environmentClass\":\"") != std::string::npos;
+    const bool has_wild_food_key = message.find("\"wildFoodCapacity\":") != std::string::npos;
+
+    return found_varying_field && has_regions_key && has_environment_class_key && has_wild_food_key;
+}
+
 bool test_protocol_version_in_message() {
     const auto hello = universe::ui::make_hello_message(1U);
     return hello.find("\"protocolVersion\":1") != std::string::npos;
@@ -98,6 +128,7 @@ int main() {
         test_reject_bad_speed() &&
         test_parse_entity_details_command() &&
         test_snapshot_is_read_only() &&
+        test_snapshot_includes_varying_region_environment_data() &&
         test_protocol_version_in_message() &&
         test_determinism_with_observer_idle();
 

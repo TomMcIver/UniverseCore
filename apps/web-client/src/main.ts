@@ -3,13 +3,14 @@ import './styles.css'
 import { UniverseNetwork } from './network'
 import type {
   AgentSnapshot,
+  BuildingSnapshot,
   ConnectionState,
   EntityDetailsPayload,
   ServerEnvelope,
   SimulationStatusPayload,
   WorldPayload,
 } from './protocol'
-import { WorldRenderer } from './render'
+import { type PickResult, WorldRenderer } from './render'
 
 const root = document.getElementById('app')
 if (root === null) {
@@ -21,6 +22,7 @@ root.innerHTML = `
     <div class="topbar">
       <span id="conn">Connecting</span>
       <span id="sim">Year 0 · Tick 0</span>
+      <span id="hint">Tip: Shift+Click prefers buildings</span>
       <button id="pause">Pause</button>
       <button id="resume">Resume</button>
       <button data-speed="1">1x</button>
@@ -49,11 +51,12 @@ const eventsEl = document.getElementById('events') as HTMLDivElement
 const debugEl = document.getElementById('debug') as HTMLDivElement
 
 const renderer = new WorldRenderer(canvas)
-let selectedAgent: number | null = null
+let selectedTarget: PickResult | null = null
 let connectionState: ConnectionState = 'Connecting'
 let tick = 0
 let year = 0
 let worldAgents: AgentSnapshot[] = []
+let worldBuildings: BuildingSnapshot[] = []
 let status: SimulationStatusPayload = { paused: true, speed: 1 }
 let previousIncomingMessages = 0
 let previousOutgoingMessages = 0
@@ -65,6 +68,7 @@ let kbpsIn = 0
 let kbpsOut = 0
 let latestSnapshotSizeBytes = 0
 let latestDeltaSizeBytes = 0
+renderer.setSimulationState(status.paused, status.speed)
 
 function renderInspector(details: EntityDetailsPayload): void {
   const mother = details.family.motherId > 0 ? details.family.motherId : 'Unavailable'
@@ -94,6 +98,24 @@ function renderInspector(details: EntityDetailsPayload): void {
     <div><b>Schedule:</b> Unavailable</div>
     <div><b>Recent Events:</b> Unavailable</div>
   `
+}
+
+function renderBuildingInspector(building: BuildingSnapshot): void {
+  const owner = building.ownerHouseholdId > 0 ? building.ownerHouseholdId : 'None'
+  inspectorBody.innerHTML = `
+    <div><b>ID:</b> ${building.id}</div>
+    <div><b>Type:</b> ${building.type}</div>
+    <div><b>State:</b> ${building.state}</div>
+    <div><b>Progress:</b> ${(building.progress * 100).toFixed(0)}%</div>
+    <div><b>Settlement:</b> ${building.settlementId}</div>
+    <div><b>Region:</b> ${building.regionId}</div>
+    <div><b>Commons Owned:</b> ${building.settlementCommonsOwned}</div>
+    <div><b>Owner Household:</b> ${owner}</div>
+  `
+}
+
+function findBuilding(id: number): BuildingSnapshot | undefined {
+  return worldBuildings.find((candidate) => candidate.id === id)
 }
 
 function setConnectionState(next: ConnectionState): void {
@@ -127,17 +149,31 @@ const network = new UniverseNetwork(
       const payload = message.payload as unknown as WorldPayload
       year = payload.year
       worldAgents = payload.agents
+      worldBuildings = payload.buildings
       renderer.setSettlements(payload.settlements)
+      renderer.setBuildings(payload.buildings)
       renderer.setAgents(payload.agents)
+      renderer.setSimulationState(status.paused, status.speed)
       simEl.textContent = `Year ${year} · Tick ${tick} · Speed ${status.speed}x · ${status.paused ? 'Paused' : 'Running'}`
-      if (selectedAgent !== null) {
-        network.send({ type: 'request_entity_details', entityId: selectedAgent })
+      if (selectedTarget?.type === 'agent') {
+        network.send({ type: 'request_entity_details', entityId: selectedTarget.id })
+      }
+      if (selectedTarget?.type === 'building') {
+        const selected = findBuilding(selectedTarget.id)
+        if (selected !== undefined) {
+          renderBuildingInspector(selected)
+        } else {
+          selectedTarget = null
+          renderer.select(null)
+          inspectorBody.textContent = 'Select an agent or building'
+        }
       }
       return
     }
 
     if (message.type === 'simulation_status') {
       status = message.payload as unknown as SimulationStatusPayload
+      renderer.setSimulationState(status.paused, status.speed)
       simEl.textContent = `Year ${year} · Tick ${tick} · Speed ${status.speed}x · ${status.paused ? 'Paused' : 'Running'}`
       return
     }
@@ -162,9 +198,9 @@ const network = new UniverseNetwork(
       line.textContent = entityId > 0 ? `${eventType} · entity ${entityId}` : eventType
       line.onclick = () => {
         if (entityId > 0) {
-          selectedAgent = entityId
-          renderer.select(entityId)
-          renderer.focus(entityId)
+          selectedTarget = { type: 'agent', id: entityId }
+          renderer.select(selectedTarget)
+          renderer.focus(selectedTarget)
           network.send({ type: 'request_entity_details', entityId })
         }
       }
@@ -196,17 +232,30 @@ const network = new UniverseNetwork(
 network.connect('ws://127.0.0.1:19081')
 
 canvas.addEventListener('click', (event) => {
-  const picked = renderer.pick(event.clientX, event.clientY)
-  selectedAgent = picked
+  const rect = canvas.getBoundingClientRect()
+  const x = ((event.clientX - rect.left) * canvas.width) / Math.max(rect.width, 1)
+  const y = ((event.clientY - rect.top) * canvas.height) / Math.max(rect.height, 1)
+  const pickMode = event.shiftKey ? 'building' : 'any'
+  const picked = renderer.pick(x, y, pickMode)
+  selectedTarget = picked
   renderer.select(picked)
-  if (picked !== null) {
-    network.send({ type: 'request_entity_details', entityId: picked })
+  if (picked?.type === 'agent') {
+    network.send({ type: 'request_entity_details', entityId: picked.id })
+    return
   }
+  if (picked?.type === 'building') {
+    const selected = findBuilding(picked.id)
+    if (selected !== undefined) {
+      renderBuildingInspector(selected)
+    }
+    return
+  }
+  inspectorBody.textContent = 'Select an agent or building'
 })
 
 canvas.addEventListener('dblclick', () => {
-  if (selectedAgent !== null) {
-    renderer.focus(selectedAgent)
+  if (selectedTarget !== null) {
+    renderer.focus(selectedTarget)
   }
 })
 
@@ -252,8 +301,8 @@ setInterval(() => {
     <div>Outgoing KB/sec: ${kbpsOut.toFixed(2)}</div>
     <div>Snapshot Size: ${latestSnapshotSizeBytes > 0 ? `${latestSnapshotSizeBytes} bytes` : 'Unavailable'}</div>
     <div>Delta Size: ${latestDeltaSizeBytes > 0 ? `${latestDeltaSizeBytes} bytes` : 'Unavailable'}</div>
-    <div>Total Simulated Entities: ${worldAgents.length}</div>
-    <div>Visible Entities: ${worldAgents.length}</div>
+    <div>Total Simulated Entities: ${worldAgents.length + worldBuildings.length}</div>
+    <div>Visible Entities: ${worldAgents.length + worldBuildings.length}</div>
     <div>Rendered Entities: ${metrics.renderedEntities}</div>
     <div>Draw Calls: ${metrics.drawCalls}</div>
     <div>Triangles: ${metrics.triangles}</div>

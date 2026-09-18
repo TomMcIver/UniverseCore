@@ -20,11 +20,24 @@ export interface SettlementSnapshot {
   position: { x: number; y: number; z: number }
 }
 
+export interface BuildingSnapshot {
+  id: number
+  settlementId: number
+  regionId: number
+  type: string
+  state: string
+  settlementCommonsOwned: boolean
+  ownerHouseholdId: number
+  progress: number
+  position: { x: number; y: number; z: number }
+}
+
 export interface WorldPayload {
   year: number
   population: number
   agents: AgentSnapshot[]
   settlements: SettlementSnapshot[]
+  buildings: BuildingSnapshot[]
 }
 
 export interface ServerEnvelope {

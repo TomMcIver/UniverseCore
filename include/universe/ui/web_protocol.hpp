@@ -34,12 +34,40 @@ struct SettlementRenderView {
     float z{};
 };
 
+struct BuildingRenderView {
+    BuildingId id{};
+    SettlementId settlement_id{};
+    RegionId region_id{};
+    std::string type{};
+    std::string state{};
+    bool settlement_commons_owned{true};
+    std::uint64_t owner_household_id{};
+    float progress{};
+    float x{};
+    float y{};
+    float z{};
+};
+
+struct RegionRenderView {
+    RegionId id{};
+    std::string environment_class{};
+    std::int64_t land_area_units{};
+    std::int64_t wild_food_capacity{};
+    std::int64_t wild_food_stock{};
+    std::int64_t wood_capacity{};
+    std::int64_t wood_stock{};
+    std::int64_t stone_capacity{};
+    std::int64_t stone_remaining{};
+};
+
 struct WorldSnapshotView {
     std::uint64_t tick{};
     std::uint64_t year{};
     std::uint64_t population{};
     std::vector<AgentRenderView> agents{};
     std::vector<SettlementRenderView> settlements{};
+    std::vector<BuildingRenderView> buildings{};
+    std::vector<RegionRenderView> regions{};
 };
 
 enum class ClientCommandType : std::uint8_t {

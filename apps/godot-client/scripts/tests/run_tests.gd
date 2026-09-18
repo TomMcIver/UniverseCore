@@ -6,6 +6,7 @@ const UniverseClient := preload("res://scripts/net/universe_client.gd")
 const FakeSocket := preload("res://scripts/tests/fake_socket.gd")
 const InspectorPanel := preload("res://scripts/ui/inspector_panel.gd")
 const EventLog := preload("res://scripts/ui/event_log.gd")
+const TerrainGenerator := preload("res://scripts/terrain_generator.gd")
 
 ## Minimal headless test runner for the Godot client's pure/testable seams
 ## (UniverseProtocol encode/decode, WorldView spawn/replace logic).
@@ -46,6 +47,10 @@ func _initialize() -> void:
 	_run_test("inspector panel formats agent details", Callable(self, "_test_inspector_agent_details"))
 	_run_test("inspector panel formats building details", Callable(self, "_test_inspector_building_details"))
 	_run_test("event log appends and counts entries", Callable(self, "_test_event_log_append"))
+	_run_test("terrain finds the nearest region center for a world point", Callable(self, "_test_terrain_nearest_region_id"))
+	_run_test("terrain derives region centers from settlement positions", Callable(self, "_test_terrain_region_centers_from_settlements"))
+	_run_test("terrain height/color genuinely differ between environment classes", Callable(self, "_test_terrain_sample_varies_by_class"))
+	_run_test("terrain color reflects wild-food richness within the same class", Callable(self, "_test_terrain_sample_richness_affects_color"))
 
 	print("\n%d/%d tests passed" % [_total - _failures, _total])
 	quit(1 if _failures > 0 else 0)
@@ -260,3 +265,34 @@ func _test_event_log_append() -> void:
 	log.append_event({"eventType": "SettlementFounded"})
 	_assert_eq(log.entry_count(), 2)
 	log.queue_free()
+
+func _test_terrain_nearest_region_id() -> void:
+	var terrain := TerrainGenerator.new()
+	var centers := {1: Vector2(0.0, 0.0), 2: Vector2(100.0, 100.0)}
+	_assert_eq(terrain._nearest_region_id(Vector2(5.0, 5.0), centers), 1)
+	_assert_eq(terrain._nearest_region_id(Vector2(90.0, 92.0), centers), 2)
+
+func _test_terrain_region_centers_from_settlements() -> void:
+	var terrain := TerrainGenerator.new()
+	var settlements := [
+		{"regionId": 1, "position": {"x": 0.0, "z": 0.0}},
+		{"regionId": 1, "position": {"x": 10.0, "z": 0.0}},
+		{"regionId": 2, "position": {"x": 100.0, "z": 100.0}},
+	]
+	var centers: Dictionary = terrain._region_centers_from_settlements(settlements)
+	_assert_eq(centers[1], Vector2(5.0, 0.0))
+	_assert_eq(centers[2], Vector2(100.0, 100.0))
+
+func _test_terrain_sample_varies_by_class() -> void:
+	var terrain := TerrainGenerator.new()
+	var arable: Dictionary = terrain._region_driven_sample({"environmentClass": "ProductiveArable", "wildFoodCapacity": 100, "wildFoodStock": 50}, 1.0)
+	var marginal: Dictionary = terrain._region_driven_sample({"environmentClass": "Marginal", "wildFoodCapacity": 100, "wildFoodStock": 50}, 1.0)
+	_assert_eq(arable.height != marginal.height, true, "different environment classes should produce different height")
+	_assert_eq(arable.color != marginal.color, true, "different environment classes should produce different color")
+
+func _test_terrain_sample_richness_affects_color() -> void:
+	var terrain := TerrainGenerator.new()
+	var rich: Dictionary = terrain._region_driven_sample({"environmentClass": "Woodland", "wildFoodCapacity": 100, "wildFoodStock": 100}, 1.0)
+	var poor: Dictionary = terrain._region_driven_sample({"environmentClass": "Woodland", "wildFoodCapacity": 100, "wildFoodStock": 0}, 1.0)
+	_assert_eq(rich.color != poor.color, true, "wild food richness should affect color even within the same environment class")
+	_assert_eq(rich.height, poor.height, "richness should not affect height, only color")

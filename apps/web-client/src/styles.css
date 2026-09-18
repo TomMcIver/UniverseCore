@@ -24,6 +24,11 @@ body,
   border-bottom: 1px solid #1f2a3a;
 }
 
+#hint {
+  opacity: 0.75;
+  font-size: 12px;
+}
+
 .topbar button {
   background: #192338;
   color: #d6deeb;

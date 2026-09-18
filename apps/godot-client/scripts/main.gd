@@ -19,6 +19,7 @@ var _world_view: Node3D
 var _hud: Control
 var _inspector: PanelContainer
 var _event_log: PanelContainer
+var _terrain: MeshInstance3D
 
 func _ready() -> void:
 	_setup_environment()
@@ -128,10 +129,10 @@ func _setup_sun() -> void:
 	add_child(sun)
 
 func _setup_terrain() -> void:
-	var terrain := MeshInstance3D.new()
-	terrain.name = "Terrain"
-	terrain.set_script(TerrainGeneratorScript)
-	add_child(terrain)
+	_terrain = MeshInstance3D.new()
+	_terrain.name = "Terrain"
+	_terrain.set_script(TerrainGeneratorScript)
+	add_child(_terrain)
 
 func _setup_camera() -> void:
 	var camera := Camera3D.new()
@@ -156,6 +157,7 @@ func _on_message_received(message: Dictionary) -> void:
 	match message_type:
 		"initial_snapshot", "world_delta":
 			_world_view.apply_snapshot(payload)
+			_terrain.generate_from_regions(payload.get("regions", []), payload.get("settlements", []))
 			_hud.set_world_info(
 				int(payload.get("year", 0)),
 				int(message.get("tick", 0)),
