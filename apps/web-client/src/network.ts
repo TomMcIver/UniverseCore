@@ -1,4 +1,4 @@
-import type { ServerEnvelope } from './protocol'
+import { PROTOCOL_VERSION, type ServerEnvelope } from './protocol'
 
 export interface NetworkStats {
   incomingMessages: number
@@ -20,6 +20,7 @@ export class UniverseNetwork {
   private outgoingMessages = 0
   private incomingBytes = 0
   private outgoingBytes = 0
+  private hasReceivedInitialSnapshot = false
 
   public constructor(onMessage: (message: ServerEnvelope) => void, onStateChange: (state: number) => void) {
     this.onMessage = onMessage
@@ -53,16 +54,20 @@ export class UniverseNetwork {
 
   private openSocket(): void {
     this.socket = new WebSocket(this.url)
+    this.hasReceivedInitialSnapshot = false
     this.onStateChange(0)
 
     this.socket.onopen = () => {
       this.reconnectAttempts = 0
       this.onStateChange(1)
+      // Always re-anchor on a full snapshot after any (re)connect -- a
+      // world_delta is never trusted as a valid continuation after a gap.
       this.send({ type: 'hello' })
       this.send({ type: 'request_snapshot' })
     }
 
     this.socket.onclose = () => {
+      this.hasReceivedInitialSnapshot = false
       this.onStateChange(2)
       this.scheduleReconnect()
     }
@@ -77,7 +82,13 @@ export class UniverseNetwork {
       this.incomingBytes += new Blob([raw]).size
       try {
         const parsed = JSON.parse(raw) as ServerEnvelope
-        if (parsed.protocolVersion !== 1) {
+        if (parsed.protocolVersion !== PROTOCOL_VERSION) {
+          return
+        }
+        if (parsed.type === 'initial_snapshot') {
+          this.hasReceivedInitialSnapshot = true
+        } else if (parsed.type === 'world_delta' && !this.hasReceivedInitialSnapshot) {
+          // Never apply a delta before we have a full snapshot to anchor on.
           return
         }
         this.onMessage(parsed)
@@ -104,13 +115,20 @@ export class UniverseNetwork {
     }, delayMs)
   }
 
-  public send(payload: Record<string, unknown>): void {
+  /**
+   * Sends a command to the server. Returns false without sending, and without
+   * counting the message, when not connected -- callers must surface this
+   * rather than assume the command was applied.
+   */
+  public send(payload: Record<string, unknown>): boolean {
+    if (this.socket?.readyState !== WebSocket.OPEN) {
+      return false
+    }
+
     const serialized = JSON.stringify(payload)
     this.outgoingMessages += 1
     this.outgoingBytes += new Blob([serialized]).size
-
-    if (this.socket?.readyState === WebSocket.OPEN) {
-      this.socket.send(serialized)
-    }
+    this.socket.send(serialized)
+    return true
   }
 }

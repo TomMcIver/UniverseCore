@@ -7,7 +7,9 @@ import type {
   ConnectionState,
   EntityDetailsPayload,
   ServerEnvelope,
+  SettlementSnapshot,
   SimulationStatusPayload,
+  WorldDeltaPayload,
   WorldPayload,
 } from './protocol'
 import { type PickResult, WorldRenderer } from './render'
@@ -55,6 +57,9 @@ let selectedTarget: PickResult | null = null
 let connectionState: ConnectionState = 'Connecting'
 let tick = 0
 let year = 0
+const agentsById = new Map<number, AgentSnapshot>()
+const settlementsById = new Map<number, SettlementSnapshot>()
+const buildingsById = new Map<number, BuildingSnapshot>()
 let worldAgents: AgentSnapshot[] = []
 let worldBuildings: BuildingSnapshot[] = []
 let status: SimulationStatusPayload = { paused: true, speed: 1 }
@@ -123,6 +128,65 @@ function setConnectionState(next: ConnectionState): void {
   connEl.textContent = `Connection: ${next}`
 }
 
+function syncRendererFromMaps(): void {
+  worldAgents = Array.from(agentsById.values())
+  worldBuildings = Array.from(buildingsById.values())
+  renderer.setSettlements(Array.from(settlementsById.values()))
+  renderer.setBuildings(worldBuildings)
+  renderer.setAgents(worldAgents)
+}
+
+function applyInitialSnapshot(payload: WorldPayload): void {
+  agentsById.clear()
+  settlementsById.clear()
+  buildingsById.clear()
+  for (const agent of payload.agents) {
+    agentsById.set(agent.id, agent)
+  }
+  for (const settlement of payload.settlements) {
+    settlementsById.set(settlement.id, settlement)
+  }
+  for (const building of payload.buildings) {
+    buildingsById.set(building.id, building)
+  }
+  syncRendererFromMaps()
+}
+
+function applyWorldDelta(payload: WorldDeltaPayload): void {
+  for (const agent of payload.addedAgents) {
+    agentsById.set(agent.id, agent)
+  }
+  for (const agent of payload.updatedAgents) {
+    agentsById.set(agent.id, agent)
+  }
+  for (const id of payload.removedAgentIds) {
+    agentsById.delete(id)
+  }
+  for (const settlement of payload.addedSettlements) {
+    settlementsById.set(settlement.id, settlement)
+  }
+  for (const settlement of payload.updatedSettlements) {
+    settlementsById.set(settlement.id, settlement)
+  }
+  for (const id of payload.removedSettlementIds) {
+    settlementsById.delete(id)
+  }
+  for (const building of payload.addedBuildings) {
+    buildingsById.set(building.id, building)
+  }
+  for (const building of payload.updatedBuildings) {
+    buildingsById.set(building.id, building)
+  }
+  for (const id of payload.removedBuildingIds) {
+    buildingsById.delete(id)
+  }
+  syncRendererFromMaps()
+}
+
+function showSendFailure(reason: string): void {
+  appendEvent(`Not connected -- ${reason} was not sent`)
+}
+
 function appendEvent(text: string): void {
   const stamp = new Date().toLocaleTimeString()
   const line = document.createElement('div')
@@ -140,23 +204,42 @@ const network = new UniverseNetwork(
       tick = message.tick
     }
 
-    if (message.type === 'initial_snapshot' || message.type === 'world_delta') {
-      if (message.type === 'initial_snapshot') {
-        latestSnapshotSizeBytes = new Blob([serialized]).size
-      } else {
-        latestDeltaSizeBytes = new Blob([serialized]).size
-      }
+    if (message.type === 'initial_snapshot') {
+      latestSnapshotSizeBytes = new Blob([serialized]).size
       const payload = message.payload as unknown as WorldPayload
       year = payload.year
-      worldAgents = payload.agents
-      worldBuildings = payload.buildings
-      renderer.setSettlements(payload.settlements)
-      renderer.setBuildings(payload.buildings)
-      renderer.setAgents(payload.agents)
+      applyInitialSnapshot(payload)
       renderer.setSimulationState(status.paused, status.speed)
       simEl.textContent = `Year ${year} · Tick ${tick} · Speed ${status.speed}x · ${status.paused ? 'Paused' : 'Running'}`
       if (selectedTarget?.type === 'agent') {
-        network.send({ type: 'request_entity_details', entityId: selectedTarget.id })
+        if (!network.send({ type: 'request_entity_details', entityId: selectedTarget.id })) {
+          showSendFailure('entity details request')
+        }
+      }
+      if (selectedTarget?.type === 'building') {
+        const selected = findBuilding(selectedTarget.id)
+        if (selected !== undefined) {
+          renderBuildingInspector(selected)
+        } else {
+          selectedTarget = null
+          renderer.select(null)
+          inspectorBody.textContent = 'Select an agent or building'
+        }
+      }
+      return
+    }
+
+    if (message.type === 'world_delta') {
+      latestDeltaSizeBytes = new Blob([serialized]).size
+      const payload = message.payload as unknown as WorldDeltaPayload
+      year = payload.year
+      applyWorldDelta(payload)
+      renderer.setSimulationState(status.paused, status.speed)
+      simEl.textContent = `Year ${year} · Tick ${tick} · Speed ${status.speed}x · ${status.paused ? 'Paused' : 'Running'}`
+      if (selectedTarget?.type === 'agent') {
+        if (!network.send({ type: 'request_entity_details', entityId: selectedTarget.id })) {
+          showSendFailure('entity details request')
+        }
       }
       if (selectedTarget?.type === 'building') {
         const selected = findBuilding(selectedTarget.id)
@@ -201,7 +284,9 @@ const network = new UniverseNetwork(
           selectedTarget = { type: 'agent', id: entityId }
           renderer.select(selectedTarget)
           renderer.focus(selectedTarget)
-          network.send({ type: 'request_entity_details', entityId })
+          if (!network.send({ type: 'request_entity_details', entityId })) {
+            showSendFailure('entity details request')
+          }
         }
       }
       eventsEl.prepend(line)
@@ -240,7 +325,9 @@ canvas.addEventListener('click', (event) => {
   selectedTarget = picked
   renderer.select(picked)
   if (picked?.type === 'agent') {
-    network.send({ type: 'request_entity_details', entityId: picked.id })
+    if (!network.send({ type: 'request_entity_details', entityId: picked.id })) {
+      showSendFailure('entity details request')
+    }
     return
   }
   if (picked?.type === 'building') {
@@ -259,14 +346,28 @@ canvas.addEventListener('dblclick', () => {
   }
 })
 
-;(document.getElementById('pause') as HTMLButtonElement).onclick = () => network.send({ type: 'pause' })
-;(document.getElementById('resume') as HTMLButtonElement).onclick = () => network.send({ type: 'resume' })
-;(document.getElementById('step') as HTMLButtonElement).onclick = () => network.send({ type: 'single_step' })
+;(document.getElementById('pause') as HTMLButtonElement).onclick = () => {
+  if (!network.send({ type: 'pause' })) {
+    showSendFailure('pause')
+  }
+}
+;(document.getElementById('resume') as HTMLButtonElement).onclick = () => {
+  if (!network.send({ type: 'resume' })) {
+    showSendFailure('resume')
+  }
+}
+;(document.getElementById('step') as HTMLButtonElement).onclick = () => {
+  if (!network.send({ type: 'single_step' })) {
+    showSendFailure('step')
+  }
+}
 
 document.querySelectorAll('button[data-speed]').forEach((node) => {
   node.addEventListener('click', () => {
     const speed = Number((node as HTMLButtonElement).dataset.speed)
-    network.send({ type: 'set_speed', speed })
+    if (!network.send({ type: 'set_speed', speed })) {
+      showSendFailure('speed change')
+    }
   })
 })
 

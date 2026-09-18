@@ -171,6 +171,12 @@ struct Household {
     std::int64_t derived_wealth_points{};
 };
 
+enum class SettlementTier : std::uint8_t {
+    Village = 0,
+    Town = 1,
+    City = 2,
+};
+
 struct Settlement {
     SettlementId id{};
     RegionId region_id{};
@@ -199,6 +205,10 @@ struct Settlement {
     std::int64_t last_max_household_wealth{};
     std::uint64_t last_inequality_numerator{};
     std::uint64_t last_inequality_denominator{};
+    std::uint64_t population{};
+    SettlementTier tier{SettlementTier::Village};
+    SettlementTier pending_tier{SettlementTier::Village};
+    std::uint32_t tier_transition_streak{};
 };
 
 enum class BuildingType : std::uint8_t {
@@ -267,6 +277,7 @@ enum class EventType : std::uint8_t {
     SettlementExtinct = 3,
     DiscoveryMade = 4,
     InstitutionFounded = 5,
+    SettlementMerged = 6,
 };
 
 struct BirthEventPayload {
@@ -300,6 +311,14 @@ struct SettlementExtinctEventPayload {
     [[nodiscard]] bool operator==(const SettlementExtinctEventPayload& other) const = default;
 };
 
+struct SettlementMergedEventPayload {
+    SettlementId survivor_settlement_id{};
+    SettlementId absorbed_settlement_id{};
+    RegionId region_id{};
+
+    [[nodiscard]] bool operator==(const SettlementMergedEventPayload& other) const = default;
+};
+
 struct DiscoveryMadeEventPayload {
     std::uint32_t discovery_key{};
     PersonId discoverer_id{};
@@ -327,7 +346,8 @@ using SimulationEventPayload = std::variant<
     SettlementFoundedEventPayload,
     SettlementExtinctEventPayload,
     DiscoveryMadeEventPayload,
-    InstitutionFoundedEventPayload>;
+    InstitutionFoundedEventPayload,
+    SettlementMergedEventPayload>;
 
 struct SimulationEvent {
     EventId id{};
@@ -715,6 +735,8 @@ private:
     void process_settlement_restructuring(std::uint64_t demographic_year);
     void process_settlement_extinction();
     void process_settlement_founding(std::uint64_t demographic_year);
+    void process_settlement_merging();
+    void merge_settlements(SettlementId survivor_id, SettlementId absorbed_id);
     [[nodiscard]] std::uint32_t settlement_pressure_per_10k(const Settlement& settlement) const noexcept;
     [[nodiscard]] std::int64_t settlement_accessible_food_capacity_per_day(const Settlement& settlement) const noexcept;
     [[nodiscard]] Settlement* find_settlement_mutable(SettlementId settlement_id) noexcept;
@@ -731,6 +753,7 @@ private:
     EventId emit_birth_event(PersonId child_id, HouseholdId household_id, PersonId mother_id, std::optional<PersonId> father_id);
     EventId emit_settlement_founded_event(SettlementId settlement_id, RegionId region_id, std::optional<SettlementId> source_settlement_id);
     EventId emit_settlement_extinct_event(SettlementId settlement_id, RegionId region_id);
+    EventId emit_settlement_merged_event(SettlementId survivor_settlement_id, SettlementId absorbed_settlement_id, RegionId region_id);
     EventId emit_discovery_made_event(std::uint32_t discovery_key, PersonId discoverer_id, SettlementId settlement_id);
     EventId emit_institution_founded_event(InstitutionId institution_id, InstitutionKind kind, SettlementId settlement_id, PersonId founder_id);
     [[nodiscard]] MemoryId append_memory(AgentMemory memory);

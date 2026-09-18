@@ -19,6 +19,8 @@ using universe::ui::ClientCommand;
 using universe::ui::ClientCommandType;
 using universe::ui::SimulationController;
 
+constexpr std::uint32_t kProtocolVersion = 2U;
+
 struct RuntimeState {
     std::atomic<bool> running{true};
     std::atomic<bool> paused{true};
@@ -38,14 +40,14 @@ void command_reader_thread(RuntimeState& runtime) {
     std::string line;
     while (runtime.running.load() && std::getline(std::cin, line)) {
         if (line.size() > 4096U) {
-            emit_line(runtime, universe::ui::make_error_message(1U, "command_too_large", "Command exceeds max size"));
+            emit_line(runtime, universe::ui::make_error_message(kProtocolVersion, "command_too_large", "Command exceeds max size"));
             continue;
         }
 
         std::string error;
         const auto parsed = universe::ui::parse_client_command(line, error);
         if (!parsed.has_value()) {
-            emit_line(runtime, universe::ui::make_error_message(1U, "invalid_command", error));
+            emit_line(runtime, universe::ui::make_error_message(kProtocolVersion, "invalid_command", error));
             continue;
         }
 
@@ -91,10 +93,10 @@ int main(int argc, char** argv) {
 
     std::thread reader{command_reader_thread, std::ref(runtime)};
 
-    emit_line(runtime, universe::ui::make_hello_message(1U));
-    auto initial_snapshot = universe::ui::build_world_snapshot(controller);
-    emit_line(runtime, universe::ui::make_snapshot_message(1U, initial_snapshot, true));
-    emit_line(runtime, universe::ui::make_status_message(1U, initial_snapshot.tick, true, 1U));
+    emit_line(runtime, universe::ui::make_hello_message(kProtocolVersion));
+    auto previous_snapshot = universe::ui::build_world_snapshot(controller);
+    emit_line(runtime, universe::ui::make_snapshot_message(kProtocolVersion, previous_snapshot, true));
+    emit_line(runtime, universe::ui::make_status_message(kProtocolVersion, previous_snapshot.tick, true, 1U));
     std::size_t last_event_count = controller.events().size();
 
     std::uint64_t step_counter = 0;
@@ -103,46 +105,49 @@ int main(int argc, char** argv) {
         for (const auto& command : commands) {
             switch (command.type) {
                 case ClientCommandType::Hello: {
-                    emit_line(runtime, universe::ui::make_hello_message(1U));
+                    emit_line(runtime, universe::ui::make_hello_message(kProtocolVersion));
                     break;
                 }
                 case ClientCommandType::Pause: {
                     runtime.paused.store(true);
                     const auto snapshot = universe::ui::build_world_snapshot(controller);
-                    emit_line(runtime, universe::ui::make_status_message(1U, snapshot.tick, true, runtime.speed.load()));
+                    emit_line(runtime, universe::ui::make_status_message(kProtocolVersion, snapshot.tick, true, runtime.speed.load()));
                     break;
                 }
                 case ClientCommandType::Resume: {
                     runtime.paused.store(false);
                     const auto snapshot = universe::ui::build_world_snapshot(controller);
-                    emit_line(runtime, universe::ui::make_status_message(1U, snapshot.tick, false, runtime.speed.load()));
+                    emit_line(runtime, universe::ui::make_status_message(kProtocolVersion, snapshot.tick, false, runtime.speed.load()));
                     break;
                 }
                 case ClientCommandType::SetSpeed: {
                     runtime.speed.store(command.speed);
                     const auto snapshot = universe::ui::build_world_snapshot(controller);
-                    emit_line(runtime, universe::ui::make_status_message(1U, snapshot.tick, runtime.paused.load(), runtime.speed.load()));
+                    emit_line(runtime, universe::ui::make_status_message(kProtocolVersion, snapshot.tick, runtime.paused.load(), runtime.speed.load()));
                     break;
                 }
                 case ClientCommandType::SingleStep: {
                     controller.advance_days(1);
                     const auto events = controller.events();
                     for (std::size_t i = last_event_count; i < events.size(); ++i) {
-                        emit_line(runtime, universe::ui::make_world_event_message(1U, events[i]));
+                        emit_line(runtime, universe::ui::make_world_event_message(kProtocolVersion, events[i]));
                     }
                     last_event_count = events.size();
                     const auto snapshot = universe::ui::build_world_snapshot(controller);
-                    emit_line(runtime, universe::ui::make_snapshot_message(1U, snapshot, false));
-                    emit_line(runtime, universe::ui::make_status_message(1U, snapshot.tick, runtime.paused.load(), runtime.speed.load()));
+                    const auto delta = universe::ui::build_world_delta(snapshot, previous_snapshot);
+                    emit_line(runtime, universe::ui::make_delta_message(kProtocolVersion, delta));
+                    previous_snapshot = snapshot;
+                    emit_line(runtime, universe::ui::make_status_message(kProtocolVersion, snapshot.tick, runtime.paused.load(), runtime.speed.load()));
                     break;
                 }
                 case ClientCommandType::RequestSnapshot: {
                     const auto snapshot = universe::ui::build_world_snapshot(controller);
-                    emit_line(runtime, universe::ui::make_snapshot_message(1U, snapshot, true));
+                    emit_line(runtime, universe::ui::make_snapshot_message(kProtocolVersion, snapshot, true));
+                    previous_snapshot = snapshot;
                     break;
                 }
                 case ClientCommandType::RequestEntityDetails: {
-                    emit_line(runtime, universe::ui::make_entity_details_message(1U, controller, command.entity_id));
+                    emit_line(runtime, universe::ui::make_entity_details_message(kProtocolVersion, controller, command.entity_id));
                     break;
                 }
             }
@@ -156,16 +161,18 @@ int main(int argc, char** argv) {
 
             const auto events = controller.events();
             for (std::size_t i = last_event_count; i < events.size(); ++i) {
-                emit_line(runtime, universe::ui::make_world_event_message(1U, events[i]));
+                emit_line(runtime, universe::ui::make_world_event_message(kProtocolVersion, events[i]));
             }
             last_event_count = events.size();
 
             const auto snapshot = universe::ui::build_world_snapshot(controller);
-            emit_line(runtime, universe::ui::make_snapshot_message(1U, snapshot, false));
-            emit_line(runtime, universe::ui::make_status_message(1U, snapshot.tick, false, speed));
+            const auto delta = universe::ui::build_world_delta(snapshot, previous_snapshot);
+            emit_line(runtime, universe::ui::make_delta_message(kProtocolVersion, delta));
+            previous_snapshot = snapshot;
+            emit_line(runtime, universe::ui::make_status_message(kProtocolVersion, snapshot.tick, false, speed));
         } else if ((step_counter % 20U) == 0U) {
             const auto snapshot = universe::ui::build_world_snapshot(controller);
-            emit_line(runtime, universe::ui::make_status_message(1U, snapshot.tick, true, runtime.speed.load()));
+            emit_line(runtime, universe::ui::make_status_message(kProtocolVersion, snapshot.tick, true, runtime.speed.load()));
         }
 
         std::cout.flush();

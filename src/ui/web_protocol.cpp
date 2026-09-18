@@ -12,6 +12,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace universe::ui {
 
@@ -190,6 +191,8 @@ namespace {
             return "DiscoveryMade";
         case EventType::InstitutionFounded:
             return "InstitutionFounded";
+        case EventType::SettlementMerged:
+            return "SettlementMerged";
     }
     return "Unknown";
 }
@@ -485,6 +488,100 @@ WorldSnapshotView build_world_snapshot(const SimulationController& controller) {
     return snapshot;
 }
 
+WorldDeltaView build_world_delta(const WorldSnapshotView& current, const WorldSnapshotView& previous) {
+    WorldDeltaView delta{};
+    delta.tick = current.tick;
+    delta.year = current.year;
+    delta.population = current.population;
+
+    std::unordered_map<PersonId, const AgentRenderView*> previous_agents_by_id;
+    previous_agents_by_id.reserve(previous.agents.size());
+    for (const auto& agent : previous.agents) {
+        previous_agents_by_id.emplace(agent.id, &agent);
+    }
+    std::unordered_set<PersonId> current_agent_ids;
+    current_agent_ids.reserve(current.agents.size());
+    for (const auto& agent : current.agents) {
+        current_agent_ids.insert(agent.id);
+        const auto previous_it = previous_agents_by_id.find(agent.id);
+        const bool was_present = previous_it != previous_agents_by_id.end();
+        if (!agent.alive) {
+            // An agent is removed from the wire once dead, regardless of
+            // whether its record still lingers in the underlying query view --
+            // it never appears as "updated" once its removal is observed.
+            if (was_present && previous_it->second->alive) {
+                delta.removed_agent_ids.push_back(agent.id);
+            }
+            continue;
+        }
+        if (was_present) {
+            delta.updated_agents.push_back(agent);
+        } else {
+            delta.added_agents.push_back(agent);
+        }
+    }
+    for (const auto& [agent_id, agent] : previous_agents_by_id) {
+        if (!current_agent_ids.contains(agent_id) && agent->alive) {
+            delta.removed_agent_ids.push_back(agent_id);
+        }
+    }
+    std::sort(delta.removed_agent_ids.begin(), delta.removed_agent_ids.end());
+
+    std::unordered_map<SettlementId, const SettlementRenderView*> previous_settlements_by_id;
+    previous_settlements_by_id.reserve(previous.settlements.size());
+    for (const auto& settlement : previous.settlements) {
+        previous_settlements_by_id.emplace(settlement.id, &settlement);
+    }
+    std::unordered_set<SettlementId> current_settlement_ids;
+    current_settlement_ids.reserve(current.settlements.size());
+    for (const auto& settlement : current.settlements) {
+        current_settlement_ids.insert(settlement.id);
+        const auto previous_it = previous_settlements_by_id.find(settlement.id);
+        const bool was_present = previous_it != previous_settlements_by_id.end();
+        if (!settlement.active) {
+            if (was_present && previous_it->second->active) {
+                delta.removed_settlement_ids.push_back(settlement.id);
+            }
+            continue;
+        }
+        if (was_present) {
+            delta.updated_settlements.push_back(settlement);
+        } else {
+            delta.added_settlements.push_back(settlement);
+        }
+    }
+    for (const auto& [settlement_id, settlement] : previous_settlements_by_id) {
+        if (!current_settlement_ids.contains(settlement_id) && settlement->active) {
+            delta.removed_settlement_ids.push_back(settlement_id);
+        }
+    }
+    std::sort(delta.removed_settlement_ids.begin(), delta.removed_settlement_ids.end());
+
+    std::unordered_map<BuildingId, const BuildingRenderView*> previous_buildings_by_id;
+    previous_buildings_by_id.reserve(previous.buildings.size());
+    for (const auto& building : previous.buildings) {
+        previous_buildings_by_id.emplace(building.id, &building);
+    }
+    std::unordered_set<BuildingId> current_building_ids;
+    current_building_ids.reserve(current.buildings.size());
+    for (const auto& building : current.buildings) {
+        current_building_ids.insert(building.id);
+        if (previous_buildings_by_id.contains(building.id)) {
+            delta.updated_buildings.push_back(building);
+        } else {
+            delta.added_buildings.push_back(building);
+        }
+    }
+    for (const auto& [building_id, building] : previous_buildings_by_id) {
+        if (!current_building_ids.contains(building_id)) {
+            delta.removed_building_ids.push_back(building_id);
+        }
+    }
+    std::sort(delta.removed_building_ids.begin(), delta.removed_building_ids.end());
+
+    return delta;
+}
+
 std::optional<ClientCommand> parse_client_command(std::string_view json, std::string& error_message) {
     const auto type = extract_string_field(json, "type");
     if (!type.has_value()) {
@@ -550,66 +647,88 @@ std::string make_status_message(
         ",\"speed\":" + std::to_string(speed) + "}}";
 }
 
+namespace {
+
+void write_agent_json(std::ostringstream& out, const AgentRenderView& agent) {
+    out << "{\"id\":" << agent.id
+        << ",\"householdId\":" << agent.household_id
+        << ",\"settlementId\":" << agent.settlement_id
+        << ",\"regionId\":" << agent.region_id
+        << ",\"alive\":" << (agent.alive ? "true" : "false")
+        << ",\"age\":" << agent.age_years
+        << ",\"sex\":\"" << (agent.sex == BiologicalSex::Female ? "Female" : "Male") << "\""
+        << ",\"occupation\":\"" << occupation_label(agent.occupation) << "\""
+        << ",\"position\":{\"x\":" << agent.x << ",\"y\":" << agent.y << ",\"z\":" << agent.z << "}}";
+}
+
+void write_settlement_json(std::ostringstream& out, const SettlementRenderView& settlement) {
+    out << "{\"id\":" << settlement.id
+        << ",\"regionId\":" << settlement.region_id
+        << ",\"active\":" << (settlement.active ? "true" : "false")
+        << ",\"accessSharePoints\":" << settlement.access_share_points
+        << ",\"position\":{\"x\":" << settlement.x << ",\"y\":" << settlement.y << ",\"z\":" << settlement.z << "}}";
+}
+
+void write_building_json(std::ostringstream& out, const BuildingRenderView& building) {
+    out << "{\"id\":" << building.id
+        << ",\"settlementId\":" << building.settlement_id
+        << ",\"regionId\":" << building.region_id
+        << ",\"type\":\"" << building.type << "\""
+        << ",\"state\":\"" << building.state << "\""
+        << ",\"settlementCommonsOwned\":" << (building.settlement_commons_owned ? "true" : "false")
+        << ",\"ownerHouseholdId\":" << building.owner_household_id
+        << ",\"progress\":" << building.progress
+        << ",\"position\":{\"x\":" << building.x << ",\"y\":" << building.y << ",\"z\":" << building.z << "}}";
+}
+
+template <typename T, typename Writer>
+void write_json_array(std::ostringstream& out, const std::vector<T>& items, Writer&& writer) {
+    out << '[';
+    for (std::size_t i = 0; i < items.size(); ++i) {
+        if (i > 0U) {
+            out << ',';
+        }
+        writer(out, items[i]);
+    }
+    out << ']';
+}
+
+template <typename Id>
+void write_id_array(std::ostringstream& out, const std::vector<Id>& ids) {
+    out << '[';
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+        if (i > 0U) {
+            out << ',';
+        }
+        out << ids[i];
+    }
+    out << ']';
+}
+
+}  // namespace
+
 std::string make_snapshot_message(
     const std::uint32_t protocol_version,
     const WorldSnapshotView& snapshot,
     const bool initial) {
+    (void)initial;
     std::ostringstream out;
     out << "{\"protocolVersion\":" << protocol_version
-        << ",\"type\":\"" << (initial ? "initial_snapshot" : "world_delta") << "\""
+        << ",\"type\":\"initial_snapshot\""
         << ",\"tick\":" << snapshot.tick
         << ",\"payload\":{"
         << "\"year\":" << snapshot.year
         << ",\"population\":" << snapshot.population
-        << ",\"agents\":[";
+        << ",\"agents\":";
+    write_json_array(out, snapshot.agents, write_agent_json);
 
-    for (std::size_t i = 0; i < snapshot.agents.size(); ++i) {
-        const auto& agent = snapshot.agents[i];
-        if (i > 0U) {
-            out << ',';
-        }
-        out << "{\"id\":" << agent.id
-            << ",\"householdId\":" << agent.household_id
-            << ",\"settlementId\":" << agent.settlement_id
-            << ",\"regionId\":" << agent.region_id
-            << ",\"alive\":" << (agent.alive ? "true" : "false")
-            << ",\"age\":" << agent.age_years
-            << ",\"sex\":\"" << (agent.sex == BiologicalSex::Female ? "Female" : "Male") << "\""
-            << ",\"occupation\":\"" << occupation_label(agent.occupation) << "\""
-            << ",\"position\":{\"x\":" << agent.x << ",\"y\":" << agent.y << ",\"z\":" << agent.z << "}}";
-    }
+    out << ",\"settlements\":";
+    write_json_array(out, snapshot.settlements, write_settlement_json);
 
-    out << "],\"settlements\":[";
-    for (std::size_t i = 0; i < snapshot.settlements.size(); ++i) {
-        const auto& settlement = snapshot.settlements[i];
-        if (i > 0U) {
-            out << ',';
-        }
-        out << "{\"id\":" << settlement.id
-            << ",\"regionId\":" << settlement.region_id
-            << ",\"active\":" << (settlement.active ? "true" : "false")
-            << ",\"accessSharePoints\":" << settlement.access_share_points
-            << ",\"position\":{\"x\":" << settlement.x << ",\"y\":" << settlement.y << ",\"z\":" << settlement.z << "}}";
-    }
+    out << ",\"buildings\":";
+    write_json_array(out, snapshot.buildings, write_building_json);
 
-    out << "],\"buildings\":[";
-    for (std::size_t i = 0; i < snapshot.buildings.size(); ++i) {
-        const auto& building = snapshot.buildings[i];
-        if (i > 0U) {
-            out << ',';
-        }
-        out << "{\"id\":" << building.id
-            << ",\"settlementId\":" << building.settlement_id
-            << ",\"regionId\":" << building.region_id
-            << ",\"type\":\"" << building.type << "\""
-            << ",\"state\":\"" << building.state << "\""
-            << ",\"settlementCommonsOwned\":" << (building.settlement_commons_owned ? "true" : "false")
-            << ",\"ownerHouseholdId\":" << building.owner_household_id
-            << ",\"progress\":" << building.progress
-            << ",\"position\":{\"x\":" << building.x << ",\"y\":" << building.y << ",\"z\":" << building.z << "}}";
-    }
-
-    out << "],\"regions\":[";
+    out << ",\"regions\":[";
     for (std::size_t i = 0; i < snapshot.regions.size(); ++i) {
         const auto& region = snapshot.regions[i];
         if (i > 0U) {
@@ -628,6 +747,40 @@ std::string make_snapshot_message(
     }
 
     out << "]}}";
+    return out.str();
+}
+
+std::string make_delta_message(const std::uint32_t protocol_version, const WorldDeltaView& delta) {
+    std::ostringstream out;
+    out << "{\"protocolVersion\":" << protocol_version
+        << ",\"type\":\"world_delta\""
+        << ",\"tick\":" << delta.tick
+        << ",\"payload\":{"
+        << "\"year\":" << delta.year
+        << ",\"population\":" << delta.population
+
+        << ",\"addedAgents\":";
+    write_json_array(out, delta.added_agents, write_agent_json);
+    out << ",\"updatedAgents\":";
+    write_json_array(out, delta.updated_agents, write_agent_json);
+    out << ",\"removedAgentIds\":";
+    write_id_array(out, delta.removed_agent_ids);
+
+    out << ",\"addedSettlements\":";
+    write_json_array(out, delta.added_settlements, write_settlement_json);
+    out << ",\"updatedSettlements\":";
+    write_json_array(out, delta.updated_settlements, write_settlement_json);
+    out << ",\"removedSettlementIds\":";
+    write_id_array(out, delta.removed_settlement_ids);
+
+    out << ",\"addedBuildings\":";
+    write_json_array(out, delta.added_buildings, write_building_json);
+    out << ",\"updatedBuildings\":";
+    write_json_array(out, delta.updated_buildings, write_building_json);
+    out << ",\"removedBuildingIds\":";
+    write_id_array(out, delta.removed_building_ids);
+
+    out << "}}";
     return out.str();
 }
 

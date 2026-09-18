@@ -40,6 +40,20 @@ export interface WorldPayload {
   buildings: BuildingSnapshot[]
 }
 
+export interface WorldDeltaPayload {
+  year: number
+  population: number
+  addedAgents: AgentSnapshot[]
+  updatedAgents: AgentSnapshot[]
+  removedAgentIds: number[]
+  addedSettlements: SettlementSnapshot[]
+  updatedSettlements: SettlementSnapshot[]
+  removedSettlementIds: number[]
+  addedBuildings: BuildingSnapshot[]
+  updatedBuildings: BuildingSnapshot[]
+  removedBuildingIds: number[]
+}
+
 export interface ServerEnvelope {
   protocolVersion: number
   type:
@@ -78,4 +92,4 @@ export interface SimulationStatusPayload {
   speed: number
 }
 
-export const PROTOCOL_VERSION = 1
+export const PROTOCOL_VERSION = 2

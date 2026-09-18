@@ -412,6 +412,8 @@ std::int64_t environment_class_wild_capacity_units_per_area(const EnvironmentCla
             return std::holds_alternative<DiscoveryMadeEventPayload>(event.payload);
         case EventType::InstitutionFounded:
             return std::holds_alternative<InstitutionFoundedEventPayload>(event.payload);
+        case EventType::SettlementMerged:
+            return std::holds_alternative<SettlementMergedEventPayload>(event.payload);
     }
     return false;
 }
@@ -5474,9 +5476,125 @@ void Simulation::process_settlement_founding(const std::uint64_t demographic_yea
     });
 }
 
+void Simulation::merge_settlements(const SettlementId survivor_id, const SettlementId absorbed_id) {
+    auto* survivor = find_settlement_mutable(survivor_id);
+    auto* absorbed = find_settlement_mutable(absorbed_id);
+    if (survivor == nullptr || absorbed == nullptr) {
+        return;
+    }
+
+    for (auto& household : state_.households) {
+        if (household.settlement_id == absorbed_id) {
+            household.settlement_id = survivor_id;
+            household.region_id = survivor->region_id;
+        }
+    }
+    for (auto& cohort : state_.population_cohorts) {
+        if (cohort.settlement_id == absorbed_id) {
+            cohort.settlement_id = survivor_id;
+        }
+    }
+    for (auto& institution : state_.institutions) {
+        if (institution.settlement_id == absorbed_id) {
+            institution.settlement_id = survivor_id;
+        }
+    }
+    for (auto& record : state_.knowledge_records) {
+        if (record.settlement_id == absorbed_id) {
+            record.settlement_id = survivor_id;
+        }
+    }
+
+    survivor->materials.wood.value += absorbed->materials.wood.value;
+    survivor->materials.stone.value += absorbed->materials.stone.value;
+    survivor->materials.timber.value += absorbed->materials.timber.value;
+    survivor->materials.basic_tool.value += absorbed->materials.basic_tool.value;
+    survivor->cumulative_wood_extracted += absorbed->cumulative_wood_extracted;
+    survivor->cumulative_stone_extracted += absorbed->cumulative_stone_extracted;
+    survivor->cumulative_timber_produced += absorbed->cumulative_timber_produced;
+    survivor->cumulative_basic_tool_produced += absorbed->cumulative_basic_tool_produced;
+    survivor->cumulative_basic_tool_broken += absorbed->cumulative_basic_tool_broken;
+
+    absorbed->materials.wood.value = 0;
+    absorbed->materials.stone.value = 0;
+    absorbed->materials.timber.value = 0;
+    absorbed->materials.basic_tool.value = 0;
+
+    const auto combined_share =
+        static_cast<std::uint64_t>(survivor->access_share_points) + static_cast<std::uint64_t>(absorbed->access_share_points);
+    survivor->access_share_points = static_cast<std::uint32_t>(std::min<std::uint64_t>(combined_share, kSettlementShareScale));
+
+    const auto absorbed_region_id = absorbed->region_id;
+    absorbed->active = false;
+    absorbed->access_share_points = 0U;
+
+    emit_settlement_merged_event(survivor_id, absorbed_id, absorbed_region_id);
+}
+
+void Simulation::process_settlement_merging() {
+    constexpr std::int64_t kMergeDistanceThreshold = 2'000;
+    constexpr std::uint32_t kMergeViabilityStreakDays = 365U;
+    constexpr std::uint64_t kMergeMinimumPopulation = 50U;
+
+    std::vector<SettlementId> candidate_ids;
+    for (const auto& settlement : state_.settlements) {
+        if (settlement.active && settlement.economic_viability_streak >= kMergeViabilityStreakDays &&
+            settlement.population >= kMergeMinimumPopulation) {
+            candidate_ids.push_back(settlement.id);
+        }
+    }
+    std::sort(candidate_ids.begin(), candidate_ids.end());
+
+    std::unordered_set<SettlementId> merged_away;
+    for (std::size_t i = 0; i < candidate_ids.size(); ++i) {
+        const auto a_id = candidate_ids[i];
+        if (merged_away.contains(a_id)) {
+            continue;
+        }
+
+        for (std::size_t j = i + 1; j < candidate_ids.size(); ++j) {
+            const auto b_id = candidate_ids[j];
+            if (merged_away.contains(b_id)) {
+                continue;
+            }
+
+            const auto* a = find_settlement(a_id);
+            const auto* b = find_settlement(b_id);
+            if (a == nullptr || b == nullptr || !a->active || !b->active) {
+                continue;
+            }
+            if (a->region_id != b->region_id) {
+                continue;
+            }
+
+            const auto dx = a->position_x - b->position_x;
+            const auto dz = a->position_z - b->position_z;
+            const auto distance_squared = (dx * dx) + (dz * dz);
+            if (distance_squared > kMergeDistanceThreshold * kMergeDistanceThreshold) {
+                continue;
+            }
+
+            auto survivor_id = a_id;
+            auto absorbed_id = b_id;
+            if (b->population > a->population || (b->population == a->population && b_id < a_id)) {
+                survivor_id = b_id;
+                absorbed_id = a_id;
+            }
+
+            merge_settlements(survivor_id, absorbed_id);
+            merged_away.insert(absorbed_id);
+
+            if (absorbed_id == a_id) {
+                break;
+            }
+        }
+    }
+}
+
 void Simulation::process_settlement_restructuring(const std::uint64_t demographic_year) {
     process_settlement_extinction();
     process_settlement_founding(demographic_year);
+    process_settlement_merging();
     process_settlement_extinction();
 }
 
@@ -6260,6 +6378,23 @@ EventId Simulation::emit_settlement_extinct_event(const SettlementId settlement_
         .type = EventType::SettlementExtinct,
         .payload = SettlementExtinctEventPayload{
             .settlement_id = settlement_id,
+            .region_id = region_id,
+        },
+    });
+    return event_id;
+}
+
+EventId Simulation::emit_settlement_merged_event(
+    const SettlementId survivor_settlement_id,
+    const SettlementId absorbed_settlement_id,
+    const RegionId region_id) {
+    const auto event_id = append_event(SimulationEvent{
+        .id = 0,
+        .timestamp = state_.time,
+        .type = EventType::SettlementMerged,
+        .payload = SettlementMergedEventPayload{
+            .survivor_settlement_id = survivor_settlement_id,
+            .absorbed_settlement_id = absorbed_settlement_id,
             .region_id = region_id,
         },
     });
@@ -7557,6 +7692,56 @@ void Simulation::refresh_economic_aggregates() noexcept {
     std::unordered_map<SettlementId, std::vector<std::int64_t>> wealth_by_settlement;
     wealth_by_settlement.reserve(state_.settlements.size());
 
+    std::unordered_map<SettlementId, std::uint64_t> population_by_settlement;
+    population_by_settlement.reserve(state_.settlements.size());
+
+    constexpr std::uint64_t kTownPopulationThreshold = 1'000U;
+    constexpr std::uint64_t kCityPopulationThreshold = 10'000U;
+    constexpr std::uint32_t kTierHysteresisDays = 365U;
+
+    const auto tier_rank = [](const SettlementTier tier) noexcept { return static_cast<std::uint8_t>(tier); };
+    const auto tier_from_population = [](const std::uint64_t population) noexcept {
+        if (population >= kCityPopulationThreshold) {
+            return SettlementTier::City;
+        }
+        if (population >= kTownPopulationThreshold) {
+            return SettlementTier::Town;
+        }
+        return SettlementTier::Village;
+    };
+    const auto refresh_tier = [&](Settlement& settlement) noexcept {
+        const auto population_tier = tier_from_population(settlement.population);
+        auto target_tier = settlement.tier;
+        if (tier_rank(population_tier) > tier_rank(settlement.tier)) {
+            target_tier = settlement.economic_viability_streak > 0U ? population_tier : settlement.tier;
+        } else if (tier_rank(population_tier) < tier_rank(settlement.tier)) {
+            target_tier = population_tier;
+        }
+        if (settlement.economic_viability_streak == 0U && target_tier == settlement.tier &&
+            settlement.tier != SettlementTier::Village) {
+            target_tier = static_cast<SettlementTier>(tier_rank(settlement.tier) - 1U);
+        }
+
+        if (target_tier == settlement.tier) {
+            settlement.pending_tier = settlement.tier;
+            settlement.tier_transition_streak = 0U;
+            return;
+        }
+
+        if (target_tier == settlement.pending_tier) {
+            settlement.tier_transition_streak = saturating_increment_u32(settlement.tier_transition_streak);
+        } else {
+            settlement.pending_tier = target_tier;
+            settlement.tier_transition_streak = 1U;
+        }
+
+        if (settlement.tier_transition_streak >= kTierHysteresisDays) {
+            settlement.tier = target_tier;
+            settlement.pending_tier = target_tier;
+            settlement.tier_transition_streak = 0U;
+        }
+    };
+
     for (auto& household : state_.households) {
         const auto wealth_food = std::max<std::int64_t>(0, household.resources.food_inventory.value);
         const auto wealth_wood = std::max<std::int64_t>(0, household.owned_materials.wood.value) * kWealthValueWood;
@@ -7566,9 +7751,16 @@ void Simulation::refresh_economic_aggregates() noexcept {
         household.derived_wealth_points = wealth_food + wealth_wood + wealth_stone + wealth_timber + wealth_tools;
         state_.total_household_wealth += household.derived_wealth_points;
         wealth_by_settlement[household.settlement_id].push_back(household.derived_wealth_points);
+        population_by_settlement[household.settlement_id] += static_cast<std::uint64_t>(household.member_ids.size());
+    }
+
+    for (const auto& cohort : state_.population_cohorts) {
+        population_by_settlement[cohort.settlement_id] += cohort.population;
     }
 
     for (auto& settlement : state_.settlements) {
+        const auto population_it = population_by_settlement.find(settlement.id);
+        settlement.population = population_it != population_by_settlement.end() ? population_it->second : 0U;
         state_.total_settlement_commons_food += std::max<std::int64_t>(0, settlement.commons_food.value);
         state_.total_exchange_volume += std::max<std::int64_t>(0, settlement.last_exchange_volume);
         state_.total_transfer_volume += std::max<std::int64_t>(0, settlement.last_transfer_food_volume);
@@ -7588,6 +7780,7 @@ void Simulation::refresh_economic_aggregates() noexcept {
             settlement.last_inequality_numerator = 0;
             settlement.last_inequality_denominator = 0;
             settlement.economic_viability_streak = 0U;
+            refresh_tier(settlement);
             continue;
         }
 
@@ -7638,6 +7831,8 @@ void Simulation::refresh_economic_aggregates() noexcept {
         } else {
             settlement.economic_viability_streak = 0U;
         }
+
+        refresh_tier(settlement);
     }
 
     for (const auto& building : state_.buildings) {

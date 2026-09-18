@@ -147,6 +147,8 @@ struct UiState {
             return "DiscoveryMade";
         case EventType::InstitutionFounded:
             return "InstitutionFounded";
+        case EventType::SettlementMerged:
+            return "SettlementMerged";
     }
     return "Unknown";
 }

@@ -557,6 +557,14 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
             payload.write_u8(static_cast<std::uint8_t>(payload_data->kind));
             payload.write_u64(payload_data->settlement_id);
             payload.write_u64(payload_data->founder_id);
+        } else if (event->type == EventType::SettlementMerged) {
+            const auto* payload_data = std::get_if<SettlementMergedEventPayload>(&event->payload);
+            if (payload_data == nullptr) {
+                throw std::invalid_argument("SettlementMerged event payload mismatch");
+            }
+            payload.write_u64(payload_data->survivor_settlement_id);
+            payload.write_u64(payload_data->absorbed_settlement_id);
+            payload.write_u64(payload_data->region_id);
         } else {
             throw std::invalid_argument("Unknown event type");
         }
@@ -807,6 +815,10 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
         payload.write_i64(settlement->last_max_household_wealth);
         payload.write_u64(settlement->last_inequality_numerator);
         payload.write_u64(settlement->last_inequality_denominator);
+        payload.write_u64(settlement->population);
+        payload.write_u8(static_cast<std::uint8_t>(settlement->tier));
+        payload.write_u8(static_cast<std::uint8_t>(settlement->pending_tier));
+        payload.write_u32(settlement->tier_transition_streak);
     }
 
     std::vector<const Building*> building_order;
@@ -1390,7 +1402,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
             return load_error(SnapshotErrorCode::TruncatedData, "Snapshot event record is truncated");
         }
 
-        if (type_raw > 5U) {
+        if (type_raw > 6U) {
             return load_error(SnapshotErrorCode::InvalidEnum, "Snapshot event type is invalid");
         }
         event.type = static_cast<EventType>(type_raw);
@@ -1465,6 +1477,14 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
                 return load_error(SnapshotErrorCode::InvalidEnum, "Snapshot institution founded event kind is invalid");
             }
             payload_data.kind = static_cast<InstitutionKind>(kind_raw);
+            event.payload = payload_data;
+        } else if (event.type == EventType::SettlementMerged) {
+            SettlementMergedEventPayload payload_data{};
+            if (!payload_reader.read_u64(payload_data.survivor_settlement_id) ||
+                !payload_reader.read_u64(payload_data.absorbed_settlement_id) ||
+                !payload_reader.read_u64(payload_data.region_id)) {
+                return load_error(SnapshotErrorCode::TruncatedData, "Snapshot settlement merged event payload is truncated");
+            }
             event.payload = payload_data;
         }
 
@@ -2190,6 +2210,10 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         std::int64_t max_wealth = 0;
         std::uint64_t inequality_numerator = 0;
         std::uint64_t inequality_denominator = 0;
+        std::uint64_t population = 0;
+        std::uint8_t tier_raw = 0;
+        std::uint8_t pending_tier_raw = 0;
+        std::uint32_t tier_transition_streak = 0;
 
         if (!payload_reader.read_u64(settlement_id) ||
             !payload_reader.read_i64(commons_food) ||
@@ -2204,8 +2228,16 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
             !payload_reader.read_i64(min_wealth) ||
             !payload_reader.read_i64(max_wealth) ||
             !payload_reader.read_u64(inequality_numerator) ||
-            !payload_reader.read_u64(inequality_denominator)) {
+            !payload_reader.read_u64(inequality_denominator) ||
+            !payload_reader.read_u64(population) ||
+            !payload_reader.read_u8(tier_raw) ||
+            !payload_reader.read_u8(pending_tier_raw) ||
+            !payload_reader.read_u32(tier_transition_streak)) {
             return load_error(SnapshotErrorCode::TruncatedData, "Snapshot settlement economy record is truncated");
+        }
+        if (tier_raw > static_cast<std::uint8_t>(SettlementTier::City) ||
+            pending_tier_raw > static_cast<std::uint8_t>(SettlementTier::City)) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot settlement tier must be a known value");
         }
 
         if (!settlement_economy_ids.insert(settlement_id).second) {
@@ -2235,6 +2267,10 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         settlement->last_max_household_wealth = max_wealth;
         settlement->last_inequality_numerator = inequality_numerator;
         settlement->last_inequality_denominator = inequality_denominator;
+        settlement->population = population;
+        settlement->tier = static_cast<SettlementTier>(tier_raw);
+        settlement->pending_tier = static_cast<SettlementTier>(pending_tier_raw);
+        settlement->tier_transition_streak = tier_transition_streak;
     }
 
     std::uint64_t building_count = 0;
@@ -3004,6 +3040,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     std::uint64_t death_event_count = 0;
     std::unordered_map<SettlementId, EventId> founded_event_id_by_settlement;
     std::unordered_map<SettlementId, EventId> extinct_event_id_by_settlement;
+    std::unordered_map<SettlementId, EventId> merged_event_id_by_absorbed_settlement;
     for (const auto& event : restored_state.event_log) {
         if (event.id != expected_event_id) {
             return load_error(SnapshotErrorCode::InvalidState, "Snapshot event ids must be contiguous");
@@ -3153,6 +3190,36 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
             if (!person_by_id.contains(payload_data.founder_id)) {
                 return load_error(SnapshotErrorCode::InvalidReference, "Snapshot institution founded event references unknown founder");
             }
+        } else if (event.type == EventType::SettlementMerged) {
+            if (!std::holds_alternative<SettlementMergedEventPayload>(event.payload)) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot event payload does not match settlement merged type");
+            }
+
+            const auto& payload_data = std::get<SettlementMergedEventPayload>(event.payload);
+            if (payload_data.survivor_settlement_id == 0U || payload_data.absorbed_settlement_id == 0U ||
+                payload_data.region_id == 0U) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot merged event must include survivor, absorbed and region ids");
+            }
+            if (payload_data.survivor_settlement_id == payload_data.absorbed_settlement_id) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot merged event survivor and absorbed settlement must differ");
+            }
+            if (!settlement_by_id.contains(payload_data.survivor_settlement_id)) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot merged event references unknown survivor settlement");
+            }
+            if (!settlement_by_id.contains(payload_data.absorbed_settlement_id)) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot merged event references unknown absorbed settlement");
+            }
+            if (!region_by_id.contains(payload_data.region_id)) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot merged event references unknown region");
+            }
+            const auto* absorbed_settlement = settlement_by_id.at(payload_data.absorbed_settlement_id);
+            if (absorbed_settlement->active) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot merged event absorbed settlement must be inactive");
+            }
+            if (merged_event_id_by_absorbed_settlement.contains(payload_data.absorbed_settlement_id)) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot settlement has duplicate merged-away events");
+            }
+            merged_event_id_by_absorbed_settlement.emplace(payload_data.absorbed_settlement_id, event.id);
         }
     }
 

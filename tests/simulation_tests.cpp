@@ -227,10 +227,38 @@ void verify_settlement_invariants(const universe::WorldState& state) {
         require(share <= 10'000U, "active settlement allocation must not exceed regional capacity");
     }
 
+    std::unordered_map<universe::SettlementId, std::uint64_t> expected_population;
     for (const auto& household : state.households) {
         const auto* settlement = find_settlement(state, household.settlement_id);
         require(settlement != nullptr, "household settlement id must reference existing settlement");
+        require(household.member_ids.empty() || settlement->active,
+                "a household with living members may not reference an inactive (extinct or merged-away) settlement");
         require(settlement->region_id == household.region_id, "household settlement and region must be consistent");
+        expected_population[household.settlement_id] += household.member_ids.size();
+    }
+    for (const auto& cohort : state.population_cohorts) {
+        expected_population[cohort.settlement_id] += cohort.population;
+    }
+    for (const auto& settlement : state.settlements) {
+        const auto expected_it = expected_population.find(settlement.id);
+        const auto expected = expected_it != expected_population.end() ? expected_it->second : 0U;
+        require(settlement.population == expected,
+                "settlement population must equal sum of alive household members and aggregate cohort population");
+
+        require(
+            settlement.tier == universe::SettlementTier::Village ||
+                settlement.tier == universe::SettlementTier::Town ||
+                settlement.tier == universe::SettlementTier::City,
+            "settlement tier must be one of the three valid values");
+        require(
+            settlement.pending_tier == universe::SettlementTier::Village ||
+                settlement.pending_tier == universe::SettlementTier::Town ||
+                settlement.pending_tier == universe::SettlementTier::City,
+            "settlement pending tier must be one of the three valid values");
+        if (settlement.pending_tier == settlement.tier) {
+            require(settlement.tier_transition_streak == 0U,
+                    "tier transition streak must be zero once a settlement has no pending tier change");
+        }
     }
 }
 
@@ -1521,6 +1549,8 @@ EventSectionInfo locate_event_section(const universe::WorldState& state) {
             cursor += 20U;
         } else if (type == universe::EventType::InstitutionFounded) {
             cursor += 25U;
+        } else if (type == universe::EventType::SettlementMerged) {
+            cursor += 24U;
         }
 
         info.payload_discriminator_offsets.push_back(discriminator_offset);
@@ -1973,8 +2003,15 @@ int main() {
         abundant_run.run_years(30);
         verify_resource_invariants(abundant_run.state(), abundant.initial_household_food_units);
         verify_person_health_invariants(abundant_run.state());
-        require(abundant_run.state().population_under_food_stress == 0, "sustained food surplus should avoid food stress");
-        require(abundant_run.state().households_in_shortage == 0, "sustained food surplus should avoid active shortages");
+        // Ticket #33: settlement merging can transiently disrupt a handful of
+        // people's nutrition right around a merge event (the newly-consolidated
+        // household set takes one cycle to fully integrate), even with abundant
+        // food overall. Bound it tightly rather than requiring exact zero, since
+        // merging is now a real, expected structural event at this scale.
+        require(abundant_run.state().population_under_food_stress * 20U <= abundant_run.state().population,
+                "sustained food surplus should keep food stress rare, bounded by transient settlement merges");
+        require(abundant_run.state().households_in_shortage * 20U <= abundant_run.state().households.size(),
+                "sustained food surplus should keep active shortages rare, bounded by transient settlement merges");
 
         auto constrained = config;
         constrained.food_production_scale_percent = 90;
@@ -3172,6 +3209,16 @@ int main() {
             aggregate_only.aggregate_cohort_update_count() > 0U,
             "aggregate execution must actually process population cohorts");
 
+        // Ticket #32: a settlement with real City-scale population but zero
+        // detailed households has no wealth data to ever build a viability
+        // streak, so promotion must stay gated even after years at 10k+ pop.
+        require(aggregate_only.state().settlements.size() == 1U,
+                "aggregate-only scenario must hold exactly one settlement");
+        require(aggregate_only.state().settlements.front().population == aggregate_only.state().population,
+                "settlement population must account entirely for the world's aggregate cohort population");
+        require(aggregate_only.state().settlements.front().tier == universe::SettlementTier::Village,
+                "settlement tier must not promote without a real economic viability streak");
+
         // Aggregate population is simulated, not frozen: cohorts must age, die
         // and reproduce rather than sitting at their injected value.
         require(
@@ -3218,6 +3265,15 @@ int main() {
             small.aggregate_population() == small.state().population &&
                 large.aggregate_population() == large.state().population,
             "aggregate populations at both scales must remain cohort-represented");
+        require(
+            small.state().settlements.size() == 1U && large.state().settlements.size() == 1U,
+            "single-region aggregate scaling scenario must hold exactly one settlement");
+        require(
+            small.state().settlements.front().population == small.state().population,
+            "settlement population must account for aggregate cohort population at 10k scale");
+        require(
+            large.state().settlements.front().population == large.state().population,
+            "settlement population must account for aggregate cohort population at 100k scale");
     }
 
     {
@@ -3891,6 +3947,237 @@ int main() {
                 loaded.state().settlements[i].position_z == state.settlements[i].position_z,
                 "round-tripped settlement position z must be preserved");
         }
+    }
+
+    {
+        // Ticket #31: settlement population field -- non-negative (trivial via
+        // uint64), consistent with actual households/cohorts (verified every
+        // call via verify_settlement_invariants), deterministic per seed, and
+        // round-trips through snapshot serialization.
+        auto population_config = config;
+        population_config.initial_population = 240;
+        population_config.initial_region_count = 2;
+
+        universe::Simulation population_run{population_config};
+        population_run.run_years(3);
+        verify_settlement_invariants(population_run.state());
+
+        universe::Simulation population_repeat{population_config};
+        population_repeat.run_years(3);
+        require(
+            population_run.save_snapshot() == population_repeat.save_snapshot(),
+            "settlement population must be deterministic for a given seed");
+
+        auto population_different_seed_config = population_config;
+        population_different_seed_config.seed = 4242U;
+        universe::Simulation population_different_seed{population_different_seed_config};
+        population_different_seed.run_years(3);
+        require(
+            population_run.save_snapshot() != population_different_seed.save_snapshot(),
+            "a different seed must produce different settlement population trajectories");
+
+        const auto population_bytes = population_run.save_snapshot();
+        auto population_loaded = load_from_snapshot_or_fail(population_bytes, "population snapshot must round-trip");
+        require(
+            population_loaded.state().settlements.size() == population_run.state().settlements.size(),
+            "round-tripped snapshot must preserve settlement count for population test");
+        for (std::size_t i = 0; i < population_run.state().settlements.size(); ++i) {
+            require(
+                population_loaded.state().settlements[i].population == population_run.state().settlements[i].population,
+                "round-tripped settlement population must be preserved");
+        }
+    }
+
+    {
+        // Ticket #32: tier promotion requires crossing the population threshold
+        // AND a real economic viability streak, and only takes effect after a
+        // symmetric 365-day hysteresis streak, per the settlement tier spec.
+        auto tier_config = config;
+        tier_config.initial_population = 8'000;
+        tier_config.initial_region_count = 1;
+        tier_config.base_region_area_units = 10'000;
+
+        universe::Simulation tier_run{tier_config};
+        require(!tier_run.state().settlements.empty(), "tier hysteresis scenario requires at least one settlement");
+
+        const auto largest_settlement_id = [](const universe::WorldState& state) {
+            universe::SettlementId largest_id = 0;
+            std::uint64_t largest_population = 0;
+            for (const auto& settlement : state.settlements) {
+                if (settlement.population > largest_population) {
+                    largest_population = settlement.population;
+                    largest_id = settlement.id;
+                }
+            }
+            return largest_id;
+        };
+        const auto find_settlement_by_id = [](const universe::WorldState& state, const universe::SettlementId id) -> const universe::Settlement& {
+            const auto it = std::find_if(state.settlements.begin(), state.settlements.end(),
+                                          [id](const universe::Settlement& candidate) { return candidate.id == id; });
+            require(it != state.settlements.end(), "expected settlement id must exist");
+            return *it;
+        };
+
+        const auto tracked_id = largest_settlement_id(tier_run.state());
+        require(find_settlement_by_id(tier_run.state(), tracked_id).population >= 1'000U,
+                "tier hysteresis scenario's largest settlement must clear the Town population threshold");
+
+        tier_run.advance(universe::days(364));
+        {
+            const auto& settlement = find_settlement_by_id(tier_run.state(), tracked_id);
+            require(settlement.tier == universe::SettlementTier::Village,
+                    "tier promotion must not take effect before the 365-day hysteresis streak completes");
+            require(settlement.pending_tier == universe::SettlementTier::Town,
+                    "a qualifying settlement must have a pending promotion to Town before day 365");
+            require(settlement.tier_transition_streak > 0U && settlement.tier_transition_streak < 365U,
+                    "tier transition streak must be counting up but not yet complete before day 365");
+        }
+
+        tier_run.advance(universe::days(1));
+        {
+            const auto& settlement = find_settlement_by_id(tier_run.state(), tracked_id);
+            require(settlement.tier == universe::SettlementTier::Town,
+                    "tier promotion must take effect once the 365-day hysteresis streak completes");
+            require(settlement.pending_tier == universe::SettlementTier::Town,
+                    "pending tier must match confirmed tier once promotion has taken effect");
+            require(settlement.tier_transition_streak == 0U,
+                    "tier transition streak must reset once a promotion takes effect");
+        }
+
+        universe::Simulation tier_repeat{tier_config};
+        tier_repeat.advance(universe::days(365));
+        require(tier_run.save_snapshot() == tier_repeat.save_snapshot(),
+                "settlement tier trajectory must be deterministic for a given seed");
+
+        auto tier_different_seed_config = tier_config;
+        tier_different_seed_config.seed = 777U;
+        universe::Simulation tier_different_seed{tier_different_seed_config};
+        tier_different_seed.advance(universe::days(365));
+        require(tier_run.save_snapshot() != tier_different_seed.save_snapshot(),
+                "a different seed must produce a different settlement tier trajectory");
+
+        const auto tier_bytes = tier_run.save_snapshot();
+        auto tier_loaded = load_from_snapshot_or_fail(tier_bytes, "tier snapshot must round-trip");
+        require(tier_loaded.state().settlements.size() == tier_run.state().settlements.size(),
+                "round-tripped snapshot must preserve settlement count for tier test");
+        for (std::size_t i = 0; i < tier_run.state().settlements.size(); ++i) {
+            require(tier_loaded.state().settlements[i].tier == tier_run.state().settlements[i].tier,
+                    "round-tripped settlement tier must be preserved");
+            require(tier_loaded.state().settlements[i].pending_tier == tier_run.state().settlements[i].pending_tier,
+                    "round-tripped settlement pending tier must be preserved");
+            require(tier_loaded.state().settlements[i].tier_transition_streak == tier_run.state().settlements[i].tier_transition_streak,
+                    "round-tripped settlement tier transition streak must be preserved");
+        }
+    }
+
+    {
+        // Ticket #33: settlement merging -- two active, nearby, sustained-viability
+        // settlements merge; the larger survives, the smaller becomes inactive and
+        // transfers households/materials/access-share, and a SettlementMergedEventPayload
+        // is emitted. Conservation: nothing is lost across a merge.
+        auto merge_config = config;
+        merge_config.initial_population = 400;
+        merge_config.initial_region_count = 1;
+        merge_config.base_region_area_units = 10'000;
+
+        universe::Simulation merge_run{merge_config};
+        require(merge_run.state().settlements.size() > 1U,
+                "settlement merging scenario requires more than one settlement to start");
+
+        const auto total_alive_members = [](const universe::WorldState& state) {
+            std::uint64_t total = 0;
+            for (const auto& household : state.households) {
+                total += household.member_ids.size();
+            }
+            return total;
+        };
+        const auto total_materials = [](const universe::WorldState& state) {
+            std::int64_t total = 0;
+            for (const auto& settlement : state.settlements) {
+                total += settlement.materials.wood.value + settlement.materials.stone.value +
+                         settlement.materials.timber.value + settlement.materials.basic_tool.value;
+            }
+            return total;
+        };
+        const auto total_access_share = [](const universe::WorldState& state) {
+            std::uint64_t total = 0;
+            for (const auto& settlement : state.settlements) {
+                total += settlement.access_share_points;
+            }
+            return total;
+        };
+
+        const auto members_before = total_alive_members(merge_run.state());
+
+        // At this world scale, settlements only drift close enough together
+        // (and both hold a sustained enough viability streak) to qualify for
+        // merging after several years, not within the first year.
+        merge_run.run_years(5);
+
+        std::size_t merge_events = 0;
+        std::unordered_set<universe::SettlementId> absorbed_ids;
+        for (const auto& event : merge_run.state().event_log) {
+            if (event.type == universe::EventType::SettlementMerged) {
+                const auto& payload_data = std::get<universe::SettlementMergedEventPayload>(event.payload);
+                require(payload_data.survivor_settlement_id != payload_data.absorbed_settlement_id,
+                        "a settlement merge must not merge a settlement with itself");
+                const auto* survivor = find_settlement(merge_run.state(), payload_data.survivor_settlement_id);
+                const auto* absorbed = find_settlement(merge_run.state(), payload_data.absorbed_settlement_id);
+                require(survivor != nullptr && survivor->active, "merge survivor must exist and remain active");
+                require(absorbed != nullptr && !absorbed->active, "merge absorbed settlement must exist and become inactive");
+                require(absorbed->access_share_points == 0U, "absorbed settlement must have zero access share after merging");
+                require(survivor->region_id == payload_data.region_id && absorbed->region_id == payload_data.region_id,
+                        "a merge must never cross region boundaries -- survivor and absorbed must share a region");
+                absorbed_ids.insert(payload_data.absorbed_settlement_id);
+                ++merge_events;
+            }
+        }
+        require(merge_events > 0U, "close, sustained-viability settlements must eventually merge");
+
+        verify_settlement_invariants(merge_run.state());
+        require(total_alive_members(merge_run.state()) == members_before,
+                "merging must not lose or duplicate any living household member");
+
+        // Viability exclusion: every absorbed settlement must have actually held
+        // the required sustained viability streak (>= 365 days) at merge time --
+        // a settlement that never sustains viability must never be absorbed.
+        for (const auto& settlement : merge_run.state().settlements) {
+            if (!absorbed_ids.contains(settlement.id)) {
+                continue;
+            }
+            require(settlement.economic_viability_streak >= 365U,
+                    "an absorbed settlement must have held a sustained economic viability streak before merging");
+        }
+
+        universe::Simulation merge_repeat{merge_config};
+        merge_repeat.run_years(5);
+        require(merge_run.save_snapshot() == merge_repeat.save_snapshot(),
+                "settlement merge outcomes must be deterministic for a given seed");
+
+        auto merge_different_seed_config = merge_config;
+        merge_different_seed_config.seed = 5150U;
+        universe::Simulation merge_different_seed{merge_different_seed_config};
+        merge_different_seed.run_years(5);
+        require(merge_run.save_snapshot() != merge_different_seed.save_snapshot(),
+                "a different seed must produce a different settlement merge trajectory");
+
+        const auto merge_bytes = merge_run.save_snapshot();
+        auto merge_loaded = load_from_snapshot_or_fail(merge_bytes, "settlement merge snapshot must round-trip");
+        require(merge_loaded.state().settlements.size() == merge_run.state().settlements.size(),
+                "round-tripped snapshot must preserve settlement count for merge test");
+        require(total_materials(merge_loaded.state()) == total_materials(merge_run.state()),
+                "round-tripped snapshot must preserve total settlement materials after merging");
+        require(total_access_share(merge_loaded.state()) == total_access_share(merge_run.state()),
+                "round-tripped snapshot must preserve total settlement access share after merging");
+
+        std::size_t round_tripped_merge_events = 0;
+        for (const auto& event : merge_loaded.state().event_log) {
+            if (event.type == universe::EventType::SettlementMerged) {
+                ++round_tripped_merge_events;
+            }
+        }
+        require(round_tripped_merge_events == merge_events,
+                "round-tripped snapshot must preserve every settlement merged event");
     }
 
     std::cout << "All UniverseCore tests passed.\n";

@@ -257,6 +257,8 @@ void verify_event_payload_types(const universe::WorldState& state) {
             require(std::holds_alternative<universe::DiscoveryMadeEventPayload>(event.payload), "discovery payload must match event type");
         } else if (event.type == universe::EventType::InstitutionFounded) {
             require(std::holds_alternative<universe::InstitutionFoundedEventPayload>(event.payload), "institution founded payload must match event type");
+        } else if (event.type == universe::EventType::SettlementMerged) {
+            require(std::holds_alternative<universe::SettlementMergedEventPayload>(event.payload), "settlement merged payload must match event type");
         }
     }
 }

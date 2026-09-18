@@ -93,6 +93,138 @@ bool test_protocol_version_in_message() {
     return hello.find("\"protocolVersion\":1") != std::string::npos;
 }
 
+bool test_world_delta_buckets_by_id() {
+    // Ticket #7: world_delta must be a real diff by stable ID, not the full
+    // world restated. Given a known before/after pair, every id must land in
+    // exactly one bucket (added/updated/removed) per entity kind.
+    universe::ui::WorldSnapshotView before{};
+    before.agents = {
+        universe::ui::AgentRenderView{.id = 1, .alive = true},
+        universe::ui::AgentRenderView{.id = 2, .alive = true},
+    };
+    before.settlements = {
+        universe::ui::SettlementRenderView{.id = 10, .active = true},
+    };
+    before.buildings = {
+        universe::ui::BuildingRenderView{.id = 100},
+    };
+
+    universe::ui::WorldSnapshotView after{};
+    after.tick = 5;
+    after.year = 1;
+    after.population = 42;
+    after.agents = {
+        universe::ui::AgentRenderView{.id = 2, .alive = true, .age_years = 30},
+        universe::ui::AgentRenderView{.id = 3, .alive = true},
+    };
+    after.settlements = {
+        universe::ui::SettlementRenderView{.id = 10, .active = true},
+        universe::ui::SettlementRenderView{.id = 20, .active = true},
+    };
+
+    const auto delta = universe::ui::build_world_delta(after, before);
+
+    if (delta.added_agents.size() != 1U || delta.added_agents.front().id != 3U) {
+        return false;
+    }
+    if (delta.updated_agents.size() != 1U || delta.updated_agents.front().id != 2U) {
+        return false;
+    }
+    if (delta.removed_agent_ids.size() != 1U || delta.removed_agent_ids.front() != 1U) {
+        return false;
+    }
+
+    if (delta.added_settlements.size() != 1U || delta.added_settlements.front().id != 20U) {
+        return false;
+    }
+    if (delta.updated_settlements.size() != 1U || delta.updated_settlements.front().id != 10U) {
+        return false;
+    }
+    if (!delta.removed_settlement_ids.empty()) {
+        return false;
+    }
+
+    if (!delta.added_buildings.empty() || !delta.updated_buildings.empty()) {
+        return false;
+    }
+    if (delta.removed_building_ids.size() != 1U || delta.removed_building_ids.front() != 100U) {
+        return false;
+    }
+
+    return true;
+}
+
+bool test_world_delta_message_json_shape() {
+    universe::ui::WorldSnapshotView before{};
+    before.agents = {universe::ui::AgentRenderView{.id = 1, .alive = true}};
+
+    universe::ui::WorldSnapshotView after{};
+    after.tick = 7;
+
+    const auto delta = universe::ui::build_world_delta(after, before);
+    const auto message = universe::ui::make_delta_message(2U, delta);
+
+    const bool has_type = message.find("\"type\":\"world_delta\"") != std::string::npos;
+    const bool has_version = message.find("\"protocolVersion\":2") != std::string::npos;
+    const bool has_removed = message.find("\"removedAgentIds\":[1]") != std::string::npos;
+    const bool has_added_key = message.find("\"addedAgents\":[]") != std::string::npos;
+    const bool has_updated_key = message.find("\"updatedAgents\":[]") != std::string::npos;
+
+    return has_type && has_version && has_removed && has_added_key && has_updated_key;
+}
+
+bool test_dead_agent_removed_not_updated() {
+    // A person who dies between two snapshots must appear in removed_agent_ids
+    // and never in updated_agents.
+    universe::ui::SimulationController controller{universe::SimulationConfig{.seed = 42, .initial_population = 200}};
+    const auto before = universe::ui::build_world_snapshot(controller);
+
+    universe::PersonId dead_person_id = 0;
+    universe::ui::WorldSnapshotView after{};
+    for (int day = 0; day < 36500 && dead_person_id == 0; ++day) {
+        controller.advance_days(1);
+        after = universe::ui::build_world_snapshot(controller);
+        for (const auto& current : after.agents) {
+            if (!current.alive) {
+                dead_person_id = current.id;
+                break;
+            }
+        }
+    }
+    if (dead_person_id == 0) {
+        return false;
+    }
+
+    const auto delta = universe::ui::build_world_delta(after, before);
+    bool found_in_removed = false;
+    for (const auto id : delta.removed_agent_ids) {
+        if (id == dead_person_id) {
+            found_in_removed = true;
+        }
+    }
+    bool found_in_updated = false;
+    for (const auto& agent : delta.updated_agents) {
+        if (agent.id == dead_person_id) {
+            found_in_updated = true;
+        }
+    }
+
+    return found_in_removed && !found_in_updated;
+}
+
+bool test_protocol_version_two_on_delta_and_hello_roundtrips() {
+    const auto hello = universe::ui::make_hello_message(2U);
+    if (hello.find("\"protocolVersion\":2") == std::string::npos || hello.find("\"type\":\"hello\"") == std::string::npos) {
+        return false;
+    }
+
+    const universe::ui::WorldSnapshotView before{};
+    const universe::ui::WorldSnapshotView after{};
+    const auto delta = universe::ui::build_world_delta(after, before);
+    const auto message = universe::ui::make_delta_message(2U, delta);
+    return message.find("\"protocolVersion\":2") != std::string::npos;
+}
+
 bool test_determinism_with_observer_idle() {
     universe::Simulation baseline{universe::SimulationConfig{.seed = 42, .initial_population = 200}};
     universe::Simulation observed{universe::SimulationConfig{.seed = 42, .initial_population = 200}};
@@ -130,6 +262,10 @@ int main() {
         test_snapshot_is_read_only() &&
         test_snapshot_includes_varying_region_environment_data() &&
         test_protocol_version_in_message() &&
+        test_world_delta_buckets_by_id() &&
+        test_world_delta_message_json_shape() &&
+        test_dead_agent_removed_not_updated() &&
+        test_protocol_version_two_on_delta_and_hello_roundtrips() &&
         test_determinism_with_observer_idle();
 
     if (!ok) {
