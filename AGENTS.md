@@ -1,5 +1,19 @@
 # AGENTS.md
 
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked as GitHub issues on `TomMcIver/UniverseCore`, using the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Uses the five default canonical labels unchanged (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context layout: `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
 ## Purpose
 
 This repository is the simulation foundation for a game in which the player begins in a Bronze/Iron Age civilization and can progress, potentially over geological and astronomical timescales, through industrialization, computing, AI, spaceflight, interstellar civilization, exotic but theoretically motivated physics, universe-scale engineering, and eventually traversal into other universes.
