@@ -51,6 +51,10 @@ const BASE_COLOR_BY_CLASS := {
 const LUSH_COLOR := Color(0.32, 0.62, 0.24)
 const DEFAULT_COLOR := Color(0.35, 0.50, 0.24)
 
+var _height_grid: Array = []
+var _grid_half_width := 0.0
+var _grid_half_depth := 0.0
+
 func _ready() -> void:
 	generate()
 
@@ -181,6 +185,20 @@ func _generate_mesh(sample: Callable) -> void:
 	generated_mesh.surface_set_material(0, material)
 
 	mesh = generated_mesh
+	_height_grid = heights
+	_grid_half_width = half_width
+	_grid_half_depth = half_depth
+
+## Samples the generated terrain's height at a world (x, z) position, via
+## nearest-vertex lookup on the same grid _generate_mesh built. Used to
+## ground agents/buildings onto the real terrain surface instead of the
+## flat height the protocol's settlement-ring placement implies.
+func get_height_at_world(world_x: float, world_z: float) -> float:
+	if _height_grid.is_empty():
+		return 0.0
+	var grid_x: int = clamp(int(round((world_x + _grid_half_width) / cell_size)), 0, width)
+	var grid_z: int = clamp(int(round((world_z + _grid_half_depth) / cell_size)), 0, depth)
+	return _height_grid[grid_z][grid_x]
 
 func _add_triangle(st: SurfaceTool, a: Vector3, ca: Color, b: Vector3, cb: Color, c: Vector3, cc: Color) -> void:
 	st.set_color(ca)

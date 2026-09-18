@@ -166,8 +166,8 @@ func _on_message_received(message: Dictionary) -> void:
 
 	match message_type:
 		"initial_snapshot", "world_delta":
-			_world_view.apply_snapshot(payload)
 			_terrain.generate_from_regions(payload.get("regions", []), payload.get("settlements", []))
+			_world_view.apply_snapshot(payload, Callable(_terrain, "get_height_at_world"))
 			var tick := int(message.get("tick", 0))
 			_apply_day_night(tick)
 			_hud.set_world_info(int(payload.get("year", 0)), tick, int(payload.get("population", 0)))

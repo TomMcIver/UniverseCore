@@ -16,6 +16,16 @@ var _world_label: Label
 var _feedback_label: Label
 
 func _init() -> void:
+	# Hud fills the whole viewport (PRESET_FULL_RECT, set by main.gd) so
+	# that its child panels can anchor to corners. Control's default mouse
+	# filter is STOP, which -- because this root covers the entire screen
+	# -- was swallowing every click before it ever reached the 3D scene's
+	# _unhandled_input, making agents/buildings unclickable everywhere.
+	# IGNORE here lets clicks pass through the empty areas; the button
+	# panel/inspector/event-log children below keep their own default STOP
+	# filter, so they're still clickable themselves.
+	mouse_filter = Control.MOUSE_FILTER_IGNORE
+
 	var panel := PanelContainer.new()
 	panel.set_anchors_preset(Control.PRESET_TOP_LEFT)
 	panel.position = Vector2(12, 12)

@@ -37,6 +37,17 @@ func connect_to_bridge() -> void:
 		push_error("UniverseClient: failed to start WebSocket connection (error %d)" % err)
 
 func _process(delta: float) -> void:
+	# poll() must run every frame regardless of current state -- it's what
+	# actually drives WebSocketPeer's handshake state machine forward. This
+	# used to be called only inside the "not closed" branch below, which
+	# meant a socket sitting in STATE_CLOSED while its connection attempt
+	# was still in flight never got polled, so it could never progress to
+	# CONNECTING/OPEN -- the connection would just silently never complete,
+	# and every RECONNECT_INTERVAL_SECONDS this code would call
+	# connect_to_url() again on top of the stalled attempt. FakeSocket's
+	# poll() is a no-op stub, so unit tests (which set ready_state directly)
+	# never exercised this path -- only a real WebSocketPeer did.
+	_socket.poll()
 	var state: int = _socket.get_ready_state()
 
 	if state == WebSocketPeer.STATE_CLOSED:
@@ -52,8 +63,6 @@ func _process(delta: float) -> void:
 		return
 
 	_reconnect_elapsed = 0.0
-	_socket.poll()
-	state = _socket.get_ready_state()
 
 	if state != WebSocketPeer.STATE_OPEN:
 		return

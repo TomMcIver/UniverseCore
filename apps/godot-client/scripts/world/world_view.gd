@@ -20,6 +20,7 @@ var _agent_nodes: Dictionary
 var _settlement_nodes: Dictionary
 var _building_nodes: Dictionary
 var _building_data: Dictionary
+var _height_sampler := Callable()
 
 func _init() -> void:
 	_agent_nodes = {}
@@ -27,7 +28,13 @@ func _init() -> void:
 	_building_nodes = {}
 	_building_data = {}
 
-func apply_snapshot(payload: Dictionary) -> void:
+## `height_sampler`, if given, is called as (world_x, world_z) -> float and
+## used to ground every entity onto the real terrain surface instead of the
+## flat height the protocol's settlement-ring placement implies. Optional
+## so existing calls/tests that don't care about terrain grounding keep
+## working unchanged.
+func apply_snapshot(payload: Dictionary, height_sampler: Callable = Callable()) -> void:
+	_height_sampler = height_sampler
 	_clear_all()
 	for agent in payload.get("agents", []):
 		_spawn_agent(agent)
@@ -74,13 +81,13 @@ func _spawn_agent(agent: Dictionary) -> void:
 
 	var id := int(agent.get("id", 0))
 	var area := _make_pickable_area("agent", id, visual, Vector3(1.0, 1.8, 0.7))
-	area.position = UniverseProtocol.position_from(agent)
+	area.position = _grounded_position(agent)
 	add_child(area)
 	_agent_nodes[id] = area
 
 func _spawn_settlement(settlement: Dictionary) -> void:
 	var marker := BuildingAssets.make_settlement_marker()
-	marker.position = UniverseProtocol.position_from(settlement)
+	marker.position = _grounded_position(settlement)
 	add_child(marker)
 	_settlement_nodes[int(settlement.get("id", 0))] = marker
 
@@ -88,11 +95,22 @@ func _spawn_building(building: Dictionary) -> void:
 	var visual := BuildingAssets.make_building(str(building.get("type", "Dwelling")))
 
 	var id := int(building.get("id", 0))
-	var area := _make_pickable_area("building", id, visual, Vector3(2.5, 3.2, 2.5))
-	area.position = UniverseProtocol.position_from(building)
+	var area := _make_pickable_area("building", id, visual, Vector3(3.0, 5.0, 3.0))
+	area.position = _grounded_position(building)
 	add_child(area)
 	_building_nodes[id] = area
 	_building_data[id] = building
+
+## The protocol's position.y comes from server-side presentation logic (a
+## flat settlement-ring layout, unaware of the client's own procedurally
+## generated terrain) -- so it's frequently wrong once real terrain height
+## exists. Override y with the actual terrain height at (x, z) whenever a
+## sampler is available; otherwise fall back to whatever the protocol sent.
+func _grounded_position(entry: Dictionary) -> Vector3:
+	var pos := UniverseProtocol.position_from(entry)
+	if _height_sampler.is_valid():
+		pos.y = _height_sampler.call(pos.x, pos.z)
+	return pos
 
 func _make_pickable_area(entity_type: String, entity_id: int, visual: Node3D, collision_extents: Vector3) -> Area3D:
 	var area := Area3D.new()

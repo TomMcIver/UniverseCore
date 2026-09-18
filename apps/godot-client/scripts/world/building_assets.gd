@@ -30,12 +30,27 @@ const DWELLING_WALL_HEIGHT := 1.0
 const PERSON_SOURCE_HEIGHT := 2.7
 const PERSON_TARGET_HEIGHT := 1.8
 
+## Scale multipliers so buildings actually read as bigger than a person.
+## The raw Kenney modules are all authored at the same ~1-unit grid scale
+## regardless of what they represent, so a "1.8-unit-tall" person ended up
+## taller than the ~1.57-unit dwelling assembly until these were added --
+## a real scale bug, not a stylistic choice. Roughly: a small house should
+## read taller than a person standing next to it; a windmill or market
+## stall should read a bit taller again.
+const DWELLING_SCALE := 2.5
+const WORKSHOP_SCALE := 1.5
+const FOODSTORE_SCALE := 1.3
+
 static func make_building(building_type: String) -> Node3D:
 	match building_type:
 		"Workshop":
-			return WINDMILL.instantiate()
+			var workshop: Node3D = WINDMILL.instantiate()
+			workshop.scale = Vector3.ONE * WORKSHOP_SCALE
+			return workshop
 		"FoodStore":
-			return STALL.instantiate()
+			var stall: Node3D = STALL.instantiate()
+			stall.scale = Vector3.ONE * FOODSTORE_SCALE
+			return stall
 		_:
 			return _make_dwelling()
 
@@ -45,6 +60,7 @@ static func _make_dwelling() -> Node3D:
 	var roof: Node3D = ROOF_GABLE.instantiate()
 	roof.position = Vector3(0.0, DWELLING_WALL_HEIGHT, 0.0)
 	root.add_child(roof)
+	root.scale = Vector3.ONE * DWELLING_SCALE
 	return root
 
 static func make_settlement_marker() -> Node3D:
