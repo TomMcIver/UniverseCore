@@ -3,13 +3,13 @@
 importer="scene"
 importer_version=1
 type="PackedScene"
-uid="uid://tdn2ufn4nqea"
-path="res://.godot/imported/windmill.glb-4cd99b19435ad47c058ab1174fa0b33a.scn"
+uid="uid://bqnl2etq5ba2r"
+path="res://.godot/imported/watermill.glb-f5c3383daf170b10103a31aba6a792d2.scn"
 
 [deps]
 
-source_file="res://assets/buildings/windmill.glb"
-dest_files=["res://.godot/imported/windmill.glb-4cd99b19435ad47c058ab1174fa0b33a.scn"]
+source_file="res://assets/buildings/watermill.glb"
+dest_files=["res://.godot/imported/watermill.glb-f5c3383daf170b10103a31aba6a792d2.scn"]
 
 [params]
 

@@ -80,7 +80,9 @@ errorReader.on('line', (line) => {
 
 wss.on('connection', (socket, request) => {
   const originHeader = request.headers.origin
+  console.error(`[debug] connection from origin=${JSON.stringify(originHeader)}`)
   if (typeof originHeader === 'string' && !allowedOrigins.has(originHeader)) {
+    console.error(`[debug] REJECTING connection: origin ${JSON.stringify(originHeader)} not in allowed set`)
     socket.close(1008, 'Origin not allowed')
     return
   }
@@ -93,8 +95,12 @@ wss.on('connection', (socket, request) => {
     }
     bridge.stdin.write(String(buffer).trim() + '\n')
   })
-  socket.on('close', () => {
+  socket.on('close', (code, reason) => {
+    console.error(`[debug] socket closed code=${code} reason=${JSON.stringify(reason.toString())}`)
     sockets.delete(socket)
+  })
+  socket.on('error', (err) => {
+    console.error(`[debug] socket error: ${err.message}`)
   })
 })
 
