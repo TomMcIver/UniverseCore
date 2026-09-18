@@ -4049,14 +4049,14 @@ int main() {
         }
 
         universe::Simulation tier_repeat{tier_config};
-        tier_repeat.advance(universe::days(365));
+        tier_repeat.advance(universe::days(364));
         require(tier_run.save_snapshot() == tier_repeat.save_snapshot(),
                 "settlement tier trajectory must be deterministic for a given seed");
 
         auto tier_different_seed_config = tier_config;
         tier_different_seed_config.seed = 777U;
         universe::Simulation tier_different_seed{tier_different_seed_config};
-        tier_different_seed.advance(universe::days(365));
+        tier_different_seed.advance(universe::days(364));
         require(tier_run.save_snapshot() != tier_different_seed.save_snapshot(),
                 "a different seed must produce a different settlement tier trajectory");
 
