@@ -59,6 +59,14 @@ static func message_payload(message: Dictionary) -> Dictionary:
 		return {}
 	return payload
 
+## Reconnect trust gate (ticket #16): never trust a world_delta as a valid
+## continuation until a fresh initial_snapshot has actually arrived on the
+## current connection. Every other message type always forwards.
+static func should_forward_message(message_type: String, awaiting_initial_snapshot: bool) -> bool:
+	if message_type == "world_delta" and awaiting_initial_snapshot:
+		return false
+	return true
+
 static func position_from(entry: Dictionary) -> Vector3:
 	var pos: Dictionary = entry.get("position", {})
 	return Vector3(

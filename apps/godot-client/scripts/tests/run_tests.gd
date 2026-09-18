@@ -2,6 +2,8 @@ extends SceneTree
 
 const UniverseProtocol := preload("res://scripts/net/universe_protocol.gd")
 const WorldView := preload("res://scripts/world/world_view.gd")
+const UniverseClient := preload("res://scripts/net/universe_client.gd")
+const FakeSocket := preload("res://scripts/tests/fake_socket.gd")
 
 ## Minimal headless test runner for the Godot client's pure/testable seams
 ## (UniverseProtocol encode/decode, WorldView spawn/replace logic).
@@ -29,6 +31,14 @@ func _initialize() -> void:
 	_run_test("position_from reads x/y/z with a safe zero-vector default", Callable(self, "_test_position_from"))
 	_run_test("world_view spawns one node per agent/settlement/building", Callable(self, "_test_world_view_spawns"))
 	_run_test("world_view fully replaces nodes on the next snapshot", Callable(self, "_test_world_view_replace"))
+	_run_test("should_forward_message drops world_delta while awaiting a fresh snapshot", Callable(self, "_test_trust_gate"))
+	_run_test("client requests a fresh snapshot immediately on connect", Callable(self, "_test_client_requests_snapshot_on_connect"))
+	_run_test("client drops a world_delta received before the post-connect snapshot arrives", Callable(self, "_test_client_drops_delta_before_snapshot"))
+	_run_test("client forwards world_delta once the post-connect snapshot has arrived", Callable(self, "_test_client_forwards_delta_after_snapshot"))
+	_run_test("send_command fails and does not touch the socket while disconnected", Callable(self, "_test_send_command_while_disconnected"))
+	_run_test("send_command succeeds and reaches the socket while connected", Callable(self, "_test_send_command_while_connected"))
+	_run_test("client reconnects after the retry interval elapses while closed", Callable(self, "_test_client_reconnects_after_interval"))
+	_run_test("client emits disconnected exactly once when the connection drops", Callable(self, "_test_client_emits_disconnected_once"))
 
 	print("\n%d/%d tests passed" % [_total - _failures, _total])
 	quit(1 if _failures > 0 else 0)
@@ -92,5 +102,87 @@ func _test_world_view_replace() -> void:
 	view.apply_snapshot({"agents": [], "settlements": [], "buildings": []})
 	_assert_eq(view.agent_count(), 0)
 	_assert_eq(view.get_child_count(), 0)
-	_assert_eq(view.get_child_count(), 0)
 	view.queue_free()
+
+func _test_trust_gate() -> void:
+	_assert_eq(UniverseProtocol.should_forward_message("world_delta", true), false)
+	_assert_eq(UniverseProtocol.should_forward_message("world_delta", false), true)
+	_assert_eq(UniverseProtocol.should_forward_message("initial_snapshot", true), true)
+	_assert_eq(UniverseProtocol.should_forward_message("simulation_status", true), true)
+
+func _test_client_requests_snapshot_on_connect() -> void:
+	var socket := FakeSocket.new()
+	var client := UniverseClient.new(socket)
+	socket.ready_state = WebSocketPeer.STATE_OPEN
+	client._process(0.016)
+	_assert_eq(socket.sent_texts.size(), 1)
+	var sent: Dictionary = JSON.parse_string(socket.sent_texts[0])
+	_assert_eq(sent.get("type"), "request_snapshot")
+
+func _test_client_drops_delta_before_snapshot() -> void:
+	var socket := FakeSocket.new()
+	var client := UniverseClient.new(socket)
+	var received: Array = []
+	client.message_received.connect(func(msg: Dictionary) -> void: received.append(msg))
+	socket.ready_state = WebSocketPeer.STATE_OPEN
+	client._process(0.016)
+	socket.push_incoming(JSON.stringify({"type": "world_delta", "payload": {}}))
+	client._process(0.016)
+	_assert_eq(received.size(), 0)
+
+func _test_client_forwards_delta_after_snapshot() -> void:
+	var socket := FakeSocket.new()
+	var client := UniverseClient.new(socket)
+	var received: Array = []
+	client.message_received.connect(func(msg: Dictionary) -> void: received.append(msg))
+	socket.ready_state = WebSocketPeer.STATE_OPEN
+	client._process(0.016)
+	socket.push_incoming(JSON.stringify({"type": "initial_snapshot", "payload": {"population": 5}}))
+	client._process(0.016)
+	socket.push_incoming(JSON.stringify({"type": "world_delta", "payload": {"population": 6}}))
+	client._process(0.016)
+	_assert_eq(received.size(), 2)
+	_assert_eq(UniverseProtocol.message_type(received[0]), "initial_snapshot")
+	_assert_eq(UniverseProtocol.message_type(received[1]), "world_delta")
+
+func _test_send_command_while_disconnected() -> void:
+	var socket := FakeSocket.new()
+	var client := UniverseClient.new(socket)
+	socket.ready_state = WebSocketPeer.STATE_CLOSED
+	var ok: bool = client.send_command(UniverseProtocol.command_pause())
+	_assert_eq(ok, false)
+	_assert_eq(socket.sent_texts.size(), 0)
+
+func _test_send_command_while_connected() -> void:
+	var socket := FakeSocket.new()
+	var client := UniverseClient.new(socket)
+	socket.ready_state = WebSocketPeer.STATE_OPEN
+	var ok: bool = client.send_command(UniverseProtocol.command_pause())
+	_assert_eq(ok, true)
+	_assert_eq(socket.sent_texts.size(), 1)
+
+func _test_client_reconnects_after_interval() -> void:
+	var socket := FakeSocket.new()
+	var client := UniverseClient.new(socket)
+	socket.ready_state = WebSocketPeer.STATE_CLOSED
+	client._process(1.0)
+	_assert_eq(socket.connect_call_count, 0)
+	client._process(1.5)
+	_assert_eq(socket.connect_call_count, 1)
+
+func _test_client_emits_disconnected_once() -> void:
+	var socket := FakeSocket.new()
+	var client := UniverseClient.new(socket)
+	# A boxed counter, not a plain int: GDScript lambdas capture value-typed
+	# locals by value, so a bare "var disconnect_count := 0" mutated with
+	# "disconnect_count += 1" inside the closure would silently increment a
+	# copy and never touch this scope's variable. An Array is a reference
+	# type, so mutating its contents from the closure is visible here.
+	var disconnect_count := [0]
+	client.disconnected.connect(func() -> void: disconnect_count[0] += 1)
+	socket.ready_state = WebSocketPeer.STATE_OPEN
+	client._process(0.016)
+	socket.ready_state = WebSocketPeer.STATE_CLOSED
+	client._process(0.5)
+	client._process(0.5)
+	_assert_eq(disconnect_count[0], 1)

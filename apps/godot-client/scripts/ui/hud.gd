@@ -13,6 +13,7 @@ signal speed_selected(speed: int)
 
 var _status_label: Label
 var _world_label: Label
+var _feedback_label: Label
 
 func _ready() -> void:
 	var panel := PanelContainer.new()
@@ -30,6 +31,11 @@ func _ready() -> void:
 	_world_label = Label.new()
 	_world_label.text = "Year 0 | Tick 0 | Population 0"
 	vbox.add_child(_world_label)
+
+	_feedback_label = Label.new()
+	_feedback_label.text = ""
+	_feedback_label.modulate = Color(1.0, 0.45, 0.45)
+	vbox.add_child(_feedback_label)
 
 	var buttons := HBoxContainer.new()
 	vbox.add_child(buttons)
@@ -61,3 +67,9 @@ func set_connection_status(text: String) -> void:
 
 func set_world_info(year: int, tick: int, population: int) -> void:
 	_world_label.text = "Year %d | Tick %d | Population %d" % [year, tick, population]
+
+## Ticket #16: a command sent while disconnected must fail visibly, not
+## silently vanish. Called by main.gd with the boolean UniverseClient.
+## send_command already returns.
+func show_command_result(succeeded: bool, action_name: String) -> void:
+	_feedback_label.text = "" if succeeded else "%s failed -- not connected" % action_name

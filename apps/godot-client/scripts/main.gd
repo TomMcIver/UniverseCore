@@ -36,21 +36,36 @@ func _ready() -> void:
 	add_child(_client)
 	_client.connected.connect(_on_connected)
 	_client.disconnected.connect(_on_disconnected)
+	_client.reconnecting.connect(_on_reconnecting)
 	_client.message_received.connect(_on_message_received)
 
-	_hud.pause_pressed.connect(func() -> void: _client.send_command(UniverseProtocol.command_pause()))
-	_hud.resume_pressed.connect(func() -> void: _client.send_command(UniverseProtocol.command_resume()))
-	_hud.step_pressed.connect(func() -> void: _client.send_command(UniverseProtocol.command_single_step()))
-	_hud.speed_selected.connect(func(speed: int) -> void: _client.send_command(UniverseProtocol.command_set_speed(speed)))
+	_hud.pause_pressed.connect(func() -> void:
+		_hud.show_command_result(_client.send_command(UniverseProtocol.command_pause()), "Pause"))
+	_hud.resume_pressed.connect(func() -> void:
+		_hud.show_command_result(_client.send_command(UniverseProtocol.command_resume()), "Resume"))
+	_hud.step_pressed.connect(func() -> void:
+		_hud.show_command_result(_client.send_command(UniverseProtocol.command_single_step()), "Step"))
+	_hud.speed_selected.connect(func(speed: int) -> void:
+		_hud.show_command_result(_client.send_command(UniverseProtocol.command_set_speed(speed)), "Set speed"))
 
 	_client.connect_to_bridge()
 
-	var screenshot_path := OS.get_environment("UNIVERSECORE_SCREENSHOT")
-	if screenshot_path != "":
-		await get_tree().create_timer(2.5).timeout
+	var schedule_env := OS.get_environment("UNIVERSECORE_SCREENSHOT_SCHEDULE")
+	var dir_env := OS.get_environment("UNIVERSECORE_SCREENSHOT_DIR")
+	if schedule_env != "" and dir_env != "":
+		_run_screenshot_schedule(schedule_env, dir_env)
+
+func _run_screenshot_schedule(schedule_env: String, dir: String) -> void:
+	var previous_seconds := 0.0
+	var index := 0
+	for part in schedule_env.split(","):
+		var seconds := float(part)
+		await get_tree().create_timer(seconds - previous_seconds).timeout
+		previous_seconds = seconds
 		var image := get_viewport().get_texture().get_image()
-		image.save_png(screenshot_path)
-		get_tree().quit()
+		image.save_png("%s/shot_%d_t%s.png" % [dir, index, part])
+		index += 1
+	get_tree().quit()
 
 func _setup_environment() -> void:
 	var sky_material := ProceduralSkyMaterial.new()
@@ -102,6 +117,9 @@ func _on_connected() -> void:
 
 func _on_disconnected() -> void:
 	_hud.set_connection_status("Disconnected")
+
+func _on_reconnecting() -> void:
+	_hud.set_connection_status("Reconnecting...")
 
 func _on_message_received(message: Dictionary) -> void:
 	var message_type := UniverseProtocol.message_type(message)
