@@ -112,7 +112,7 @@ func _setup_environment() -> void:
 	environment.background_mode = Environment.BG_SKY
 	environment.sky = sky
 	environment.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
-	environment.fog_enabled = true
+	environment.fog_enabled = false
 	environment.fog_light_color = Color(0.78, 0.80, 0.83)
 	environment.fog_density = 0.01
 	environment.fog_sun_scatter = 0.2
@@ -165,12 +165,22 @@ func _on_message_received(message: Dictionary) -> void:
 	var payload := UniverseProtocol.message_payload(message)
 
 	match message_type:
-		"initial_snapshot", "world_delta":
+		"initial_snapshot":
 			_terrain.generate_from_regions(payload.get("regions", []), payload.get("settlements", []))
 			_world_view.apply_snapshot(payload, Callable(_terrain, "get_height_at_world"))
 			var tick := int(message.get("tick", 0))
 			_apply_day_night(tick)
 			_hud.set_world_info(int(payload.get("year", 0)), tick, int(payload.get("population", 0)))
+		"world_delta":
+			# world_delta (ticket #7) is a real diff, not a restated world --
+			# it carries no "regions"/full "settlements" list to regenerate
+			# terrain from, and applying it as a full replace would wipe
+			# every entity every tick. Terrain is generated once from the
+			# initial_snapshot and stays static; only the entities change.
+			_world_view.apply_delta(payload, Callable(_terrain, "get_height_at_world"))
+			var delta_tick := int(message.get("tick", 0))
+			_apply_day_night(delta_tick)
+			_hud.set_world_info(int(payload.get("year", 0)), delta_tick, int(payload.get("population", 0)))
 		"simulation_status":
 			var paused: bool = payload.get("paused", true)
 			var speed: int = int(payload.get("speed", 1))

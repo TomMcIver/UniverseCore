@@ -29,7 +29,17 @@ var _awaiting_initial_snapshot := false
 var _reconnect_elapsed := 0.0
 
 func _init(socket = null) -> void:
-	_socket = socket if socket != null else WebSocketPeer.new()
+	if socket != null:
+		_socket = socket
+	else:
+		# Default WebSocketPeer buffers (64 KiB) are too small for a full
+		# initial_snapshot once population/buildings grow past a couple
+		# hundred entities -- the server-sent snapshot gets rejected with
+		# close code 1009 (message too big) before the client ever sees it.
+		var real_socket := WebSocketPeer.new()
+		real_socket.inbound_buffer_size = 4 * 1024 * 1024
+		real_socket.outbound_buffer_size = 4 * 1024 * 1024
+		_socket = real_socket
 
 func connect_to_bridge() -> void:
 	var err: int = _socket.connect_to_url(UniverseProtocol.url())

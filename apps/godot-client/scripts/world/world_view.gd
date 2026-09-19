@@ -43,6 +43,35 @@ func apply_snapshot(payload: Dictionary, height_sampler: Callable = Callable()) 
 	for building in payload.get("buildings", []):
 		_spawn_building(building)
 
+## Ticket #7: world_delta is a real diff (addedX/updatedX/removedXIds), not a
+## restated full world -- applying it via apply_snapshot() would wipe every
+## entity on the very first steady-state tick and never repopulate them,
+## since the delta payload carries no "agents"/"settlements"/"buildings"
+## keys at all. Upsert added/updated by id, free removed ids, leave
+## everything else untouched.
+func apply_delta(payload: Dictionary, height_sampler: Callable = Callable()) -> void:
+	_height_sampler = height_sampler
+	for agent in payload.get("addedAgents", []):
+		_upsert_agent(agent)
+	for agent in payload.get("updatedAgents", []):
+		_upsert_agent(agent)
+	for id in payload.get("removedAgentIds", []):
+		_remove_agent(int(id))
+
+	for settlement in payload.get("addedSettlements", []):
+		_upsert_settlement(settlement)
+	for settlement in payload.get("updatedSettlements", []):
+		_upsert_settlement(settlement)
+	for id in payload.get("removedSettlementIds", []):
+		_remove_settlement(int(id))
+
+	for building in payload.get("addedBuildings", []):
+		_upsert_building(building)
+	for building in payload.get("updatedBuildings", []):
+		_upsert_building(building)
+	for id in payload.get("removedBuildingIds", []):
+		_remove_building(int(id))
+
 func agent_count() -> int:
 	return _agent_nodes.size()
 
@@ -75,6 +104,34 @@ func _clear_all() -> void:
 	_settlement_nodes.clear()
 	_building_nodes.clear()
 	_building_data.clear()
+
+func _upsert_agent(agent: Dictionary) -> void:
+	_remove_agent(int(agent.get("id", 0)))
+	_spawn_agent(agent)
+
+func _remove_agent(id: int) -> void:
+	if _agent_nodes.has(id):
+		_agent_nodes[id].free()
+		_agent_nodes.erase(id)
+
+func _upsert_settlement(settlement: Dictionary) -> void:
+	_remove_settlement(int(settlement.get("id", 0)))
+	_spawn_settlement(settlement)
+
+func _remove_settlement(id: int) -> void:
+	if _settlement_nodes.has(id):
+		_settlement_nodes[id].free()
+		_settlement_nodes.erase(id)
+
+func _upsert_building(building: Dictionary) -> void:
+	_remove_building(int(building.get("id", 0)))
+	_spawn_building(building)
+
+func _remove_building(id: int) -> void:
+	if _building_nodes.has(id):
+		_building_nodes[id].free()
+		_building_nodes.erase(id)
+	_building_data.erase(id)
 
 func _spawn_agent(agent: Dictionary) -> void:
 	var visual := BuildingAssets.make_person(str(agent.get("sex", "Female")))
