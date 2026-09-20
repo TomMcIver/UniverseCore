@@ -137,7 +137,7 @@ func _bake_region_navmeshes(regions: Array, settlements: Array) -> void:
 		var half_extent := Vector2(
 			max((b["max"].x - b["min"].x) * 0.5 + margin, margin),
 			max((b["max"].y - b["min"].y) * 0.5 + margin, margin))
-		var height := _terrain.get_height_at_world(center.x, center.y)
+		var height: float = _terrain.get_height_at_world(center.x, center.y)
 		var mesh := _make_region_navmesh_quad(half_extent)
 		var region_transform := Transform3D(Basis(), Vector3(center.x, height, center.y))
 		_navmesh_manager.rebake_region(int(region_id), mesh, region_transform, 1)
