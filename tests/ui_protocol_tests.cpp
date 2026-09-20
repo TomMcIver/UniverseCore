@@ -5,6 +5,7 @@
 #include <iostream>
 #include <optional>
 #include <string>
+#include <unordered_map>
 
 namespace {
 
@@ -225,6 +226,70 @@ bool test_protocol_version_two_on_delta_and_hello_roundtrips() {
     return message.find("\"protocolVersion\":2") != std::string::npos;
 }
 
+bool test_snapshot_forwards_real_canonical_positions() {
+    // Ticket #38: settlement and person positions on the wire must be the
+    // real canonical Settlement.position / (Settlement.position +
+    // Household.settlement_offset), not presentation-invented placement.
+    universe::ui::SimulationController controller{universe::SimulationConfig{.seed = 42, .initial_population = 200}};
+    const auto snapshot = universe::ui::build_world_snapshot(controller);
+    const auto& simulation = controller.simulation();
+
+    if (snapshot.settlements.empty() || snapshot.agents.empty()) {
+        return false;
+    }
+
+    std::unordered_map<universe::SettlementId, const universe::Settlement*> settlement_by_id;
+    for (const auto& settlement : simulation.state().settlements) {
+        settlement_by_id.emplace(settlement.id, &settlement);
+    }
+    for (const auto& rendered : snapshot.settlements) {
+        const auto it = settlement_by_id.find(rendered.id);
+        if (it == settlement_by_id.end()) {
+            return false;
+        }
+        if (rendered.x != static_cast<float>(it->second->position_x) ||
+            rendered.z != static_cast<float>(it->second->position_z)) {
+            return false;
+        }
+    }
+
+    std::unordered_map<universe::HouseholdId, const universe::Household*> household_by_id;
+    for (const auto& household : simulation.state().households) {
+        household_by_id.emplace(household.id, &household);
+    }
+    for (const auto& agent : snapshot.agents) {
+        const auto household_it = household_by_id.find(agent.household_id);
+        if (household_it == household_by_id.end()) {
+            return false;
+        }
+        const auto settlement_it = settlement_by_id.find(household_it->second->settlement_id);
+        if (settlement_it == settlement_by_id.end()) {
+            return false;
+        }
+        const auto expected_x = static_cast<float>(settlement_it->second->position_x) +
+            static_cast<float>(household_it->second->settlement_offset_x);
+        const auto expected_z = static_cast<float>(settlement_it->second->position_z) +
+            static_cast<float>(household_it->second->settlement_offset_z);
+        if (agent.x != expected_x || agent.z != expected_z) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool test_snapshot_message_includes_current_activity() {
+    // Ticket #37: current_activity must be forwarded on the wire so the
+    // client can label/react to it.
+    universe::ui::SimulationController controller{universe::SimulationConfig{.seed = 42, .initial_population = 200}};
+    const auto snapshot = universe::ui::build_world_snapshot(controller);
+    if (snapshot.agents.empty()) {
+        return false;
+    }
+    const auto message = universe::ui::make_snapshot_message(2U, snapshot, true);
+    return message.find("\"currentActivity\":\"") != std::string::npos;
+}
+
 bool test_determinism_with_observer_idle() {
     universe::Simulation baseline{universe::SimulationConfig{.seed = 42, .initial_population = 200}};
     universe::Simulation observed{universe::SimulationConfig{.seed = 42, .initial_population = 200}};
@@ -266,6 +331,8 @@ int main() {
         test_world_delta_message_json_shape() &&
         test_dead_agent_removed_not_updated() &&
         test_protocol_version_two_on_delta_and_hello_roundtrips() &&
+        test_snapshot_forwards_real_canonical_positions() &&
+        test_snapshot_message_includes_current_activity() &&
         test_determinism_with_observer_idle();
 
     if (!ok) {

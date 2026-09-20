@@ -43,6 +43,24 @@ enum class Occupation : std::uint8_t {
     CraftWorker = 5,
 };
 
+// Ticket #37: an hour-of-day schedule block. Work/Social/Teaching/
+// RecordKeeping/Discovery/Rest drive real existing systems (Occupation,
+// KnowledgeTransmission, institutions, KnowledgeRecord/discovery, health);
+// Sleep/Travel/Eat/Idle are presentation-only this slice.
+enum class ActivityKind : std::uint8_t {
+    Sleep = 0,
+    Travel = 1,
+    Work = 2,
+    Eat = 3,
+    Social = 4,
+    Teaching = 5,
+    RecordKeeping = 6,
+    Discovery = 7,
+    Childcare = 8,
+    Rest = 9,
+    Idle = 10,
+};
+
 enum class SimulationDetailLevel : std::uint8_t {
     Detailed = 0,
     SettlementAggregate = 1,
@@ -153,6 +171,13 @@ struct Person {
     Occupation occupation{Occupation::None};
     bool materialized_from_cohort{false};
     std::optional<CohortId> source_cohort_id{};
+
+    // Ticket #37: only detailed-resolution people carry schedule/activity
+    // state; cohort demotion drops it (mirrors existing LOD philosophy).
+    // current_activity is cached from the daily schedule and re-derived
+    // alongside occupation reassignment -- it is not itself independently
+    // serialized state beyond this cached value.
+    ActivityKind current_activity{ActivityKind::Idle};
 };
 
 struct Household {
@@ -169,6 +194,13 @@ struct Household {
     std::int64_t cumulative_material_transferred_in{};
     std::int64_t cumulative_material_transferred_out{};
     std::int64_t derived_wealth_points{};
+
+    // Ticket #35/#38: a person's canonical position is always
+    // Settlement.position + Household.settlement_offset -- derived once at
+    // household founding via SeedDomain::HouseholdPosition, never
+    // re-derived, constant regardless of any person's current_activity.
+    std::int32_t settlement_offset_x{};
+    std::int32_t settlement_offset_z{};
 };
 
 enum class SettlementTier : std::uint8_t {
@@ -669,6 +701,7 @@ private:
     [[nodiscard]] SimulationSeed root_seed() const noexcept;
     [[nodiscard]] SimulationSeed person_seed(PersonId person_id) const noexcept;
     [[nodiscard]] SimulationSeed household_seed(HouseholdId household_id) const noexcept;
+    void assign_household_position_offset(Household& household) const noexcept;
     [[nodiscard]] SimulationSeed region_seed(RegionId region_id) const noexcept;
     [[nodiscard]] SimulationSeed settlement_seed(SettlementId settlement_id) const noexcept;
     [[nodiscard]] bool sample_sex(SimulationSeed seed) const noexcept;
@@ -691,6 +724,7 @@ private:
     [[nodiscard]] std::uint64_t current_demographic_year() const noexcept;
     [[nodiscard]] std::uint64_t current_food_period() const noexcept;
     void run_scheduled_systems_until(SimulationTime target_time);
+    void process_schedule_period(std::uint64_t food_period);
     void process_demography_period(std::uint64_t demographic_year);
     void process_basic_discoveries(std::uint64_t demographic_year);
     void process_communication_teaching(std::uint64_t demographic_year);

@@ -1433,7 +1433,8 @@ EventSectionInfo locate_event_section(const universe::WorldState& state) {
     EventSectionInfo info{};
     std::size_t cursor = header_size + payload_people_count_offset;
 
-    const auto person_record_base_size = std::size_t{41};
+    // Ticket #37: +1 byte for current_activity (u8) appended after occupation.
+    const auto person_record_base_size = std::size_t{42};
     std::vector<const universe::Person*> people_order;
     people_order.reserve(state.people.size());
     for (const auto& person : state.people) {
@@ -2766,7 +2767,8 @@ int main() {
         constexpr std::size_t header_size = 24U;
         constexpr std::size_t payload_people_count_offset = 590U;
         constexpr std::size_t payload_first_person_offset = 598U;
-        constexpr std::size_t payload_person_record_size = 41U;
+        // Ticket #37: +1 byte for current_activity (u8) appended after occupation.
+        constexpr std::size_t payload_person_record_size = 42U;
         constexpr std::size_t person_sex_offset_in_record = 16U;
         constexpr std::size_t person_household_offset_in_record = 18U;
         constexpr std::size_t person_occupation_offset_in_record = 40U;
@@ -4185,6 +4187,102 @@ int main() {
         }
         require(round_tripped_merge_events == merge_events,
                 "round-tripped snapshot must preserve every settlement merged event");
+    }
+
+    {
+        // Ticket #38: household canonical position offset -- deterministic
+        // per seed, small/bounded jitter, and round-trips through snapshot
+        // serialization.
+        auto offset_config = config;
+        offset_config.initial_population = 120;
+        offset_config.initial_region_count = 2;
+
+        universe::Simulation offset_run{offset_config};
+        offset_run.run_years(2);
+        const auto& offset_state = offset_run.state();
+
+        require(!offset_state.households.empty(), "household position offset test requires households");
+        for (const auto& household : offset_state.households) {
+            require(
+                household.settlement_offset_x >= -50 && household.settlement_offset_x <= 50,
+                "household settlement offset x must be a small bounded jitter");
+            require(
+                household.settlement_offset_z >= -50 && household.settlement_offset_z <= 50,
+                "household settlement offset z must be a small bounded jitter");
+        }
+
+        universe::Simulation offset_repeat{offset_config};
+        offset_repeat.run_years(2);
+        require(
+            offset_run.save_snapshot() == offset_repeat.save_snapshot(),
+            "household position offset must be deterministic for a given seed");
+
+        auto offset_different_seed_config = offset_config;
+        offset_different_seed_config.seed = 7331U;
+        universe::Simulation offset_different_seed{offset_different_seed_config};
+        offset_different_seed.run_years(2);
+        require(
+            offset_run.save_snapshot() != offset_different_seed.save_snapshot(),
+            "a different seed must produce different household position offsets");
+
+        const auto offset_bytes = offset_run.save_snapshot();
+        auto offset_loaded = load_from_snapshot_or_fail(offset_bytes, "household offset snapshot must round-trip");
+        require(
+            offset_loaded.state().households.size() == offset_state.households.size(),
+            "round-tripped snapshot must preserve household count for offset test");
+        for (std::size_t i = 0; i < offset_state.households.size(); ++i) {
+            require(
+                offset_loaded.state().households[i].settlement_offset_x == offset_state.households[i].settlement_offset_x,
+                "round-tripped household settlement offset x must be preserved");
+            require(
+                offset_loaded.state().households[i].settlement_offset_z == offset_state.households[i].settlement_offset_z,
+                "round-tripped household settlement offset z must be preserved");
+        }
+    }
+
+    {
+        // Ticket #37: person daily schedule/activity state -- current_activity
+        // is always a valid ActivityKind, deterministic per seed, and
+        // round-trips through snapshot serialization.
+        auto schedule_config = config;
+        schedule_config.initial_population = 120;
+        schedule_config.initial_region_count = 2;
+
+        universe::Simulation schedule_run{schedule_config};
+        schedule_run.run_years(1);
+        const auto& schedule_state = schedule_run.state();
+
+        require(!schedule_state.people.empty(), "schedule test requires people");
+        for (const auto& person : schedule_state.people) {
+            require(
+                static_cast<std::uint8_t>(person.current_activity) <= static_cast<std::uint8_t>(universe::ActivityKind::Idle),
+                "person current_activity must be a valid ActivityKind");
+        }
+
+        universe::Simulation schedule_repeat{schedule_config};
+        schedule_repeat.run_years(1);
+        require(
+            schedule_run.save_snapshot() == schedule_repeat.save_snapshot(),
+            "person daily schedule/activity must be deterministic for a given seed");
+
+        auto schedule_different_seed_config = schedule_config;
+        schedule_different_seed_config.seed = 8642U;
+        universe::Simulation schedule_different_seed{schedule_different_seed_config};
+        schedule_different_seed.run_years(1);
+        require(
+            schedule_run.save_snapshot() != schedule_different_seed.save_snapshot(),
+            "a different seed must produce a different schedule/activity trajectory");
+
+        const auto schedule_bytes = schedule_run.save_snapshot();
+        auto schedule_loaded = load_from_snapshot_or_fail(schedule_bytes, "schedule snapshot must round-trip");
+        require(
+            schedule_loaded.state().people.size() == schedule_state.people.size(),
+            "round-tripped snapshot must preserve person count for schedule test");
+        for (std::size_t i = 0; i < schedule_state.people.size(); ++i) {
+            require(
+                schedule_loaded.state().people[i].current_activity == schedule_state.people[i].current_activity,
+                "round-tripped person current_activity must be preserved");
+        }
     }
 
     std::cout << "All UniverseCore tests passed.\n";

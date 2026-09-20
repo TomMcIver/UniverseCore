@@ -19,6 +19,7 @@ struct AgentRenderView {
     std::uint32_t age_years{};
     BiologicalSex sex{BiologicalSex::Female};
     Occupation occupation{Occupation::None};
+    ActivityKind current_activity{ActivityKind::Idle};
     float x{};
     float y{};
     float z{};

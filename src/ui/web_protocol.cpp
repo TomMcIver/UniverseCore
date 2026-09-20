@@ -18,19 +18,6 @@ namespace universe::ui {
 
 namespace {
 
-[[nodiscard]] std::uint64_t stable_mix64(const std::uint64_t value) noexcept {
-    std::uint64_t mixed = value + 0x9E3779B97F4A7C15ULL;
-    mixed = (mixed ^ (mixed >> 30U)) * 0xBF58476D1CE4E5B9ULL;
-    mixed = (mixed ^ (mixed >> 27U)) * 0x94D049BB133111EBULL;
-    return mixed ^ (mixed >> 31U);
-}
-
-[[nodiscard]] float normalized01(const std::uint64_t value) noexcept {
-    constexpr double kScale = 1.0 / static_cast<double>(std::numeric_limits<std::uint32_t>::max());
-    const auto low = static_cast<std::uint32_t>(value & 0xFFFFFFFFULL);
-    return static_cast<float>(static_cast<double>(low) * kScale);
-}
-
 [[nodiscard]] std::uint32_t age_years_from_person(const SimulationSummary& summary, const Person& person) noexcept {
     const auto year_i64 = static_cast<std::int64_t>(summary.year);
     if (year_i64 <= person.birth_year) {
@@ -135,6 +122,34 @@ namespace {
             return "StoneExtractor";
         case Occupation::CraftWorker:
             return "CraftWorker";
+    }
+    return "Unknown";
+}
+
+[[nodiscard]] std::string activity_kind_label(const ActivityKind activity) {
+    switch (activity) {
+        case ActivityKind::Sleep:
+            return "Sleep";
+        case ActivityKind::Travel:
+            return "Travel";
+        case ActivityKind::Work:
+            return "Work";
+        case ActivityKind::Eat:
+            return "Eat";
+        case ActivityKind::Social:
+            return "Social";
+        case ActivityKind::Teaching:
+            return "Teaching";
+        case ActivityKind::RecordKeeping:
+            return "RecordKeeping";
+        case ActivityKind::Discovery:
+            return "Discovery";
+        case ActivityKind::Childcare:
+            return "Childcare";
+        case ActivityKind::Rest:
+            return "Rest";
+        case ActivityKind::Idle:
+            return "Idle";
     }
     return "Unknown";
 }
@@ -246,112 +261,24 @@ WorldSnapshotView build_world_snapshot(const SimulationController& controller) {
     snapshot.year = summary.year;
     snapshot.population = summary.population;
 
-    // Presentation-only placement (this is the universe::ui adapter layer,
-    // not canonical simulation state -- UniverseCore has no geographic
-    // coordinate system for regions/settlements yet). Previously every
-    // settlement sat on one uniform ring regardless of region, which read
-    // as an obviously artificial perfect circle rather than anything
-    // resembling how settlements actually cluster. Each region instead
-    // gets its own deterministic cluster center (hashed from region_id,
-    // spread widely so regions don't overlap each other), and settlements
-    // scatter locally around their own region's center -- several
-    // separate clusters instead of one ring. Still entirely presentation
-    // logic with no real geographic simulation behind it; a genuinely
-    // better answer would give regions/settlements real positions in
-    // UniverseCore itself, which is a larger change than this pass.
-    //
-    // Within a region, settlements are placed with Poisson-disc-style
-    // rejection sampling (try a deterministic sequence of candidate spots,
-    // widening the search radius each attempt, accept the first one far
-    // enough from every settlement already placed in this region) rather
-    // than independent random placement -- which had no minimum-distance
-    // enforcement at all and could, and did, place two settlements (and
-    // therefore their buildings) close enough to visibly overlap.
-    std::unordered_map<RegionId, std::vector<const Settlement*>> settlements_by_region;
-    settlements_by_region.reserve(settlements.size());
-    for (const auto& settlement : settlements) {
-        settlements_by_region[settlement.region_id].push_back(&settlement);
-    }
-    for (auto& region_entry : settlements_by_region) {
-        std::sort(region_entry.second.begin(), region_entry.second.end(), [](const Settlement* lhs, const Settlement* rhs) {
-            return lhs->id < rhs->id;
-        });
-    }
-
-    constexpr float min_settlement_distance = 14.0F;
-    constexpr int max_placement_attempts = 24;
-    constexpr float settlement_golden_angle_radians = 2.39996323F;
-
+    // Ticket #24/#25/#38: Region and Settlement now carry real canonical
+    // (x, z) positions derived deterministically in UniverseCore itself
+    // (SeedDomain::RegionPosition/SettlementPosition, with real min-distance
+    // rejection sampling). This adapter used to invent presentation-only
+    // placement here (per-region hashed cluster centers, Poisson-disc local
+    // scatter) because no such canonical geography existed; that invented
+    // placement is now superseded and forwards the real position directly.
     snapshot.settlements.reserve(settlements.size());
-    for (const auto& region_entry : settlements_by_region) {
-        const auto region_id = region_entry.first;
-        const auto region_angle_hash = stable_mix64(region_id * 0x2545F4914F6CDD1DULL);
-        const auto region_radius_hash = stable_mix64(region_id * 0x9E3779B97F4A7C15ULL);
-        const auto region_angle = normalized01(region_angle_hash) * 6.28318530718F;
-        const auto region_radius = 45.0F + (normalized01(region_radius_hash) * 70.0F);
-        const auto region_center_x = std::cos(region_angle) * region_radius;
-        const auto region_center_z = std::sin(region_angle) * region_radius;
-
-        std::vector<std::pair<float, float>> placed_local_positions;
-        placed_local_positions.reserve(region_entry.second.size());
-
-        for (const auto* settlement : region_entry.second) {
-            float chosen_x = 0.0F;
-            float chosen_z = 0.0F;
-            bool placed = false;
-
-            for (int attempt = 0; attempt < max_placement_attempts; ++attempt) {
-                const auto attempt_salt = static_cast<std::uint64_t>(attempt);
-                const auto local_angle_hash = stable_mix64((settlement->id * 0xBF58476D1CE4E5B9ULL) ^ attempt_salt);
-                const auto local_radius_hash = stable_mix64((settlement->id * 0x94D049BB133111EBULL) ^ attempt_salt);
-                const auto local_angle = normalized01(local_angle_hash) * 6.28318530718F;
-                const auto local_radius = 6.0F +
-                    (normalized01(local_radius_hash) * (16.0F + (static_cast<float>(attempt) * 3.0F)));
-                const auto candidate_x = std::cos(local_angle) * local_radius;
-                const auto candidate_z = std::sin(local_angle) * local_radius;
-
-                bool far_enough = true;
-                for (const auto& placed_position : placed_local_positions) {
-                    const auto dx = candidate_x - placed_position.first;
-                    const auto dz = candidate_z - placed_position.second;
-                    if (((dx * dx) + (dz * dz)) < (min_settlement_distance * min_settlement_distance)) {
-                        far_enough = false;
-                        break;
-                    }
-                }
-
-                if (far_enough) {
-                    chosen_x = candidate_x;
-                    chosen_z = candidate_z;
-                    placed = true;
-                    break;
-                }
-            }
-
-            if (!placed) {
-                // Deterministic fallback if a crowded region exhausts every
-                // attempt: push it out along a golden-angle spiral by
-                // placement order, which still guarantees separation
-                // instead of silently accepting the last rejected spot.
-                const auto index = static_cast<float>(placed_local_positions.size());
-                const auto angle = index * settlement_golden_angle_radians;
-                const auto radius = 20.0F + (std::sqrt(index) * 8.0F);
-                chosen_x = std::cos(angle) * radius;
-                chosen_z = std::sin(angle) * radius;
-            }
-
-            placed_local_positions.emplace_back(chosen_x, chosen_z);
-
-            snapshot.settlements.push_back(SettlementRenderView{
-                .id = settlement->id,
-                .region_id = settlement->region_id,
-                .active = settlement->active,
-                .access_share_points = settlement->access_share_points,
-                .x = region_center_x + chosen_x,
-                .y = 0.0F,
-                .z = region_center_z + chosen_z,
-            });
-        }
+    for (const auto& settlement : settlements) {
+        snapshot.settlements.push_back(SettlementRenderView{
+            .id = settlement.id,
+            .region_id = settlement.region_id,
+            .active = settlement.active,
+            .access_share_points = settlement.access_share_points,
+            .x = static_cast<float>(settlement.position_x),
+            .y = 0.0F,
+            .z = static_cast<float>(settlement.position_z),
+        });
     }
 
     std::unordered_map<SettlementId, SettlementRenderView> settlement_view_by_id;
@@ -360,10 +287,12 @@ WorldSnapshotView build_world_snapshot(const SimulationController& controller) {
         settlement_view_by_id.emplace(settlement.id, settlement);
     }
 
-    const auto day_ticks = static_cast<std::uint64_t>(days(1).ticks > 0 ? days(1).ticks : 1);
-    const auto tick_within_day = snapshot.tick % day_ticks;
-    const auto day_phase = static_cast<float>(tick_within_day) / static_cast<float>(day_ticks);
-
+    // Ticket #35/#38: a person's canonical position is always
+    // Settlement.position + Household.settlement_offset -- constant
+    // regardless of current_activity, since no sub-settlement geography
+    // (Building position) exists yet to distinguish home from work. This
+    // replaces the previous invented day-phase orbit/jitter, which had no
+    // relationship to canonical state at all.
     snapshot.agents.reserve(people.size());
     for (const auto& person : people) {
         const auto household_it = household_by_id.find(person.household_id);
@@ -377,26 +306,6 @@ WorldSnapshotView build_world_snapshot(const SimulationController& controller) {
         }
 
         const auto base = settlement_it->second;
-        const auto h1 = stable_mix64(person.id * 0x9E3779B97F4A7C15ULL);
-        const auto h2 = stable_mix64(person.id * 0xD6E8FEB86659FD93ULL);
-
-        const auto stationary_x = (normalized01(h1) - 0.5F) * 2.0F;
-        const auto stationary_z = (normalized01(h2) - 0.5F) * 2.0F;
-        const auto base_angle = normalized01(stable_mix64(person.id ^ 0xA24BAED4963EE407ULL)) * 6.28318530718F;
-
-        float speed_scale = 0.1F;
-        if (person.occupation == Occupation::SubsistenceCultivator ||
-            person.occupation == Occupation::WildFoodGatherer ||
-            person.occupation == Occupation::WoodGatherer ||
-            person.occupation == Occupation::StoneExtractor ||
-            person.occupation == Occupation::CraftWorker) {
-            speed_scale = 2.0F;
-        }
-
-        const auto movement_radius = person.alive ? (1.2F + normalized01(stable_mix64(person.id ^ 0x94D049BB133111EBULL)) * 2.8F) : 0.3F;
-        const auto phase = base_angle + (day_phase * 6.28318530718F * speed_scale);
-        const auto jitter_x = stationary_x + (std::cos(phase) * movement_radius);
-        const auto jitter_z = stationary_z + (std::sin(phase) * movement_radius);
 
         snapshot.agents.push_back(AgentRenderView{
             .id = person.id,
@@ -407,9 +316,10 @@ WorldSnapshotView build_world_snapshot(const SimulationController& controller) {
             .age_years = age_years_from_person(summary, person),
             .sex = person.sex,
             .occupation = person.occupation,
-            .x = base.x + jitter_x,
+            .current_activity = person.current_activity,
+            .x = base.x + static_cast<float>(household->settlement_offset_x),
             .y = 0.9F,
-            .z = base.z + jitter_z,
+            .z = base.z + static_cast<float>(household->settlement_offset_z),
         });
     }
 
@@ -658,6 +568,7 @@ void write_agent_json(std::ostringstream& out, const AgentRenderView& agent) {
         << ",\"age\":" << agent.age_years
         << ",\"sex\":\"" << (agent.sex == BiologicalSex::Female ? "Female" : "Male") << "\""
         << ",\"occupation\":\"" << occupation_label(agent.occupation) << "\""
+        << ",\"currentActivity\":\"" << activity_kind_label(agent.current_activity) << "\""
         << ",\"position\":{\"x\":" << agent.x << ",\"y\":" << agent.y << ",\"z\":" << agent.z << "}}";
 }
 

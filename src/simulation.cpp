@@ -100,6 +100,86 @@ struct Point2D {
         settlement_seed_value, SeedDomain::SettlementPosition, region.position_x, region.position_z,
         settlement_initial_placement_radius(region), kMinSettlementDistanceUnits, placed);
 }
+
+// Ticket #35/#38: a household's offset from its settlement's canonical
+// position, derived once at founding. Simple seeded jitter, not the
+// min-distance rejection sampling regions/settlements use -- households are
+// far denser than settlements, and overlapping household offsets is not a
+// correctness bug the way overlapping settlements was (no sub-settlement
+// geography/Building position exists yet to distinguish one household's
+// point from another's in the first place).
+constexpr std::int32_t kHouseholdOffsetMaxUnits = 10;
+
+void assign_household_offset(Household& household, const SimulationSeed household_seed_value) noexcept {
+    const auto span = static_cast<std::uint64_t>((kHouseholdOffsetMaxUnits * 2) + 1);
+    const auto x_seed = derive_seed(household_seed_value, SeedDomain::HouseholdPosition, 0U);
+    const auto z_seed = derive_seed(household_seed_value, SeedDomain::HouseholdPosition, 1U);
+    household.settlement_offset_x =
+        static_cast<std::int32_t>(seed_random_bounded(x_seed, span)) - kHouseholdOffsetMaxUnits;
+    household.settlement_offset_z =
+        static_cast<std::int32_t>(seed_random_bounded(z_seed, span)) - kHouseholdOffsetMaxUnits;
+}
+
+// Ticket #34/#37: a deterministic hour-of-day activity schedule. Fixed hour
+// bands keep the shape predictable (sleep at night, work during the day
+// for anyone with a productive Occupation) while seeded selection among a
+// band's candidate ActivityKinds gives real day-to-day and person-to-person
+// variety. Travel blocks bracket the work/afternoon bands so the Godot
+// client (ticket #40) has real activity-transition points to hang
+// navmesh-path proof-of-wiring on, even though home and work resolve to the
+// same canonical point this slice (no Building position yet -- see #35).
+constexpr std::uint32_t kHoursPerDay = 24U;
+
+[[nodiscard]] ActivityKind pick_seeded_activity(
+    const SimulationSeed seed, const std::span<const ActivityKind> options) noexcept {
+    if (options.empty()) {
+        return ActivityKind::Idle;
+    }
+    const auto index = seed_random_bounded(seed, options.size());
+    return options[static_cast<std::size_t>(index)];
+}
+
+[[nodiscard]] ActivityKind derive_hourly_activity(
+    const SimulationSeed person_schedule_seed,
+    const std::uint64_t food_period,
+    const std::uint32_t hour_of_day,
+    const Occupation occupation) noexcept {
+    // Ticket #34: re-derived daily, not just hourly -- fold food_period
+    // (the day index) into the stable_id alongside hour_of_day, or every
+    // day would pick the identical idle-hour activity for a given person.
+    const auto hour_seed = derive_seed(
+        person_schedule_seed, SeedDomain::Schedule, (food_period * kHoursPerDay) + hour_of_day);
+
+    if (hour_of_day < 5U || hour_of_day >= 22U) {
+        return ActivityKind::Sleep;
+    }
+    if (hour_of_day == 5U || hour_of_day == 14U || hour_of_day == 20U) {
+        return ActivityKind::Travel;
+    }
+    if (hour_of_day == 13U) {
+        return ActivityKind::Eat;
+    }
+    if (hour_of_day >= 6U && hour_of_day < 13U) {
+        if (occupation != Occupation::None) {
+            return ActivityKind::Work;
+        }
+        static constexpr std::array<ActivityKind, 5> kMorningIdleOptions{
+            ActivityKind::Social, ActivityKind::RecordKeeping, ActivityKind::Discovery,
+            ActivityKind::Teaching, ActivityKind::Rest,
+        };
+        return pick_seeded_activity(hour_seed, kMorningIdleOptions);
+    }
+    if (hour_of_day >= 15U && hour_of_day < 20U) {
+        static constexpr std::array<ActivityKind, 7> kAfternoonOptions{
+            ActivityKind::Social, ActivityKind::Teaching, ActivityKind::RecordKeeping,
+            ActivityKind::Discovery, ActivityKind::Childcare, ActivityKind::Rest, ActivityKind::Idle,
+        };
+        return pick_seeded_activity(hour_seed, kAfternoonOptions);
+    }
+    // hour 21: evening rest before sleep.
+    return ActivityKind::Rest;
+}
+
 constexpr std::uint32_t kSettlementShareScale = 10'000;
 constexpr std::uint32_t kInitialAllocatedSettlementShare = 8'500;
 constexpr std::uint32_t kHighPressureThresholdPer10k = 8'500;
@@ -963,6 +1043,7 @@ void Simulation::run_scheduled_systems_until(const SimulationTime target_time) {
 
         if (config_.food_system_enabled && food_next_run_ <= next_time) {
             process_food_period(current_food_period());
+            process_schedule_period(current_food_period());
 
             SimulationTime next_food_run{};
             if (!checked_add_time(food_next_run_, food_interval_, next_food_run)) {
@@ -1646,6 +1727,34 @@ void Simulation::process_food_period(const std::uint64_t food_period) {
     refresh_environment_aggregates();
     refresh_material_aggregates();
     refresh_economic_aggregates();
+}
+
+// Ticket #37: re-derives every detailed-resolution alive person's
+// current_activity for "now" (the hour-of-day at this food period's tick),
+// deterministically from person_seed + SeedDomain::Schedule + hour. Cohort
+// aggregates carry no Person struct at all, so they are naturally excluded
+// -- consistent with the existing LOD demotion philosophy of dropping
+// detailed-only state.
+void Simulation::process_schedule_period(const std::uint64_t food_period) {
+    const auto day_ticks = days(1).ticks > 0 ? days(1).ticks : 1;
+    const auto hour_ticks = std::max<std::int64_t>(1, day_ticks / static_cast<std::int64_t>(kHoursPerDay));
+    const auto ticks_within_day = state_.time.ticks % day_ticks;
+    const auto hour_of_day = static_cast<std::uint32_t>((ticks_within_day / hour_ticks) % kHoursPerDay);
+
+    for (auto& person : state_.people) {
+        if (!person.alive) {
+            continue;
+        }
+        const auto schedule_seed = person_seed(person.id);
+        person.current_activity = derive_hourly_activity(schedule_seed, food_period, hour_of_day, person.occupation);
+
+        if (person.current_activity == ActivityKind::Rest) {
+            person.health_points = clamp_i32(
+                person.health_points + 2,
+                food_parameters_.min_person_health_points,
+                food_parameters_.max_person_health_points);
+        }
+    }
 }
 
 void Simulation::process_materials_period(const std::uint64_t food_period) {
@@ -2669,6 +2778,7 @@ void Simulation::promote_region_to_detailed(const RegionId region_id) {
             .region_id = region_id,
             .settlement_id = settlement_id,
         };
+        assign_household_position_offset(new_household);
         state_.households.push_back(new_household);
         candidates.push_back(new_household.id);
         (void)ordinal;
@@ -3121,6 +3231,7 @@ void Simulation::process_basic_discoveries(const std::uint64_t demographic_year)
         const auto discovery_key = undiscovered_keys[key_index];
 
         std::vector<PersonId> discoverer_candidates;
+        std::vector<PersonId> discovering_candidates;
         for (const auto& person : state_.people) {
             if (!person.alive || age_years(person) < kAdultAgeYears) {
                 continue;
@@ -3130,20 +3241,31 @@ void Simulation::process_basic_discoveries(const std::uint64_t demographic_year)
                 continue;
             }
             discoverer_candidates.push_back(person.id);
+            if (person.current_activity == ActivityKind::Discovery) {
+                discovering_candidates.push_back(person.id);
+            }
         }
 
         if (discoverer_candidates.empty()) {
             continue;
         }
 
-        std::sort(discoverer_candidates.begin(), discoverer_candidates.end());
+        // Ticket #37: prefer people whose schedule currently has them
+        // actually doing Discovery -- a real hook from schedule state into
+        // this system -- but fall back to the full settlement pool so a
+        // settlement never goes permanently discovery-silent just because
+        // nobody's schedule happens to line up at this exact hour.
+        auto& effective_discoverer_candidates =
+            discovering_candidates.empty() ? discoverer_candidates : discovering_candidates;
+
+        std::sort(effective_discoverer_candidates.begin(), effective_discoverer_candidates.end());
         const auto discoverer_seed = derive_seed(
             settlement_seed(settlement_id),
             SeedDomain::DiscoveryPersonSelection,
             demographic_year ^ discovery_key);
         const auto discoverer_index = static_cast<std::size_t>(
-            seed_random_bounded(discoverer_seed, discoverer_candidates.size()));
-        const auto discoverer_id = discoverer_candidates[discoverer_index];
+            seed_random_bounded(discoverer_seed, effective_discoverer_candidates.size()));
+        const auto discoverer_id = effective_discoverer_candidates[discoverer_index];
 
         const auto event_id = emit_discovery_made_event(discovery_key, discoverer_id, settlement_id);
         const std::array<PersonId, 1> observer_ids{discoverer_id};
@@ -3372,6 +3494,7 @@ void Simulation::process_records(const std::uint64_t demographic_year) {
         }
 
         std::vector<PersonId> author_candidates;
+        std::vector<PersonId> record_keeping_candidates;
         for (const auto& person : state_.people) {
             if (!person.alive || age_years(person) < kAdultAgeYears) {
                 continue;
@@ -3384,20 +3507,30 @@ void Simulation::process_records(const std::uint64_t demographic_year) {
                 continue;
             }
             author_candidates.push_back(person.id);
+            if (person.current_activity == ActivityKind::RecordKeeping) {
+                record_keeping_candidates.push_back(person.id);
+            }
         }
 
         if (author_candidates.empty()) {
             continue;
         }
 
-        std::sort(author_candidates.begin(), author_candidates.end());
+        // Ticket #37: same schedule-preference-with-fallback hook as
+        // Discovery above -- prefer people currently scheduled for
+        // RecordKeeping, but never let an empty match silence records
+        // entirely for a settlement.
+        auto& effective_author_candidates =
+            record_keeping_candidates.empty() ? author_candidates : record_keeping_candidates;
+
+        std::sort(effective_author_candidates.begin(), effective_author_candidates.end());
         const auto author_seed = derive_seed(
             settlement_seed(settlement_id),
             SeedDomain::RecordAuthorSelection,
             demographic_year);
         const auto author_index = static_cast<std::size_t>(
-            seed_random_bounded(author_seed, author_candidates.size()));
-        const auto author_id = author_candidates[author_index];
+            seed_random_bounded(author_seed, effective_author_candidates.size()));
+        const auto author_id = effective_author_candidates[author_index];
 
         auto author_knowledge = knowledge_for_person(author_id);
         if (author_knowledge.empty()) {
@@ -4227,6 +4360,10 @@ SimulationSeed Simulation::household_seed(const HouseholdId household_id) const 
     return derive_seed(root_seed(), SeedDomain::Household, household_id);
 }
 
+void Simulation::assign_household_position_offset(Household& household) const noexcept {
+    assign_household_offset(household, household_seed(household.id));
+}
+
 SimulationSeed Simulation::region_seed(const RegionId region_id) const noexcept {
     return derive_seed(root_seed(), SeedDomain::Region, region_id);
 }
@@ -4574,13 +4711,15 @@ void Simulation::initialize_households() {
 
     state_.households.reserve(static_cast<std::size_t>(household_count));
     for (std::uint64_t i = 0; i < household_count; ++i) {
-        state_.households.push_back(Household{
+        auto new_household = Household{
             .id = next_household_id(),
             .region_id = 0,
             .settlement_id = 0,
             .member_ids = {},
             .resources = HouseholdResourceState{.food_inventory = ResourceAmount{config_.initial_household_food_units}},
-        });
+        };
+        assign_household_position_offset(new_household);
+        state_.households.push_back(new_household);
     }
 
     const auto assign_person_to_household = [this](const PersonId person_id, const HouseholdId household_id) {

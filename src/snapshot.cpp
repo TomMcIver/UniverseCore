@@ -414,6 +414,7 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
         payload.write_u32(static_cast<std::uint32_t>(person->health_points));
         payload.write_u32(person->consecutive_undernourished_days);
         payload.write_u8(static_cast<std::uint8_t>(person->occupation));
+        payload.write_u8(static_cast<std::uint8_t>(person->current_activity));
     }
 
     std::vector<const Household*> household_order;
@@ -797,6 +798,8 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
         payload.write_i64(household->cumulative_material_transferred_in);
         payload.write_i64(household->cumulative_material_transferred_out);
         payload.write_i64(household->derived_wealth_points);
+        payload.write_u32(static_cast<std::uint32_t>(household->settlement_offset_x));
+        payload.write_u32(static_cast<std::uint32_t>(household->settlement_offset_z));
     }
 
     payload.write_u64(static_cast<std::uint64_t>(settlement_order.size()));
@@ -1173,10 +1176,12 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
             person.father_id = father_id;
         }
 
+        std::uint8_t current_activity_raw = 0;
         if (!payload_reader.read_u32(nutrition_points) ||
             !payload_reader.read_u32(health_points) ||
             !payload_reader.read_u32(person.consecutive_undernourished_days) ||
-            !payload_reader.read_u8(occupation_raw)) {
+            !payload_reader.read_u8(occupation_raw) ||
+            !payload_reader.read_u8(current_activity_raw)) {
             return load_error(SnapshotErrorCode::TruncatedData, "Snapshot person health fields are truncated");
         }
 
@@ -1191,6 +1196,11 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
             return load_error(SnapshotErrorCode::InvalidEnum, "Snapshot person occupation enum is invalid");
         }
         person.occupation = static_cast<Occupation>(occupation_raw);
+
+        if (current_activity_raw > static_cast<std::uint8_t>(ActivityKind::Idle)) {
+            return load_error(SnapshotErrorCode::InvalidEnum, "Snapshot person current_activity enum is invalid");
+        }
+        person.current_activity = static_cast<ActivityKind>(current_activity_raw);
 
         if (!is_valid_person_id(person.id)) {
             return load_error(SnapshotErrorCode::InvalidState, "Snapshot person id must be non-zero");
@@ -2142,6 +2152,8 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         std::int64_t material_in = 0;
         std::int64_t material_out = 0;
         std::int64_t wealth = 0;
+        std::uint32_t offset_x_raw = 0;
+        std::uint32_t offset_z_raw = 0;
 
         if (!payload_reader.read_u64(household_id) ||
             !payload_reader.read_i64(wood) ||
@@ -2154,7 +2166,9 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
             !payload_reader.read_i64(food_out) ||
             !payload_reader.read_i64(material_in) ||
             !payload_reader.read_i64(material_out) ||
-            !payload_reader.read_i64(wealth)) {
+            !payload_reader.read_i64(wealth) ||
+            !payload_reader.read_u32(offset_x_raw) ||
+            !payload_reader.read_u32(offset_z_raw)) {
             return load_error(SnapshotErrorCode::TruncatedData, "Snapshot household economy record is truncated");
         }
 
@@ -2184,6 +2198,8 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         household->cumulative_material_transferred_in = material_in;
         household->cumulative_material_transferred_out = material_out;
         household->derived_wealth_points = wealth;
+        household->settlement_offset_x = static_cast<std::int32_t>(offset_x_raw);
+        household->settlement_offset_z = static_cast<std::int32_t>(offset_z_raw);
     }
 
     std::uint64_t settlement_economy_count = 0;
