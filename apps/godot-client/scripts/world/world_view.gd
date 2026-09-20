@@ -30,11 +30,14 @@ var _building_data: Dictionary
 var _height_sampler := Callable()
 
 var _navmesh_manager: Node3D
-var _agent_targets: Dictionary       # id -> Vector3, canonical position
-var _agent_region_ids: Dictionary    # id -> int
-var _agent_activity: Dictionary      # id -> String, last known current_activity
-var _agent_labels: Dictionary        # id -> Label3D
-var _agent_movement: Dictionary      # id -> Dictionary describing in-flight movement
+## Per-agent tracking, all keyed by agent id: canonical target position,
+## region id, last known current_activity, the activity Label3D, and any
+## in-flight movement state.
+var _agent_targets: Dictionary
+var _agent_region_ids: Dictionary
+var _agent_activity: Dictionary
+var _agent_labels: Dictionary
+var _agent_movement: Dictionary
 
 ## Ticket #40: movement must track canonical simulation time, not raw frame
 ## time -- pausing halts it, the speed multiplier scales it. simulation_status
@@ -203,18 +206,16 @@ func _spawn_agent(agent: Dictionary) -> void:
 	area.add_child(label)
 	_agent_labels[id] = label
 
-	# Ticket #40 proof-of-wiring: spawn a small deterministic jitter away
-	# from the real canonical target and walk it in immediately, so real
-	# navmesh-driven movement is visibly exercised on every join, not only
-	# on the (much rarer) Travel activity transitions handled in
-	# _update_agent below.
-	area.position = target + _jitter_offset_for_person(id)
+	# A newly-spawned agent renders at its real canonical position
+	# immediately, not an invented placement -- movement is only ever a
+	# real response to a schedule transition (see _update_agent's Travel
+	# handling below), never a cosmetic join-time flourish.
+	area.position = target
 	add_child(area)
 	_agent_nodes[id] = area
 	_agent_targets[id] = target
 	_agent_region_ids[id] = int(agent.get("regionId", 0))
 	_agent_activity[id] = activity
-	_request_path_to_target(id)
 
 ## Ticket #40: refresh the visible activity label and canonical target for
 ## an already-spawned agent, and trigger a proof-of-wiring walk whenever

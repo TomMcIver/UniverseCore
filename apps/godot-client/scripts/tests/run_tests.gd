@@ -62,8 +62,10 @@ func _initialize() -> void:
 	await _run_async_test("navmesh pooled request_path returns a real path once baked", Callable(self, "_test_navmesh_query_after_bake"))
 	await _run_async_test("navmesh bakes multiple regions independently", Callable(self, "_test_navmesh_multiple_regions_independent"))
 
-	_run_test("world_view agent walks to its canonical target when unpaused", Callable(self, "_test_world_view_agent_walks_to_target"))
+	_run_test("world_view renders a newly spawned agent at its real canonical position", Callable(self, "_test_world_view_agent_renders_at_real_position_on_spawn"))
+	_run_test("world_view walks an agent back to target after a Travel transition", Callable(self, "_test_world_view_agent_walks_back_to_target_after_travel_transition"))
 	_run_test("world_view halts agent movement while the simulation is paused", Callable(self, "_test_world_view_pause_halts_movement"))
+	_run_test("world_view scales movement progression with simulation speed", Callable(self, "_test_world_view_speed_scales_movement_progression"))
 	_run_test("world_view updates an agent's activity label on a delta update", Callable(self, "_test_world_view_activity_label_updates_on_delta"))
 	_run_test("world_view preserves agent node identity across a delta upsert", Callable(self, "_test_world_view_upsert_preserves_node_identity"))
 
@@ -450,7 +452,27 @@ func _test_day_night_wraps_across_days() -> void:
 		"the same time-of-day should read the same daylight amount regardless of which day it falls on"
 	)
 
-func _test_world_view_agent_walks_to_target() -> void:
+func _test_world_view_agent_renders_at_real_position_on_spawn() -> void:
+	# A brand new agent must render at its real canonical position
+	# immediately -- never an invented placement, even momentarily.
+	var view := WorldView.new()
+	root.add_child(view)
+	view.apply_snapshot({
+		"agents": [{"id": 42, "sex": "Female", "position": {"x": 4.0, "y": 0.0, "z": -2.0}, "currentActivity": "Idle"}],
+		"settlements": [],
+		"buildings": [],
+	})
+	var node: Node3D = view.get_child(0)
+	_assert_eq(node.position, Vector3(4.0, 0.0, -2.0), "a newly spawned agent must render exactly at its real canonical position")
+	view.queue_free()
+
+func _test_world_view_agent_walks_back_to_target_after_travel_transition() -> void:
+	# Movement is a real response to a schedule transition, not a cosmetic
+	# join-time flourish: an agent transitioning into Travel briefly steps
+	# away from its canonical point, then a real navmesh-driven path walks
+	# it back -- proof of the bake -> gate -> pooled query -> arrival
+	# pipeline (per the map's decision that home and work are the same
+	# canonical point this slice).
 	var view := WorldView.new()
 	root.add_child(view)
 	view.apply_snapshot({
@@ -460,10 +482,69 @@ func _test_world_view_agent_walks_to_target() -> void:
 	})
 	view.set_simulation_playback(false, 1)
 	var node: Node3D = view.get_child(0)
+	_assert_eq(node.position, Vector3.ZERO, "agent should still be at its real position before any Travel transition")
+
+	view.apply_delta({
+		"addedAgents": [],
+		"updatedAgents": [{"id": 42, "sex": "Female", "position": {"x": 0.0, "y": 0.0, "z": 0.0}, "currentActivity": "Travel"}],
+		"removedAgentIds": [],
+		"addedSettlements": [], "updatedSettlements": [], "removedSettlementIds": [],
+		"addedBuildings": [], "updatedBuildings": [], "removedBuildingIds": [],
+	})
+	_assert_eq(node.position.distance_to(Vector3.ZERO) > 0.5, true, "a Travel transition should visibly step the agent away from its canonical point")
+
 	for i in range(200):
 		view._process(0.1)
-	_assert_eq(node.position.distance_to(Vector3.ZERO) < 0.05, true, "agent should have walked to its canonical target once unpaused")
+	_assert_eq(node.position.distance_to(Vector3.ZERO) < 0.05, true, "agent should have walked back to its canonical target once unpaused")
 	view.queue_free()
+
+func _test_world_view_speed_scales_movement_progression() -> void:
+	# Ticket #40: changing the speed multiplier must visibly scale movement
+	# progression -- at 2x speed, the same number of ticks should cover
+	# roughly twice the distance as at 1x.
+	var view_1x := WorldView.new()
+	root.add_child(view_1x)
+	view_1x.apply_snapshot({
+		"agents": [{"id": 1, "sex": "Female", "position": {"x": 0.0, "y": 0.0, "z": 0.0}, "currentActivity": "Idle"}],
+		"settlements": [], "buildings": [],
+	})
+	view_1x.apply_delta({
+		"addedAgents": [],
+		"updatedAgents": [{"id": 1, "sex": "Female", "position": {"x": 0.0, "y": 0.0, "z": 0.0}, "currentActivity": "Travel"}],
+		"removedAgentIds": [],
+		"addedSettlements": [], "updatedSettlements": [], "removedSettlementIds": [],
+		"addedBuildings": [], "updatedBuildings": [], "removedBuildingIds": [],
+	})
+	var node_1x: Node3D = view_1x.get_child(0)
+	var start_1x := node_1x.position
+	view_1x.set_simulation_playback(false, 1)
+	for i in range(5):
+		view_1x._process(0.1)
+	var distance_1x := start_1x.distance_to(node_1x.position)
+
+	var view_2x := WorldView.new()
+	root.add_child(view_2x)
+	view_2x.apply_snapshot({
+		"agents": [{"id": 1, "sex": "Female", "position": {"x": 0.0, "y": 0.0, "z": 0.0}, "currentActivity": "Idle"}],
+		"settlements": [], "buildings": [],
+	})
+	view_2x.apply_delta({
+		"addedAgents": [],
+		"updatedAgents": [{"id": 1, "sex": "Female", "position": {"x": 0.0, "y": 0.0, "z": 0.0}, "currentActivity": "Travel"}],
+		"removedAgentIds": [],
+		"addedSettlements": [], "updatedSettlements": [], "removedSettlementIds": [],
+		"addedBuildings": [], "updatedBuildings": [], "removedBuildingIds": [],
+	})
+	var node_2x: Node3D = view_2x.get_child(0)
+	var start_2x := node_2x.position
+	view_2x.set_simulation_playback(false, 2)
+	for i in range(5):
+		view_2x._process(0.1)
+	var distance_2x := start_2x.distance_to(node_2x.position)
+
+	_assert_eq(distance_2x > distance_1x * 1.5, true, "2x simulation speed should cover noticeably more distance than 1x in the same number of ticks")
+	view_1x.queue_free()
+	view_2x.queue_free()
 
 func _test_world_view_pause_halts_movement() -> void:
 	var view := WorldView.new()
@@ -474,11 +555,18 @@ func _test_world_view_pause_halts_movement() -> void:
 		"buildings": [],
 	})
 	view.set_simulation_playback(true, 1)
+	view.apply_delta({
+		"addedAgents": [],
+		"updatedAgents": [{"id": 7, "sex": "Male", "position": {"x": 0.0, "y": 0.0, "z": 0.0}, "currentActivity": "Travel"}],
+		"removedAgentIds": [],
+		"addedSettlements": [], "updatedSettlements": [], "removedSettlementIds": [],
+		"addedBuildings": [], "updatedBuildings": [], "removedBuildingIds": [],
+	})
 	var node: Node3D = view.get_child(0)
 	var start_position := node.position
 	for i in range(20):
 		view._process(0.1)
-	_assert_eq(node.position, start_position, "movement must not progress while the simulation is paused")
+	_assert_eq(node.position, start_position, "movement must not progress while the simulation is paused, even for a freshly-triggered walk")
 	view.queue_free()
 
 func _test_world_view_activity_label_updates_on_delta() -> void:
