@@ -62,6 +62,11 @@ func _initialize() -> void:
 	await _run_async_test("navmesh pooled request_path returns a real path once baked", Callable(self, "_test_navmesh_query_after_bake"))
 	await _run_async_test("navmesh bakes multiple regions independently", Callable(self, "_test_navmesh_multiple_regions_independent"))
 
+	_run_test("world_view agent walks to its canonical target when unpaused", Callable(self, "_test_world_view_agent_walks_to_target"))
+	_run_test("world_view halts agent movement while the simulation is paused", Callable(self, "_test_world_view_pause_halts_movement"))
+	_run_test("world_view updates an agent's activity label on a delta update", Callable(self, "_test_world_view_activity_label_updates_on_delta"))
+	_run_test("world_view preserves agent node identity across a delta upsert", Callable(self, "_test_world_view_upsert_preserves_node_identity"))
+
 	print("\n%d/%d tests passed" % [_total - _failures, _total])
 	quit(1 if _failures > 0 else 0)
 
@@ -444,3 +449,74 @@ func _test_day_night_wraps_across_days() -> void:
 		true,
 		"the same time-of-day should read the same daylight amount regardless of which day it falls on"
 	)
+
+func _test_world_view_agent_walks_to_target() -> void:
+	var view := WorldView.new()
+	root.add_child(view)
+	view.apply_snapshot({
+		"agents": [{"id": 42, "sex": "Female", "position": {"x": 0.0, "y": 0.0, "z": 0.0}, "currentActivity": "Idle"}],
+		"settlements": [],
+		"buildings": [],
+	})
+	view.set_simulation_playback(false, 1)
+	var node: Node3D = view.get_child(0)
+	for i in range(200):
+		view._process(0.1)
+	_assert_eq(node.position.distance_to(Vector3.ZERO) < 0.05, true, "agent should have walked to its canonical target once unpaused")
+	view.queue_free()
+
+func _test_world_view_pause_halts_movement() -> void:
+	var view := WorldView.new()
+	root.add_child(view)
+	view.apply_snapshot({
+		"agents": [{"id": 7, "sex": "Male", "position": {"x": 0.0, "y": 0.0, "z": 0.0}, "currentActivity": "Idle"}],
+		"settlements": [],
+		"buildings": [],
+	})
+	view.set_simulation_playback(true, 1)
+	var node: Node3D = view.get_child(0)
+	var start_position := node.position
+	for i in range(20):
+		view._process(0.1)
+	_assert_eq(node.position, start_position, "movement must not progress while the simulation is paused")
+	view.queue_free()
+
+func _test_world_view_activity_label_updates_on_delta() -> void:
+	var view := WorldView.new()
+	root.add_child(view)
+	view.apply_snapshot({
+		"agents": [{"id": 5, "sex": "Female", "position": {"x": 0.0, "y": 0.0, "z": 0.0}, "currentActivity": "Sleep"}],
+		"settlements": [],
+		"buildings": [],
+	})
+	var label: Label3D = view._agent_labels[5]
+	_assert_eq(label.text, "Sleep")
+	view.apply_delta({
+		"addedAgents": [],
+		"updatedAgents": [{"id": 5, "sex": "Female", "position": {"x": 0.0, "y": 0.0, "z": 0.0}, "currentActivity": "Work"}],
+		"removedAgentIds": [],
+		"addedSettlements": [], "updatedSettlements": [], "removedSettlementIds": [],
+		"addedBuildings": [], "updatedBuildings": [], "removedBuildingIds": [],
+	})
+	_assert_eq(label.text, "Work")
+	view.queue_free()
+
+func _test_world_view_upsert_preserves_node_identity() -> void:
+	var view := WorldView.new()
+	root.add_child(view)
+	view.apply_snapshot({
+		"agents": [{"id": 3, "sex": "Male", "position": {"x": 0.0, "y": 0.0, "z": 0.0}, "currentActivity": "Idle"}],
+		"settlements": [],
+		"buildings": [],
+	})
+	var node_before: Node3D = view.get_child(0)
+	view.apply_delta({
+		"addedAgents": [],
+		"updatedAgents": [{"id": 3, "sex": "Male", "position": {"x": 0.0, "y": 0.0, "z": 0.0}, "currentActivity": "Idle"}],
+		"removedAgentIds": [],
+		"addedSettlements": [], "updatedSettlements": [], "removedSettlementIds": [],
+		"addedBuildings": [], "updatedBuildings": [], "removedBuildingIds": [],
+	})
+	var node_after: Node3D = view.get_child(0)
+	_assert_eq(node_before == node_after, true, "an agent update must not destroy and recreate the node (would reset movement state every tick)")
+	view.queue_free()

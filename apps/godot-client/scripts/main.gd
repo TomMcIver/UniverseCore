@@ -14,6 +14,7 @@ const EventLogScript := preload("res://scripts/ui/event_log.gd")
 const TerrainGeneratorScript := preload("res://scripts/terrain_generator.gd")
 const OrbitCameraScript := preload("res://scripts/orbit_camera.gd")
 const DayNight := preload("res://scripts/world/day_night.gd")
+const NavmeshManagerScript := preload("res://scripts/world/navmesh_manager.gd")
 
 var _client: Node
 var _world_view: Node3D
@@ -23,6 +24,8 @@ var _event_log: PanelContainer
 var _terrain: MeshInstance3D
 var _sun: DirectionalLight3D
 var _world_environment: WorldEnvironment
+var _navmesh_manager: Node3D
+var _navmeshes_baked := false
 
 func _ready() -> void:
 	_setup_environment()
@@ -30,9 +33,14 @@ func _ready() -> void:
 	_setup_terrain()
 	_setup_camera()
 
+	_navmesh_manager = NavmeshManagerScript.new()
+	_navmesh_manager.name = "NavmeshManager"
+	add_child(_navmesh_manager)
+
 	_world_view = WorldViewScript.new()
 	_world_view.name = "WorldView"
 	add_child(_world_view)
+	_world_view.set_navmesh_manager(_navmesh_manager)
 
 	_hud = HudScript.new()
 	_hud.name = "Hud"
@@ -98,6 +106,57 @@ func _run_screenshot_schedule(schedule_env: String, dir: String) -> void:
 		image.save_png("%s/shot_%d_t%s.png" % [dir, index, part])
 		index += 1
 	get_tree().quit()
+
+## Ticket #40: terrain is one continuous mesh (Voronoi-sampled per vertex,
+## not chunked by region -- see terrain_generator.gd), so there is no
+## existing per-region sub-mesh to bake a NavigationRegion3D from directly.
+## Approximate each region's walkable area as a flat quad covering its
+## settlements' bounding box plus a margin, at the terrain height sampled
+## at that bounding box's center -- enough for the pooled/near-player
+## pathing pipeline this ticket wires up to have real geometry to path
+## against, without requiring true per-region terrain chunking (a larger
+## change, not required by this slice).
+func _bake_region_navmeshes(regions: Array, settlements: Array) -> void:
+	var bounds_by_region: Dictionary = {}
+	for settlement in settlements:
+		var region_id := int(settlement.get("regionId", 0))
+		var pos: Dictionary = settlement.get("position", {})
+		var point := Vector2(float(pos.get("x", 0.0)), float(pos.get("z", 0.0)))
+		if not bounds_by_region.has(region_id):
+			bounds_by_region[region_id] = {"min": point, "max": point}
+		else:
+			var b: Dictionary = bounds_by_region[region_id]
+			b["min"] = Vector2(min(b["min"].x, point.x), min(b["min"].y, point.y))
+			b["max"] = Vector2(max(b["max"].x, point.x), max(b["max"].y, point.y))
+			bounds_by_region[region_id] = b
+
+	var margin := 30.0
+	for region_id in bounds_by_region.keys():
+		var b: Dictionary = bounds_by_region[region_id]
+		var center: Vector2 = (b["min"] + b["max"]) * 0.5
+		var half_extent := Vector2(
+			max((b["max"].x - b["min"].x) * 0.5 + margin, margin),
+			max((b["max"].y - b["min"].y) * 0.5 + margin, margin))
+		var height := _terrain.get_height_at_world(center.x, center.y)
+		var mesh := _make_region_navmesh_quad(half_extent)
+		var region_transform := Transform3D(Basis(), Vector3(center.x, height, center.y))
+		_navmesh_manager.rebake_region(int(region_id), mesh, region_transform, 1)
+
+func _make_region_navmesh_quad(half_extent: Vector2) -> Mesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var p00 := Vector3(-half_extent.x, 0.0, -half_extent.y)
+	var p10 := Vector3(half_extent.x, 0.0, -half_extent.y)
+	var p01 := Vector3(-half_extent.x, 0.0, half_extent.y)
+	var p11 := Vector3(half_extent.x, 0.0, half_extent.y)
+	st.add_vertex(p00)
+	st.add_vertex(p10)
+	st.add_vertex(p01)
+	st.add_vertex(p10)
+	st.add_vertex(p11)
+	st.add_vertex(p01)
+	st.generate_normals()
+	return st.commit()
 
 func _setup_environment() -> void:
 	var sky_material := ProceduralSkyMaterial.new()
@@ -167,6 +226,9 @@ func _on_message_received(message: Dictionary) -> void:
 	match message_type:
 		"initial_snapshot":
 			_terrain.generate_from_regions(payload.get("regions", []), payload.get("settlements", []))
+			if not _navmeshes_baked:
+				_bake_region_navmeshes(payload.get("regions", []), payload.get("settlements", []))
+				_navmeshes_baked = true
 			_world_view.apply_snapshot(payload, Callable(_terrain, "get_height_at_world"))
 			var tick := int(message.get("tick", 0))
 			_apply_day_night(tick)
@@ -185,6 +247,7 @@ func _on_message_received(message: Dictionary) -> void:
 			var paused: bool = payload.get("paused", true)
 			var speed: int = int(payload.get("speed", 1))
 			_apply_day_night(int(message.get("tick", 0)))
+			_world_view.set_simulation_playback(paused, speed)
 			_hud.set_connection_status("Connected -- %s (%dx)" % ["Paused" if paused else "Running", speed])
 		"entity_details":
 			_inspector.show_agent_details(payload)
