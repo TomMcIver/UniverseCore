@@ -296,8 +296,15 @@ func _jitter_offset_for_person(id: int) -> Vector3:
 ## per-person spread keeps household-mates visually distinct without
 ## inventing any canonical position they don't actually have.
 func _household_spacing_offset_for_person(id: int) -> Vector3:
-	var angle := float(id % 8) * (PI / 4.0)
-	var radius := 0.6 + (float(id % 3) * 0.3)
+	# A short id%N cycle collides too often for household-mates (typically
+	# 2-6 people) to land on visibly distinct spots, and the radius was too
+	# small to read as separated at normal zoom. A multiplicative hash
+	# spreads angle across the full circle per id, with radius varying
+	# independently so even same-angle collisions still separate visually.
+	var angle_hash := (id * 2654435761) % 360
+	var radius_hash := (id * 40503) % 100
+	var angle := float(angle_hash) * (PI / 180.0)
+	var radius := 1.5 + (float(radius_hash) / 100.0) * 2.0
 	return Vector3(cos(angle) * radius, 0.0, sin(angle) * radius)
 
 func _is_near_player(pos: Vector3) -> bool:
