@@ -50,7 +50,9 @@ func _initialize() -> void:
 	_run_test("inspector panel formats building details", Callable(self, "_test_inspector_building_details"))
 	_run_test("event log appends and counts entries", Callable(self, "_test_event_log_append"))
 	_run_test("terrain finds the nearest region center for a world point", Callable(self, "_test_terrain_nearest_region_id"))
+	_run_test("terrain samples height via bilinear interpolation matching the mesh surface", Callable(self, "_test_terrain_height_bilinear_interpolation"))
 	_run_test("terrain derives region centers from settlement positions", Callable(self, "_test_terrain_region_centers_from_settlements"))
+	_run_test("terrain/camera centering skips extinct settlements", Callable(self, "_test_terrain_first_settlement_position_skips_inactive"))
 	_run_test("terrain height/color genuinely differ between environment classes", Callable(self, "_test_terrain_sample_varies_by_class"))
 	_run_test("terrain color reflects wild-food richness within the same class", Callable(self, "_test_terrain_sample_richness_affects_color"))
 	_run_test("day_night is brightest at midday and dimmest at midnight", Callable(self, "_test_day_night_midday_vs_midnight"))
@@ -409,6 +411,43 @@ func _test_terrain_nearest_region_id() -> void:
 	_assert_eq(terrain._nearest_region_id(Vector2(5.0, 5.0), centers), 1)
 	_assert_eq(terrain._nearest_region_id(Vector2(90.0, 92.0), centers), 2)
 
+func _test_terrain_height_bilinear_interpolation() -> void:
+	# A real bug this guards against: nearest-vertex height sampling could
+	# disagree with the mesh's own (bilinearly interpolated) surface on
+	# bumpy terrain, visibly clipping entities into or above the ground.
+	var terrain := TerrainGenerator.new()
+	terrain.width = 1
+	terrain.depth = 1
+	terrain.cell_size = 2.0
+	terrain._grid_half_width = 1.0
+	terrain._grid_half_depth = 1.0
+	terrain._height_grid = [
+		[0.0, 10.0],
+		[20.0, 30.0],
+	]
+	_assert_eq(terrain.get_height_at_world(-1.0, -1.0), 0.0, "exact vertex (0,0) should return its own height")
+	_assert_eq(terrain.get_height_at_world(1.0, -1.0), 10.0, "exact vertex (1,0) should return its own height")
+	_assert_eq(terrain.get_height_at_world(-1.0, 1.0), 20.0, "exact vertex (0,1) should return its own height")
+	_assert_eq(terrain.get_height_at_world(1.0, 1.0), 30.0, "exact vertex (1,1) should return its own height")
+	_assert_eq(terrain.get_height_at_world(0.0, -1.0), 5.0, "midpoint between two known heights should average them")
+	_assert_eq(terrain.get_height_at_world(0.0, 0.0), 15.0, "center of the quad should average all four corners")
+
+func _test_terrain_first_settlement_position_skips_inactive() -> void:
+	# A real bug this guards against: the lowest-id settlement can go
+	# extinct/merge away (ticket #33) while keeping a lower id than every
+	# settlement still standing, which put the camera/terrain center on a
+	# long-dead, empty spot (observed directly against a long-running
+	# world). Only active settlements should ever be picked.
+	var terrain := TerrainGenerator.new()
+	var settlements := [
+		{"id": 1, "active": false, "position": {"x": 0.0, "z": 0.0}},
+		{"id": 2, "active": true, "position": {"x": 500.0, "z": 500.0}},
+	]
+	var active := terrain._active_settlements(settlements)
+	_assert_eq(active.size(), 1)
+	var center := terrain._first_settlement_position(active)
+	_assert_eq(center, Vector2(500.0, 500.0), "the extinct lowest-id settlement must not be picked over an active one")
+
 func _test_terrain_region_centers_from_settlements() -> void:
 	var terrain := TerrainGenerator.new()
 	var settlements := [
@@ -464,7 +503,8 @@ func _test_world_view_agent_renders_at_real_position_on_spawn() -> void:
 		"buildings": [],
 	})
 	var node: Node3D = view.get_child(0)
-	_assert_eq(node.position, Vector3(4.0, 0.0, -2.0), "a newly spawned agent must render exactly at its real canonical position")
+	var expected := Vector3(4.0, 0.0, -2.0) + view._household_spacing_offset_for_person(42)
+	_assert_eq(node.position, expected, "a newly spawned agent must render exactly at its real canonical position (plus its small deterministic household-spacing offset)")
 	view.queue_free()
 
 func _test_world_view_agent_walks_back_to_target_after_travel_transition() -> void:
@@ -483,7 +523,8 @@ func _test_world_view_agent_walks_back_to_target_after_travel_transition() -> vo
 	})
 	view.set_simulation_playback(false, 1)
 	var node: Node3D = view.get_child(0)
-	_assert_eq(node.position, Vector3.ZERO, "agent should still be at its real position before any Travel transition")
+	var canonical_target: Vector3 = view._household_spacing_offset_for_person(42)
+	_assert_eq(node.position, canonical_target, "agent should still be at its real position before any Travel transition")
 
 	view.apply_delta({
 		"addedAgents": [],
@@ -492,11 +533,11 @@ func _test_world_view_agent_walks_back_to_target_after_travel_transition() -> vo
 		"addedSettlements": [], "updatedSettlements": [], "removedSettlementIds": [],
 		"addedBuildings": [], "updatedBuildings": [], "removedBuildingIds": [],
 	})
-	_assert_eq(node.position.distance_to(Vector3.ZERO) > 0.5, true, "a Travel transition should visibly step the agent away from its canonical point")
+	_assert_eq(node.position.distance_to(canonical_target) > 0.5, true, "a Travel transition should visibly step the agent away from its canonical point")
 
 	for i in range(200):
 		view._process(0.1)
-	_assert_eq(node.position.distance_to(Vector3.ZERO) < 0.05, true, "agent should have walked back to its canonical target once unpaused")
+	_assert_eq(node.position.distance_to(canonical_target) < 0.05, true, "agent should have walked back to its canonical target once unpaused")
 	view.queue_free()
 
 func _test_world_view_near_player_agent_reaches_target() -> void:
@@ -531,9 +572,10 @@ func _test_world_view_near_player_agent_reaches_target() -> void:
 	})
 	_assert_eq(view._agent_movement.get(99, {}).get("mode", ""), "near", "an agent within NEAR_PLAYER_RADIUS of the camera must use near-player movement")
 
+	var canonical_target: Vector3 = view._household_spacing_offset_for_person(99)
 	for i in range(200):
 		view._process(0.1)
-	_assert_eq(node.position.distance_to(Vector3.ZERO) < 0.05, true, "a near-player agent must still reach its canonical target even without a real navmesh path")
+	_assert_eq(node.position.distance_to(canonical_target) < 0.05, true, "a near-player agent must still reach its canonical target even without a real navmesh path")
 	camera.queue_free()
 	view.queue_free()
 

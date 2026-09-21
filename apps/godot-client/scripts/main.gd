@@ -167,16 +167,30 @@ func _make_region_navmesh_quad(half_extent: Vector2) -> Mesh:
 ## alive. Center it on the actual average settlement position once, on the
 ## first snapshot, so there's always something to look at on connect.
 func _center_camera_on_settlements(settlements: Array) -> void:
-	if settlements.is_empty() or _camera == null:
+	if _camera == null:
 		return
-	var center := _first_settlement_position(settlements)
+	var active := _active_settlements(settlements)
+	if active.is_empty():
+		return
+	var center := _first_settlement_position(active)
 	_camera.center_on(center.x, center.y)
+
+func _active_settlements(settlements: Array) -> Array:
+	var active: Array = []
+	for settlement in settlements:
+		if bool(settlement.get("active", false)):
+			active.append(settlement)
+	return active
 
 ## The average of every settlement's position is not a reliable place to
 ## look: a long-lived, spread-out world (multiple distant settlements from
 ## founding/splitting) can average out to empty space between clusters
 ## that has nothing in it at all. The first (lowest-id) settlement's own
-## real position always has real content there.
+## real position always has real content there -- but only among *active*
+## settlements: a settlement can go extinct/merge away (ticket #33) while
+## keeping a lower id than every settlement still standing, which centered
+## the camera/terrain on a long-dead, empty spot (observed directly against
+## a long-running world).
 func _first_settlement_position(settlements: Array) -> Vector2:
 	var first: Dictionary = settlements[0]
 	for settlement in settlements:

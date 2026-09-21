@@ -93,7 +93,9 @@ func generate_from_regions(regions: Array, settlements: Array) -> void:
 		generate()
 		return
 
-	var world_center := _first_settlement_position(settlements)
+	var active_settlements := _active_settlements(settlements)
+	var world_center := _first_settlement_position(
+		active_settlements if not active_settlements.is_empty() else settlements)
 	position = Vector3(world_center.x, 0.0, world_center.y)
 
 	_generate_mesh(func(local_x: float, local_z: float, base_noise: float) -> Dictionary:
@@ -102,13 +104,23 @@ func generate_from_regions(regions: Array, settlements: Array) -> void:
 		var region: Dictionary = region_by_id.get(nearest_id, {})
 		return _region_driven_sample(region, base_noise))
 
+func _active_settlements(settlements: Array) -> Array:
+	var active: Array = []
+	for settlement in settlements:
+		if bool(settlement.get("active", false)):
+			active.append(settlement)
+	return active
+
 ## The average of every settlement's position is not a reliable place to
 ## generate ground around: a long-lived, spread-out world (multiple
 ## distant settlements from founding/splitting) can average out to empty
 ## space between clusters. The first (lowest-id) settlement's own real
-## position always has real content there -- and main.gd's camera framing
-## uses the exact same rule, so the two always agree on where "the world"
-## is.
+## position always has real content there -- but only among *active*
+## settlements: a settlement can go extinct/merge away (ticket #33) while
+## keeping a lower id than every settlement still standing, which put the
+## ground at a long-dead, empty spot (observed directly against a
+## long-running world). main.gd's camera framing uses the exact same rule,
+## so the two always agree on where "the world" is.
 func _first_settlement_position(settlements: Array) -> Vector2:
 	var first: Dictionary = settlements[0]
 	for settlement in settlements:
@@ -222,17 +234,37 @@ func _generate_mesh(sample: Callable) -> void:
 	_grid_half_depth = half_depth
 
 ## Samples the generated terrain's height at a world (x, z) position, via
-## nearest-vertex lookup on the same grid _generate_mesh built. Used to
-## ground agents/buildings onto the real terrain surface instead of the
-## flat height the protocol's settlement-ring placement implies.
+## bilinear interpolation between the 4 grid vertices _generate_mesh built
+## surrounding that point -- matching how the rendered mesh's own surface
+## actually interpolates height across a quad. A nearest-vertex lookup
+## (the original approach) disagreed with the true surface on bumpy
+## terrain often enough to visibly clip entities into or above the ground.
+## Used to ground agents/buildings onto the real terrain surface instead
+## of the flat height the protocol's settlement-ring placement implies.
 func get_height_at_world(world_x: float, world_z: float) -> float:
 	if _height_grid.is_empty():
 		return 0.0
 	var local_x := world_x - position.x
 	var local_z := world_z - position.z
-	var grid_x: int = clamp(int(round((local_x + _grid_half_width) / cell_size)), 0, width)
-	var grid_z: int = clamp(int(round((local_z + _grid_half_depth) / cell_size)), 0, depth)
-	return _height_grid[grid_z][grid_x]
+	var fx: float = clamp((local_x + _grid_half_width) / cell_size, 0.0, float(width))
+	var fz: float = clamp((local_z + _grid_half_depth) / cell_size, 0.0, float(depth))
+
+	var x0: int = clamp(int(floor(fx)), 0, width)
+	var z0: int = clamp(int(floor(fz)), 0, depth)
+	var x1: int = min(x0 + 1, width)
+	var z1: int = min(z0 + 1, depth)
+
+	var tx: float = fx - float(x0)
+	var tz: float = fz - float(z0)
+
+	var h00: float = _height_grid[z0][x0]
+	var h10: float = _height_grid[z0][x1]
+	var h01: float = _height_grid[z1][x0]
+	var h11: float = _height_grid[z1][x1]
+
+	var top: float = lerp(h00, h10, tx)
+	var bottom: float = lerp(h01, h11, tx)
+	return lerp(top, bottom, tz)
 
 func _add_triangle(st: SurfaceTool, a: Vector3, ca: Color, b: Vector3, cb: Color, c: Vector3, cc: Color) -> void:
 	st.set_color(ca)

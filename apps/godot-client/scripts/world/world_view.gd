@@ -195,7 +195,7 @@ func _spawn_agent(agent: Dictionary) -> void:
 
 	var id := int(agent.get("id", 0))
 	var area := _make_pickable_area("agent", id, visual, Vector3(1.0, 1.8, 0.7))
-	var target := _grounded_position(agent)
+	var target := _grounded_position(agent) + _household_spacing_offset_for_person(id)
 	var activity := str(agent.get("currentActivity", "Idle"))
 
 	var label := Label3D.new()
@@ -222,7 +222,7 @@ func _spawn_agent(agent: Dictionary) -> void:
 ## the schedule transitions *into* Travel (not on every tick it happens to
 ## still be Travel).
 func _update_agent(id: int, agent: Dictionary) -> void:
-	var target := _grounded_position(agent)
+	var target := _grounded_position(agent) + _household_spacing_offset_for_person(id)
 	_agent_targets[id] = target
 	_agent_region_ids[id] = int(agent.get("regionId", 0))
 
@@ -287,6 +287,17 @@ func _make_pickable_area(entity_type: String, entity_id: int, visual: Node3D, co
 func _jitter_offset_for_person(id: int) -> Vector3:
 	var angle := float(id % 360) * (PI / 180.0)
 	var radius := 3.0 + float(id % 5)
+	return Vector3(cos(angle) * radius, 0.0, sin(angle) * radius)
+
+## Every member of a household shares the exact same canonical target
+## (Settlement.position + Household.settlement_offset -- there is no
+## per-person position in canonical state), so without this, everyone in
+## a household renders exactly on top of each other. A small, deterministic
+## per-person spread keeps household-mates visually distinct without
+## inventing any canonical position they don't actually have.
+func _household_spacing_offset_for_person(id: int) -> Vector3:
+	var angle := float(id % 8) * (PI / 4.0)
+	var radius := 0.6 + (float(id % 3) * 0.3)
 	return Vector3(cos(angle) * radius, 0.0, sin(angle) * radius)
 
 func _is_near_player(pos: Vector3) -> bool:
