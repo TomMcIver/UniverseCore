@@ -120,16 +120,13 @@ void assign_household_offset(Household& household, const SimulationSeed househol
         static_cast<std::int32_t>(seed_random_bounded(z_seed, span)) - kHouseholdOffsetMaxUnits;
 }
 
-// Ticket #34/#37: a deterministic hour-of-day activity schedule. Fixed hour
-// bands keep the shape predictable (sleep at night, work during the day
-// for anyone with a productive Occupation) while seeded selection among a
-// band's candidate ActivityKinds gives real day-to-day and person-to-person
-// variety. Travel blocks bracket the work/afternoon bands so the Godot
-// client (ticket #40) has real activity-transition points to hang
-// navmesh-path proof-of-wiring on, even though home and work resolve to the
-// same canonical point this slice (no Building position yet -- see #35).
-constexpr std::uint32_t kHoursPerDay = 24U;
-
+// Ticket #34/#37: a deterministic daily activity pick. Seeded selection
+// among the candidate ActivityKinds gives real day-to-day and
+// person-to-person variety, and Travel is one of the picked kinds so the
+// Godot client (ticket #40) has real activity-transition points to hang
+// navmesh-path proof-of-wiring on, even though home and work resolve to
+// the same canonical point this slice (no Building position yet -- see
+// #35).
 [[nodiscard]] ActivityKind pick_seeded_activity(
     const SimulationSeed seed, const std::span<const ActivityKind> options) noexcept {
     if (options.empty()) {
@@ -139,45 +136,38 @@ constexpr std::uint32_t kHoursPerDay = 24U;
     return options[static_cast<std::size_t>(index)];
 }
 
-[[nodiscard]] ActivityKind derive_hourly_activity(
+// Ticket #34/#37, corrected: process_schedule_period only ever runs at an
+// exact day boundary (the simulation has no sub-day tick granularity --
+// advance_days(1) is the only stepping unit anywhere, including the UI
+// bridge's own loop), so a genuine "hour of day" can never actually be
+// observed at the moment this runs -- state_.time.ticks is always an exact
+// multiple of one day there. An earlier version of this function computed
+// an hour_of_day from that always-day-aligned time and branched on it,
+// which meant every person's current_activity was permanently stuck at
+// the hour-0 branch (Sleep) forever, since hour_of_day was always 0. Fixed
+// by picking one activity per day per person directly, with no hour
+// dimension: employed people mostly Work, otherwise (or unemployed) a
+// seeded pick across the full non-Work range, so Travel and every other
+// kind actually occur.
+constexpr std::uint32_t kWorkDayChancePer10k = 7'000U;
+
+[[nodiscard]] ActivityKind derive_daily_activity(
     const SimulationSeed person_schedule_seed,
     const std::uint64_t food_period,
-    const std::uint32_t hour_of_day,
     const Occupation occupation) noexcept {
-    // Ticket #34: re-derived daily, not just hourly -- fold food_period
-    // (the day index) into the stable_id alongside hour_of_day, or every
-    // day would pick the identical idle-hour activity for a given person.
-    const auto hour_seed = derive_seed(
-        person_schedule_seed, SeedDomain::Schedule, (food_period * kHoursPerDay) + hour_of_day);
+    const auto day_seed = derive_seed(person_schedule_seed, SeedDomain::Schedule, food_period);
 
-    if (hour_of_day < 5U || hour_of_day >= 22U) {
-        return ActivityKind::Sleep;
+    if (occupation != Occupation::None && seed_chance_per_10k(day_seed, kWorkDayChancePer10k)) {
+        return ActivityKind::Work;
     }
-    if (hour_of_day == 5U || hour_of_day == 14U || hour_of_day == 20U) {
-        return ActivityKind::Travel;
-    }
-    if (hour_of_day == 13U) {
-        return ActivityKind::Eat;
-    }
-    if (hour_of_day >= 6U && hour_of_day < 13U) {
-        if (occupation != Occupation::None) {
-            return ActivityKind::Work;
-        }
-        static constexpr std::array<ActivityKind, 5> kMorningIdleOptions{
-            ActivityKind::Social, ActivityKind::RecordKeeping, ActivityKind::Discovery,
-            ActivityKind::Teaching, ActivityKind::Rest,
-        };
-        return pick_seeded_activity(hour_seed, kMorningIdleOptions);
-    }
-    if (hour_of_day >= 15U && hour_of_day < 20U) {
-        static constexpr std::array<ActivityKind, 7> kAfternoonOptions{
-            ActivityKind::Social, ActivityKind::Teaching, ActivityKind::RecordKeeping,
-            ActivityKind::Discovery, ActivityKind::Childcare, ActivityKind::Rest, ActivityKind::Idle,
-        };
-        return pick_seeded_activity(hour_seed, kAfternoonOptions);
-    }
-    // hour 21: evening rest before sleep.
-    return ActivityKind::Rest;
+
+    static constexpr std::array<ActivityKind, 10> kNonWorkOptions{
+        ActivityKind::Sleep, ActivityKind::Travel, ActivityKind::Eat, ActivityKind::Social,
+        ActivityKind::Teaching, ActivityKind::RecordKeeping, ActivityKind::Discovery,
+        ActivityKind::Childcare, ActivityKind::Rest, ActivityKind::Idle,
+    };
+    const auto pick_seed = derive_seed(day_seed, SeedDomain::Schedule, 1U);
+    return pick_seeded_activity(pick_seed, kNonWorkOptions);
 }
 
 constexpr std::uint32_t kSettlementShareScale = 10'000;
@@ -1730,23 +1720,17 @@ void Simulation::process_food_period(const std::uint64_t food_period) {
 }
 
 // Ticket #37: re-derives every detailed-resolution alive person's
-// current_activity for "now" (the hour-of-day at this food period's tick),
-// deterministically from person_seed + SeedDomain::Schedule + hour. Cohort
-// aggregates carry no Person struct at all, so they are naturally excluded
-// -- consistent with the existing LOD demotion philosophy of dropping
-// detailed-only state.
+// current_activity for today, deterministically from person_seed +
+// SeedDomain::Schedule + food_period. Cohort aggregates carry no Person
+// struct at all, so they are naturally excluded -- consistent with the
+// existing LOD demotion philosophy of dropping detailed-only state.
 void Simulation::process_schedule_period(const std::uint64_t food_period) {
-    const auto day_ticks = days(1).ticks > 0 ? days(1).ticks : 1;
-    const auto hour_ticks = std::max<std::int64_t>(1, day_ticks / static_cast<std::int64_t>(kHoursPerDay));
-    const auto ticks_within_day = state_.time.ticks % day_ticks;
-    const auto hour_of_day = static_cast<std::uint32_t>((ticks_within_day / hour_ticks) % kHoursPerDay);
-
     for (auto& person : state_.people) {
         if (!person.alive) {
             continue;
         }
         const auto schedule_seed = person_seed(person.id);
-        person.current_activity = derive_hourly_activity(schedule_seed, food_period, hour_of_day, person.occupation);
+        person.current_activity = derive_daily_activity(schedule_seed, food_period, person.occupation);
 
         if (person.current_activity == ActivityKind::Rest) {
             person.health_points = clamp_i32(

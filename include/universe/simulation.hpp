@@ -43,10 +43,13 @@ enum class Occupation : std::uint8_t {
     CraftWorker = 5,
 };
 
-// Ticket #37: an hour-of-day schedule block. Work/Social/Teaching/
-// RecordKeeping/Discovery/Rest drive real existing systems (Occupation,
-// KnowledgeTransmission, institutions, KnowledgeRecord/discovery, health);
-// Sleep/Travel/Eat/Idle are presentation-only this slice.
+// Ticket #37: a person's activity for the current day. Work/Social/
+// Teaching/RecordKeeping/Discovery/Rest drive real existing systems
+// (Occupation, KnowledgeTransmission, institutions, KnowledgeRecord/
+// discovery, health); Sleep/Travel/Eat/Idle are presentation-only this
+// slice. Picked once per day, not per hour -- the simulation has no
+// sub-day tick granularity (advance_days(1) is the only stepping unit
+// anywhere), so an hour-of-day model would be unobservable in practice.
 enum class ActivityKind : std::uint8_t {
     Sleep = 0,
     Travel = 1,
