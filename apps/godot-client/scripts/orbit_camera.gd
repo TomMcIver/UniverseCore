@@ -41,6 +41,17 @@ func _ready() -> void:
 	rotation_degrees = Vector3(_pitch, _yaw_degrees, 0.0)
 	position = Vector3(24.0, _height, 24.0 + _height * 0.6)
 
+## The starting position above is an arbitrary fixed point near world
+## origin -- fine while everything the client rendered was presentation-
+## invented and clustered near origin, but real canonical region/settlement
+## positions (tickets #24/#25) can land anywhere within a much larger world
+## extent, so the camera can easily start out looking at empty terrain with
+## nothing in view. Called once real settlement data arrives so the camera
+## actually finds it, without otherwise disturbing user-controlled zoom/
+## pan/rotation state.
+func center_on(world_x: float, world_z: float) -> void:
+	position = Vector3(world_x, _height, world_z + _height * 0.6)
+
 func _process(delta: float) -> void:
 	var input_dir := Vector3.ZERO
 	if Input.is_key_pressed(KEY_W):

@@ -64,6 +64,7 @@ func _initialize() -> void:
 
 	_run_test("world_view renders a newly spawned agent at its real canonical position", Callable(self, "_test_world_view_agent_renders_at_real_position_on_spawn"))
 	_run_test("world_view walks an agent back to target after a Travel transition", Callable(self, "_test_world_view_agent_walks_back_to_target_after_travel_transition"))
+	_run_test("world_view near-player agent reaches its target without a real navmesh path", Callable(self, "_test_world_view_near_player_agent_reaches_target"))
 	_run_test("world_view halts agent movement while the simulation is paused", Callable(self, "_test_world_view_pause_halts_movement"))
 	_run_test("world_view scales movement progression with simulation speed", Callable(self, "_test_world_view_speed_scales_movement_progression"))
 	_run_test("world_view updates an agent's activity label on a delta update", Callable(self, "_test_world_view_activity_label_updates_on_delta"))
@@ -496,6 +497,44 @@ func _test_world_view_agent_walks_back_to_target_after_travel_transition() -> vo
 	for i in range(200):
 		view._process(0.1)
 	_assert_eq(node.position.distance_to(Vector3.ZERO) < 0.05, true, "agent should have walked back to its canonical target once unpaused")
+	view.queue_free()
+
+func _test_world_view_near_player_agent_reaches_target() -> void:
+	# A real bug this test guards against: near-player movement originally
+	# only updated position inside NavigationAgent3D's velocity_computed
+	# signal callback, which only fires once the underlying navigation map
+	# finishes synchronizing -- if that never happens in time (observed
+	# directly against the live bridge), the agent stayed stuck forever.
+	# Movement must progress even when the navmesh has no real path data
+	# for this agent yet.
+	var camera := Camera3D.new()
+	root.add_child(camera)
+	camera.current = true
+	camera.global_position = Vector3.ZERO
+
+	var view := WorldView.new()
+	root.add_child(view)
+	view.apply_snapshot({
+		"agents": [{"id": 99, "sex": "Male", "position": {"x": 0.0, "y": 0.0, "z": 0.0}, "currentActivity": "Idle"}],
+		"settlements": [],
+		"buildings": [],
+	})
+	view.set_simulation_playback(false, 1)
+	var node: Node3D = view.get_child(0)
+
+	view.apply_delta({
+		"addedAgents": [],
+		"updatedAgents": [{"id": 99, "sex": "Male", "position": {"x": 0.0, "y": 0.0, "z": 0.0}, "currentActivity": "Travel"}],
+		"removedAgentIds": [],
+		"addedSettlements": [], "updatedSettlements": [], "removedSettlementIds": [],
+		"addedBuildings": [], "updatedBuildings": [], "removedBuildingIds": [],
+	})
+	_assert_eq(view._agent_movement.get(99, {}).get("mode", ""), "near", "an agent within NEAR_PLAYER_RADIUS of the camera must use near-player movement")
+
+	for i in range(200):
+		view._process(0.1)
+	_assert_eq(node.position.distance_to(Vector3.ZERO) < 0.05, true, "a near-player agent must still reach its canonical target even without a real navmesh path")
+	camera.queue_free()
 	view.queue_free()
 
 func _test_world_view_speed_scales_movement_progression() -> void:

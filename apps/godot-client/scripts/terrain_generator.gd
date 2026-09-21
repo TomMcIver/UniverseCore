@@ -70,6 +70,15 @@ func generate() -> void:
 
 ## `regions` and `settlements` are the raw payload arrays (Dictionary per
 ## entry) exactly as received over the wire.
+##
+## Ticket #24/#25 gave regions/settlements real canonical positions that
+## can land anywhere within a world extent far larger than this generator's
+## fixed-size patch -- so the patch is now generated in local space as
+## before, then this whole node is repositioned (via `position`) onto the
+## average real settlement position, so the ground actually exists under
+## the population instead of always sitting at world origin regardless of
+## where the world's real content is. `get_height_at_world` accounts for
+## this offset when converting a world query back to local grid space.
 func generate_from_regions(regions: Array, settlements: Array) -> void:
 	if regions.is_empty():
 		generate()
@@ -84,10 +93,29 @@ func generate_from_regions(regions: Array, settlements: Array) -> void:
 		generate()
 		return
 
-	_generate_mesh(func(world_x: float, world_z: float, base_noise: float) -> Dictionary:
-		var nearest_id := _nearest_region_id(Vector2(world_x, world_z), region_centers)
+	var world_center := _first_settlement_position(settlements)
+	position = Vector3(world_center.x, 0.0, world_center.y)
+
+	_generate_mesh(func(local_x: float, local_z: float, base_noise: float) -> Dictionary:
+		var world_point := Vector2(local_x, local_z) + world_center
+		var nearest_id := _nearest_region_id(world_point, region_centers)
 		var region: Dictionary = region_by_id.get(nearest_id, {})
 		return _region_driven_sample(region, base_noise))
+
+## The average of every settlement's position is not a reliable place to
+## generate ground around: a long-lived, spread-out world (multiple
+## distant settlements from founding/splitting) can average out to empty
+## space between clusters. The first (lowest-id) settlement's own real
+## position always has real content there -- and main.gd's camera framing
+## uses the exact same rule, so the two always agree on where "the world"
+## is.
+func _first_settlement_position(settlements: Array) -> Vector2:
+	var first: Dictionary = settlements[0]
+	for settlement in settlements:
+		if int(settlement.get("id", 0)) < int(first.get("id", 0)):
+			first = settlement
+	var pos: Dictionary = first.get("position", {})
+	return Vector2(float(pos.get("x", 0.0)), float(pos.get("z", 0.0)))
 
 func _region_centers_from_settlements(settlements: Array) -> Dictionary:
 	var sum_by_region: Dictionary = {}
@@ -200,8 +228,10 @@ func _generate_mesh(sample: Callable) -> void:
 func get_height_at_world(world_x: float, world_z: float) -> float:
 	if _height_grid.is_empty():
 		return 0.0
-	var grid_x: int = clamp(int(round((world_x + _grid_half_width) / cell_size)), 0, width)
-	var grid_z: int = clamp(int(round((world_z + _grid_half_depth) / cell_size)), 0, depth)
+	var local_x := world_x - position.x
+	var local_z := world_z - position.z
+	var grid_x: int = clamp(int(round((local_x + _grid_half_width) / cell_size)), 0, width)
+	var grid_z: int = clamp(int(round((local_z + _grid_half_depth) / cell_size)), 0, depth)
 	return _height_grid[grid_z][grid_x]
 
 func _add_triangle(st: SurfaceTool, a: Vector3, ca: Color, b: Vector3, cb: Color, c: Vector3, cc: Color) -> void:

@@ -26,6 +26,7 @@ var _sun: DirectionalLight3D
 var _world_environment: WorldEnvironment
 var _navmesh_manager: Node3D
 var _navmeshes_baked := false
+var _camera: Camera3D
 
 func _ready() -> void:
 	_setup_environment()
@@ -158,6 +159,32 @@ func _make_region_navmesh_quad(half_extent: Vector2) -> Mesh:
 	st.generate_normals()
 	return st.commit()
 
+## Ticket #24/#25 gave regions/settlements real canonical positions that
+## can land anywhere within a world extent far larger than the camera's
+## fixed starting point near origin (orbit_camera.gd's default) or the
+## terrain patch generated around it -- so the camera can easily start out
+## with nothing at all in view even though the population is real and
+## alive. Center it on the actual average settlement position once, on the
+## first snapshot, so there's always something to look at on connect.
+func _center_camera_on_settlements(settlements: Array) -> void:
+	if settlements.is_empty() or _camera == null:
+		return
+	var center := _first_settlement_position(settlements)
+	_camera.center_on(center.x, center.y)
+
+## The average of every settlement's position is not a reliable place to
+## look: a long-lived, spread-out world (multiple distant settlements from
+## founding/splitting) can average out to empty space between clusters
+## that has nothing in it at all. The first (lowest-id) settlement's own
+## real position always has real content there.
+func _first_settlement_position(settlements: Array) -> Vector2:
+	var first: Dictionary = settlements[0]
+	for settlement in settlements:
+		if int(settlement.get("id", 0)) < int(first.get("id", 0)):
+			first = settlement
+	var pos: Dictionary = first.get("position", {})
+	return Vector2(float(pos.get("x", 0.0)), float(pos.get("z", 0.0)))
+
 func _setup_environment() -> void:
 	var sky_material := ProceduralSkyMaterial.new()
 	sky_material.sky_top_color = Color(0.38, 0.52, 0.72)
@@ -202,6 +229,7 @@ func _setup_camera() -> void:
 	camera.set_script(OrbitCameraScript)
 	camera.current = true
 	add_child(camera)
+	_camera = camera
 
 func _apply_day_night(tick: int) -> void:
 	var lighting := DayNight.sample(tick)
@@ -229,6 +257,7 @@ func _on_message_received(message: Dictionary) -> void:
 			if not _navmeshes_baked:
 				_bake_region_navmeshes(payload.get("regions", []), payload.get("settlements", []))
 				_navmeshes_baked = true
+				_center_camera_on_settlements(payload.get("settlements", []))
 			_world_view.apply_snapshot(payload, Callable(_terrain, "get_height_at_world"))
 			var tick := int(message.get("tick", 0))
 			_apply_day_night(tick)

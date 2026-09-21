@@ -327,10 +327,8 @@ func _begin_near_movement(id: int, node: Node3D, target: Vector3) -> void:
 	nav_agent.path_desired_distance = 0.5
 	nav_agent.target_desired_distance = 0.5
 	node.add_child(nav_agent)
-	nav_agent.velocity_computed.connect(func(safe_velocity: Vector3) -> void:
-		node.position += safe_velocity * _last_effective_delta)
 	nav_agent.target_position = target
-	_agent_movement[id] = {"mode": "near", "nav_agent": nav_agent}
+	_agent_movement[id] = {"mode": "near", "nav_agent": nav_agent, "target": target}
 
 ## Movement progression is driven by _process(delta) scaled by
 ## _last_effective_delta (canonical simulation time: zero while paused,
@@ -355,17 +353,34 @@ func _advance_agent_movement(id: int) -> void:
 
 	if state.get("mode", "") == "near":
 		var nav_agent: NavigationAgent3D = state.get("nav_agent")
-		if nav_agent == null or not is_instance_valid(nav_agent) or nav_agent.is_navigation_finished():
-			if nav_agent != null and is_instance_valid(nav_agent):
-				nav_agent.queue_free()
+		var target: Vector3 = state.get("target", node.position)
+		if nav_agent == null or not is_instance_valid(nav_agent):
 			_agent_movement.erase(id)
 			return
+		if node.position.distance_to(target) < 0.05:
+			nav_agent.queue_free()
+			_agent_movement.erase(id)
+			return
+
+		# Move directly rather than depending on NavigationAgent3D's
+		# velocity_computed signal to actually update position: that signal
+		# only fires once the underlying navigation map has finished
+		# synchronizing the agent's avoidance simulation, and relying on it
+		# left near-player NPCs permanently stuck if that sync never
+		# completed in time. get_next_path_position() falls back to the
+		# agent's own current position when the map has no real path yet
+		# (a degenerate waypoint); walk straight toward the real target
+		# instead of stalling on it.
 		var next_pos := nav_agent.get_next_path_position()
-		var direction := next_pos - node.position
-		if direction.length() > 0.01:
-			nav_agent.set_velocity(direction.normalized() * MOVE_SPEED_UNITS_PER_SECOND)
+		if next_pos.distance_to(node.position) < 0.01:
+			next_pos = target
+		var to_next := next_pos - node.position
+		var distance := to_next.length()
+		var step := MOVE_SPEED_UNITS_PER_SECOND * _last_effective_delta
+		if distance <= step:
+			node.position = next_pos
 		else:
-			nav_agent.set_velocity(Vector3.ZERO)
+			node.position += to_next.normalized() * step
 		return
 
 	var path: PackedVector3Array = state.get("path", PackedVector3Array())
