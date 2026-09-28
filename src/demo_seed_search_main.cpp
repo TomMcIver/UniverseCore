@@ -80,7 +80,8 @@ std::optional<SearchOptions> parse_options(const int argc, char** argv) {
 void print_table(const std::vector<universe::DemoCandidateScore>& ranked, const std::uint64_t top) {
     std::cout << std::left << std::setw(6) << "rank" << std::setw(10) << "seed" << std::setw(9) << "eligible"
               << std::setw(7) << "score" << std::setw(10) << "pop" << std::setw(11) << "buildings"
-              << std::setw(13) << "settlements" << std::setw(13) << "discoveries" << "institutions\n";
+              << std::setw(13) << "settlements" << std::setw(13) << "discoveries" << std::setw(14) << "institutions"
+              << std::setw(7) << "tiers" << "merges\n";
     for (std::size_t i = 0; i < ranked.size() && i < top; ++i) {
         const auto& candidate = ranked[i];
         const auto& outcome = candidate.outcome;
@@ -88,7 +89,8 @@ void print_table(const std::vector<universe::DemoCandidateScore>& ranked, const 
                   << std::setw(9) << (candidate.eligible ? "yes" : "no") << std::setw(7) << candidate.score
                   << std::setw(10) << (std::to_string(outcome.initial_population) + ">" + std::to_string(outcome.final_population))
                   << std::setw(11) << outcome.buildings_completed << std::setw(13) << outcome.settlements_founded
-                  << std::setw(13) << outcome.discoveries_made << outcome.institutions_founded << '\n';
+                  << std::setw(13) << outcome.discoveries_made << std::setw(14) << outcome.institutions_founded
+                  << std::setw(7) << outcome.tier_promotions << outcome.settlements_merged << '\n';
     }
 }
 

@@ -4,6 +4,7 @@
 #include <charconv>
 #include <cstddef>
 #include <sstream>
+#include <unordered_map>
 #include <utility>
 
 namespace universe {
@@ -19,6 +20,10 @@ constexpr std::int64_t kPointsPerDiscovery = 30;
 constexpr std::uint64_t kScoredDiscoveryCap = 3;
 constexpr std::int64_t kPointsPerInstitution = 20;
 constexpr std::uint64_t kScoredInstitutionCap = 2;
+constexpr std::int64_t kPointsPerTierPromotion = 60;
+constexpr std::uint64_t kScoredTierPromotionCap = 2;
+constexpr std::int64_t kPointsPerMerge = 40;
+constexpr std::uint64_t kScoredMergeCap = 2;
 constexpr std::size_t kMaxScenarioBytes = 64U * 1024U;
 
 std::int64_t capped_points(const std::uint64_t count, const std::uint64_t cap, const std::int64_t points_each) {
@@ -79,13 +84,28 @@ std::optional<std::uint64_t> read_unsigned_field(const std::string_view json, co
 
 }  // namespace
 
-DemoOutcome measure_demo_outcome(const WorldState& final_state,
-                                 const std::uint64_t initial_population,
-                                 const SimulationTime window_start) {
+DemoOutcome measure_demo_outcome(const WorldState& initial_state, const WorldState& final_state) {
+    const auto window_start = initial_state.time;
     DemoOutcome outcome{
-        .initial_population = initial_population,
+        .initial_population = initial_state.population,
         .final_population = final_state.population,
     };
+
+    std::unordered_map<SettlementId, SettlementTier> initial_tiers;
+    initial_tiers.reserve(initial_state.settlements.size());
+    for (const auto& settlement : initial_state.settlements) {
+        initial_tiers.emplace(settlement.id, settlement.tier);
+    }
+    for (const auto& settlement : final_state.settlements) {
+        if (!settlement.active) {
+            continue;
+        }
+        const auto it = initial_tiers.find(settlement.id);
+        const auto start_tier = it == initial_tiers.end() ? SettlementTier::Village : it->second;
+        if (static_cast<std::uint8_t>(settlement.tier) > static_cast<std::uint8_t>(start_tier)) {
+            ++outcome.tier_promotions;
+        }
+    }
 
     for (const auto& building : final_state.buildings) {
         if (building.state == ConstructionState::Complete && building.completed_at.has_value() &&
@@ -108,6 +128,9 @@ DemoOutcome measure_demo_outcome(const WorldState& final_state,
             case EventType::InstitutionFounded:
                 ++outcome.institutions_founded;
                 break;
+            case EventType::SettlementMerged:
+                ++outcome.settlements_merged;
+                break;
             default:
                 break;
         }
@@ -121,7 +144,9 @@ DemoCandidateScore score_demo_outcome(const std::uint64_t seed, const DemoOutcom
                        population_change_points(outcome.initial_population, outcome.final_population) +
                        capped_points(outcome.settlements_founded, kScoredSettlementCap, kPointsPerSettlement) +
                        capped_points(outcome.discoveries_made, kScoredDiscoveryCap, kPointsPerDiscovery) +
-                       capped_points(outcome.institutions_founded, kScoredInstitutionCap, kPointsPerInstitution);
+                       capped_points(outcome.institutions_founded, kScoredInstitutionCap, kPointsPerInstitution) +
+                       capped_points(outcome.tier_promotions, kScoredTierPromotionCap, kPointsPerTierPromotion) +
+                       capped_points(outcome.settlements_merged, kScoredMergeCap, kPointsPerMerge);
 
     return DemoCandidateScore{
         .seed = seed,
@@ -135,10 +160,9 @@ DemoCandidateScore run_demo_candidate(const std::uint64_t seed,
                                       const std::uint64_t initial_population,
                                       const std::uint64_t years) {
     Simulation simulation{SimulationConfig{.seed = seed, .initial_population = initial_population}};
-    const auto window_start = simulation.time();
-    const auto starting_population = simulation.state().population;
+    const auto initial_state = simulation.state();
     simulation.run_years(years);
-    return score_demo_outcome(seed, measure_demo_outcome(simulation.state(), starting_population, window_start));
+    return score_demo_outcome(seed, measure_demo_outcome(initial_state, simulation.state()));
 }
 
 std::vector<DemoCandidateScore> rank_demo_candidates(std::vector<DemoCandidateScore> candidates) {
@@ -203,7 +227,9 @@ std::string format_demo_scenario_json(const DemoScenario& scenario, const DemoCa
         << "    \"buildings_completed\": " << outcome.buildings_completed << ",\n"
         << "    \"settlements_founded\": " << outcome.settlements_founded << ",\n"
         << "    \"discoveries_made\": " << outcome.discoveries_made << ",\n"
-        << "    \"institutions_founded\": " << outcome.institutions_founded << "\n"
+        << "    \"institutions_founded\": " << outcome.institutions_founded << ",\n"
+        << "    \"tier_promotions\": " << outcome.tier_promotions << ",\n"
+        << "    \"settlements_merged\": " << outcome.settlements_merged << "\n"
         << "  }\n"
         << "}\n";
     return out.str();

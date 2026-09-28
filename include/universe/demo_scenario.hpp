@@ -18,6 +18,9 @@ struct DemoOutcome {
     std::uint64_t settlements_founded{};
     std::uint64_t discoveries_made{};
     std::uint64_t institutions_founded{};
+    // Settlements whose tier ends above where it began (Village if founded in the window).
+    std::uint64_t tier_promotions{};
+    std::uint64_t settlements_merged{};
 };
 
 struct DemoCandidateScore {
@@ -37,10 +40,8 @@ struct DemoScenario {
 inline constexpr std::uint64_t kDemoScenarioMaxPopulation = 100'000;
 inline constexpr std::uint64_t kDemoScenarioMaxYears = 1'000;
 
-// Counts only change strictly after `window_start`, so the starting world never scores.
-[[nodiscard]] DemoOutcome measure_demo_outcome(const WorldState& final_state,
-                                               std::uint64_t initial_population,
-                                               SimulationTime window_start);
+// Counts only change after `initial_state`, so the starting world never scores.
+[[nodiscard]] DemoOutcome measure_demo_outcome(const WorldState& initial_state, const WorldState& final_state);
 
 [[nodiscard]] DemoCandidateScore score_demo_outcome(std::uint64_t seed, const DemoOutcome& outcome);
 
