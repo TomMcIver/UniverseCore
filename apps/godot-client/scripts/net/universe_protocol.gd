@@ -9,10 +9,16 @@ extends RefCounted
 const HOST := "127.0.0.1"
 const PORT := 19081
 
-## Same override variable ws-bridge.mjs reads, so a second client/bridge pair can run side by side.
+## Either override lets parallel bridges (e.g. one per git worktree) avoid the
+## default port; UNIVERSE_WS_PORT matches what ws-bridge.mjs reads.
 static func url() -> String:
-	var port_override := OS.get_environment("UNIVERSE_WS_PORT")
-	return "ws://%s:%d" % [HOST, int(port_override) if port_override.is_valid_int() else PORT]
+	var port := PORT
+	for name in ["UNIVERSECORE_WS_PORT", "UNIVERSE_WS_PORT"]:
+		var port_env := OS.get_environment(name)
+		if port_env.is_valid_int():
+			port = int(port_env)
+			break
+	return "ws://%s:%d" % [HOST, port]
 
 ## -- Outbound commands (client -> UniverseCore) --
 ## Field names/shapes must match parse_client_command in web_protocol.cpp

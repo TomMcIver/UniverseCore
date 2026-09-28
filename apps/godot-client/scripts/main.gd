@@ -14,13 +14,18 @@ const TerrainGeneratorScript := preload("res://scripts/terrain_generator.gd")
 const OrbitCameraScript := preload("res://scripts/orbit_camera.gd")
 const DayNight := preload("res://scripts/world/day_night.gd")
 const NavmeshManagerScript := preload("res://scripts/world/navmesh_manager.gd")
+const VillageDressingScript := preload("res://scripts/world/village_dressing.gd")
+const VegetationScatterScript := preload("res://scripts/world/vegetation_scatter.gd")
 
 var _client: Node
 var _world_view: Node3D
 var _panels: Control
-var _terrain: MeshInstance3D
+var _terrain: Node3D
+var _dressing: Node3D
+var _vegetation: Node3D
 var _sun: DirectionalLight3D
 var _world_environment: WorldEnvironment
+var _sky_material: ProceduralSkyMaterial
 var _navmesh_manager: Node3D
 var _navmeshes_baked := false
 var _camera: Camera3D
@@ -39,6 +44,20 @@ func _ready() -> void:
 	_world_view.name = "WorldView"
 	add_child(_world_view)
 	_world_view.set_navmesh_manager(_navmesh_manager)
+
+	_dressing = VillageDressingScript.new()
+	_dressing.name = "VillageDressing"
+	_dressing.set_terrain(_terrain)
+	add_child(_dressing)
+
+	_vegetation = VegetationScatterScript.new()
+	_vegetation.name = "Vegetation"
+	_vegetation.setup(_terrain, _dressing)
+	add_child(_vegetation)
+
+	_terrain.terrain_changed.connect(_on_terrain_changed)
+	_dressing.exclusions_changed.connect(_vegetation.mark_dirty)
+	_apply_day_night(0)
 
 	_client = UniverseClientScript.new()
 	_client.name = "UniverseClient"
@@ -152,6 +171,33 @@ func _center_camera_on_settlements(settlements: Array) -> void:
 	var center := _first_settlement_position(active)
 	_camera.center_on(center.x, center.y)
 	_panels.select("settlement", _first_settlement_id(active))
+	_apply_capture_view(center)
+
+## Debug/verification only, env-gated like the screenshot schedule: swap in a
+## fixed camera so before/after screenshots can be taken from identical
+## viewpoints. UNIVERSECORE_CAPTURE_VIEW = ground | oblique | overview.
+const CAPTURE_VIEWS := {
+	"ground": {"offset": Vector3(9.0, 1.7, 12.0), "look": Vector3(0.0, 2.2, 0.0)},
+	"oblique": {"offset": Vector3(38.0, 34.0, 52.0), "look": Vector3(0.0, 0.0, 0.0)},
+	"overview": {"offset": Vector3(90.0, 150.0, 170.0), "look": Vector3(-10.0, 0.0, -20.0)},
+}
+
+func _apply_capture_view(center: Vector2) -> void:
+	var view := OS.get_environment("UNIVERSECORE_CAPTURE_VIEW")
+	if not CAPTURE_VIEWS.has(view):
+		return
+	var spec: Dictionary = CAPTURE_VIEWS[view]
+	var offset: Vector3 = spec["offset"]
+	var look: Vector3 = spec["look"]
+	var ground_at_eye: float = _terrain.get_height_at_world(center.x + offset.x, center.y + offset.z)
+	var ground_at_target: float = _terrain.get_height_at_world(center.x + look.x, center.y + look.z)
+	var capture := Camera3D.new()
+	capture.name = "CaptureCamera"
+	capture.fov = 60.0
+	add_child(capture)
+	capture.global_position = Vector3(center.x + offset.x, ground_at_eye + offset.y, center.y + offset.z)
+	capture.look_at(Vector3(center.x + look.x, ground_at_target + look.y, center.y + look.z))
+	capture.current = true
 
 func _active_settlements(settlements: Array) -> Array:
 	var active: Array = []
@@ -183,23 +229,30 @@ func _first_settlement_position(settlements: Array) -> Vector2:
 	var pos: Dictionary = first.get("position", {})
 	return Vector2(float(pos.get("x", 0.0)), float(pos.get("z", 0.0)))
 
+## Ticket #55: prototype variant A's environment. Neutral colour ambient
+## (a sky-sourced ambient tinted the Kenney greens cyan), filmic tonemapping,
+## soft ambient occlusion and a light glow; distance fog blends the far
+## terrain into the horizon. Colours are driven per tick by DayNight.
 func _setup_environment() -> void:
-	var sky_material := ProceduralSkyMaterial.new()
-	sky_material.sky_top_color = Color(0.38, 0.52, 0.72)
-	sky_material.sky_horizon_color = Color(0.75, 0.78, 0.80)
-	sky_material.ground_horizon_color = Color(0.55, 0.52, 0.46)
+	_sky_material = ProceduralSkyMaterial.new()
 
 	var sky := Sky.new()
-	sky.sky_material = sky_material
+	sky.sky_material = _sky_material
 
 	var environment := Environment.new()
 	environment.background_mode = Environment.BG_SKY
 	environment.sky = sky
-	environment.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
-	environment.fog_enabled = false
-	environment.fog_light_color = Color(0.78, 0.80, 0.83)
-	environment.fog_density = 0.01
-	environment.fog_sun_scatter = 0.2
+	environment.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	environment.tonemap_mode = Environment.TONE_MAPPER_FILMIC
+	environment.ssao_enabled = true
+	environment.ssao_radius = 1.6
+	environment.ssao_intensity = 1.8
+	environment.glow_enabled = true
+	environment.glow_intensity = 0.4
+	environment.fog_enabled = true
+	environment.fog_density = 0.0008
+	environment.fog_sky_affect = 0.25
+	environment.fog_sun_scatter = 0.15
 
 	_world_environment = WorldEnvironment.new()
 	_world_environment.name = "WorldEnvironment"
@@ -209,17 +262,40 @@ func _setup_environment() -> void:
 func _setup_sun() -> void:
 	_sun = DirectionalLight3D.new()
 	_sun.name = "Sun"
-	_sun.rotation_degrees = Vector3(-55.0, -35.0, 0.0)
-	_sun.light_energy = 1.1
-	_sun.light_color = Color(1.0, 0.95, 0.85)
 	_sun.shadow_enabled = true
+	_sun.directional_shadow_max_distance = 220.0
+	_sun.shadow_blur = 1.5
 	add_child(_sun)
 
 func _setup_terrain() -> void:
-	_terrain = MeshInstance3D.new()
+	_terrain = Node3D.new()
 	_terrain.name = "Terrain"
 	_terrain.set_script(TerrainGeneratorScript)
 	add_child(_terrain)
+
+func _process(_delta: float) -> void:
+	var camera := get_viewport().get_camera_3d()
+	if camera != null:
+		_terrain.set_focus(_ground_focus(camera))
+
+## Where the camera's view centre meets the ground plane (or the point
+## beneath the camera when it looks at the sky).
+func _ground_focus(camera: Camera3D) -> Vector2:
+	var origin := camera.global_position
+	var forward := -camera.global_transform.basis.z
+	if forward.y < -0.05:
+		var distance: float = min(origin.y / -forward.y, 600.0)
+		var hit := origin + forward * distance
+		return Vector2(hit.x, hit.z)
+	return Vector2(origin.x, origin.z)
+
+func _on_terrain_changed(area: Rect2) -> void:
+	_world_view.reground(area)
+	_dressing.on_terrain_changed(area)
+	if area == TerrainGeneratorScript.EVERYWHERE:
+		_vegetation.mark_all_dirty()
+	else:
+		_vegetation.mark_dirty(area)
 
 func _setup_camera() -> void:
 	var camera := Camera3D.new()
@@ -233,8 +309,15 @@ func _apply_day_night(tick: int) -> void:
 	var lighting := DayNight.sample(tick)
 	_sun.light_color = lighting.sun_color
 	_sun.light_energy = lighting.sun_energy
-	_world_environment.environment.ambient_light_energy = lighting.ambient_energy
-	_world_environment.environment.fog_light_color = lighting.fog_color
+	_sun.rotation_degrees = lighting.sun_rotation_degrees
+	var environment := _world_environment.environment
+	environment.ambient_light_color = lighting.ambient_color
+	environment.ambient_light_energy = lighting.ambient_energy
+	environment.fog_light_color = lighting.fog_color
+	_sky_material.sky_top_color = lighting.sky_top
+	_sky_material.sky_horizon_color = lighting.sky_horizon
+	_sky_material.ground_horizon_color = lighting.sky_horizon
+	_sky_material.ground_bottom_color = lighting.sky_ground
 
 func _route_connection_status(status: String) -> void:
 	_panels.route_message({"type": "connection_status", "payload": {"status": status}})
@@ -249,7 +332,8 @@ func _apply_world_message(message: Dictionary) -> void:
 
 	match message_type:
 		"initial_snapshot":
-			_terrain.generate_from_regions(payload.get("regions", []), payload.get("settlements", []))
+			_terrain.configure(payload.get("regions", []), payload.get("settlements", []))
+			_dressing.apply_snapshot(payload)
 			if not _navmeshes_baked:
 				_bake_region_navmeshes(payload.get("regions", []), payload.get("settlements", []))
 				_navmeshes_baked = true
@@ -260,9 +344,11 @@ func _apply_world_message(message: Dictionary) -> void:
 			# world_delta (ticket #7) is a real diff, not a restated world --
 			# it carries no "regions"/full "settlements" list to regenerate
 			# terrain from, and applying it as a full replace would wipe
-			# every entity every tick. Terrain is generated once from the
-			# initial_snapshot and stays static; only the entities change.
+			# every entity every tick. Terrain only reshapes around settlements
+			# a delta adds or removes.
+			_terrain.apply_delta(payload)
 			_world_view.apply_delta(payload, Callable(_terrain, "get_height_at_world"))
+			_dressing.apply_delta(payload)
 			_apply_day_night(int(message.get("tick", 0)))
 		"simulation_status":
 			_apply_day_night(int(message.get("tick", 0)))
