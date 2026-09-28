@@ -37,6 +37,17 @@ if (bridgeExecutable !== undefined && bridgeExecutable.length > 0) {
   bridgeArgs = []
 }
 
+// Repo-relative so it resolves both natively (cwd = repo root) and inside Podman (-w /workspace).
+const scenarioPath = process.env.UNIVERSE_SCENARIO
+if (scenarioPath !== undefined && scenarioPath.length > 0) {
+  const normalized = scenarioPath.replace(/\\/g, '/')
+  if (path.isAbsolute(scenarioPath) || normalized.split('/').includes('..') || !fs.existsSync(path.resolve(repoRoot, normalized))) {
+    console.error(`UNIVERSE_SCENARIO must be an existing repo-relative path: ${scenarioPath}`)
+    process.exit(2)
+  }
+  bridgeArgs.push('--scenario', normalized)
+}
+
 if (bridgeCommand.endsWith('universe_ui_bridge') && !bridgeCommand.startsWith('podman') && !fs.existsSync(bridgeCommand)) {
   console.error(`Bridge binary not found at ${bridgeCommand}`)
   process.exit(2)
