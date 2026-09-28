@@ -9,8 +9,14 @@ extends RefCounted
 const HOST := "127.0.0.1"
 const PORT := 19081
 
+## UNIVERSECORE_WS_PORT overrides the port so parallel bridges (e.g. one
+## per git worktree) don't collide on the default.
 static func url() -> String:
-	return "ws://%s:%d" % [HOST, PORT]
+	var port := PORT
+	var port_env := OS.get_environment("UNIVERSECORE_WS_PORT")
+	if port_env.is_valid_int():
+		port = int(port_env)
+	return "ws://%s:%d" % [HOST, port]
 
 ## -- Outbound commands (client -> UniverseCore) --
 ## Field names/shapes must match parse_client_command in web_protocol.cpp

@@ -22,6 +22,8 @@ const BuildingAssets := preload("res://scripts/world/building_assets.gd")
 const NEAR_PLAYER_RADIUS := 40.0
 const MOVE_SPEED_UNITS_PER_SECOND := 3.0
 const ACTIVITY_LABEL_HEIGHT := 2.4
+## Construction progress is shown in this many visible wall-height steps.
+const CONSTRUCTION_VISUAL_STEPS := 10
 
 var _agent_nodes: Dictionary
 var _settlement_nodes: Dictionary
@@ -171,8 +173,14 @@ func _remove_agent(id: int) -> void:
 	_agent_labels.erase(id)
 	_agent_movement.erase(id)
 
+## Same churn fix as buildings (E1): settlements arrive as "updated" in
+## every delta, so only respawn when the firepit would look different.
 func _upsert_settlement(settlement: Dictionary) -> void:
-	_remove_settlement(int(settlement.get("id", 0)))
+	var id := int(settlement.get("id", 0))
+	var active := bool(settlement.get("active", true))
+	if _settlement_nodes.has(id) and bool(_settlement_nodes[id].get_meta("active", true)) == active:
+		return
+	_remove_settlement(id)
 	_spawn_settlement(settlement)
 
 func _remove_settlement(id: int) -> void:
@@ -180,9 +188,23 @@ func _remove_settlement(id: int) -> void:
 		_settlement_nodes[id].free()
 		_settlement_nodes.erase(id)
 
+## Live-client defect E1: the server lists every present building as
+## "updated" in every delta, and this used to free and respawn each one ten
+## times a second. Only a change in how the building looks (type, state,
+## visible construction step, position) rebuilds it now; anything else just
+## refreshes the inspector data.
 func _upsert_building(building: Dictionary) -> void:
-	_remove_building(int(building.get("id", 0)))
+	var id := int(building.get("id", 0))
+	if _building_nodes.has(id) and _building_look_key(_building_data.get(id, {})) == _building_look_key(building):
+		_building_data[id] = building
+		return
+	_remove_building(id)
 	_spawn_building(building)
+
+func _building_look_key(building: Dictionary) -> String:
+	var step := int(floor(float(building.get("progress", 1.0)) * float(CONSTRUCTION_VISUAL_STEPS)))
+	var pos := UniverseProtocol.position_from(building)
+	return "%s|%s|%d|%.2f|%.2f" % [building.get("type", ""), building.get("state", ""), step, pos.x, pos.z]
 
 func _remove_building(id: int) -> void:
 	if _building_nodes.has(id):
@@ -238,20 +260,74 @@ func _update_agent(id: int, agent: Dictionary) -> void:
 		_request_path_to_target(id)
 
 func _spawn_settlement(settlement: Dictionary) -> void:
-	var marker := BuildingAssets.make_settlement_marker()
+	var active := bool(settlement.get("active", true))
+	var marker := BuildingAssets.make_settlement_marker(active)
+	marker.set_meta("active", active)
 	marker.position = _grounded_position(settlement)
 	add_child(marker)
 	_settlement_nodes[int(settlement.get("id", 0))] = marker
 
 func _spawn_building(building: Dictionary) -> void:
-	var visual := BuildingAssets.make_building(str(building.get("type", "Dwelling")))
+	var building_type := str(building.get("type", "Dwelling"))
+	var state := str(building.get("state", "Complete"))
+	var progress := float(building.get("progress", 1.0))
+	var visual := BuildingAssets.make_building(building_type, state, progress)
+	var size := BuildingAssets.footprint(building_type, state, progress)
 
 	var id := int(building.get("id", 0))
-	var area := _make_pickable_area("building", id, visual, Vector3(3.0, 5.0, 3.0))
-	area.position = _grounded_position(building)
+	var area := _make_pickable_area("building", id, visual, Vector3(size.x, max(size.y, 1.5), size.z))
+	(area.get_child(0) as CollisionShape3D).position.y = max(size.y, 1.5) * 0.5
+	var body := BuildingAssets.make_collision_body(building_type, state, progress)
+	if body != null:
+		area.add_child(body)
+	area.position = _building_ground_position(building, size)
+	area.rotation.y = _facing_settlement_centre(building)
 	add_child(area)
 	_building_nodes[id] = area
 	_building_data[id] = building
+
+## Door (local +X) turned toward the settlement's common. Presentation only;
+## canonical orientation can replace it once placement is canonical (#53).
+func _facing_settlement_centre(building: Dictionary) -> float:
+	var settlement_id := int(building.get("settlementId", 0))
+	if not _settlement_nodes.has(settlement_id):
+		return 0.0
+	var centre: Vector3 = _settlement_nodes[settlement_id].position
+	var pos := UniverseProtocol.position_from(building)
+	var direction := Vector2(centre.x - pos.x, centre.z - pos.z)
+	if direction.length() < 0.01:
+		return 0.0
+	return atan2(-direction.y, direction.x)
+
+## Sits the building on the lowest ground under its footprint so no corner
+## floats on a slope.
+func _building_ground_position(building: Dictionary, size: Vector3) -> Vector3:
+	var pos := UniverseProtocol.position_from(building)
+	if not _height_sampler.is_valid():
+		return pos
+	var half := Vector2(size.x, size.z).length() * 0.5
+	var lowest := INF
+	for offset in [Vector2.ZERO, Vector2(half, 0.0), Vector2(-half, 0.0), Vector2(0.0, half), Vector2(0.0, -half)]:
+		lowest = min(lowest, float(_height_sampler.call(pos.x + offset.x, pos.z + offset.y)))
+	pos.y = lowest - 0.05
+	return pos
+
+## Terrain reshaped (a settlement was founded or removed nearby): re-seat
+## everything on the new ground. Only heights change; villager x/z stay
+## exactly where the server put them.
+func reground(area: Rect2) -> void:
+	if not _height_sampler.is_valid():
+		return
+	for id in _building_nodes.keys():
+		var node: Node3D = _building_nodes[id]
+		if area.has_point(Vector2(node.position.x, node.position.z)):
+			var building: Dictionary = _building_data[id]
+			var size := BuildingAssets.footprint(str(building.get("type", "Dwelling")), str(building.get("state", "Complete")), float(building.get("progress", 1.0)))
+			node.position.y = _building_ground_position(building, size).y
+	for group in [_settlement_nodes, _agent_nodes]:
+		for node in group.values():
+			if area.has_point(Vector2(node.position.x, node.position.z)):
+				node.position.y = float(_height_sampler.call(node.position.x, node.position.z))
 
 ## The protocol's position.y comes from server-side presentation logic (a
 ## flat settlement-ring layout, unaware of the client's own procedurally
