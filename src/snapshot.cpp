@@ -186,6 +186,89 @@ private:
     return id > 0U;
 }
 
+constexpr std::uint16_t kMaxFacingDegreesExclusive = 360U;
+
+// Reads the schema v25 section: one placement record per building in id order,
+// then the ascending ids of people whose next occupation reassignment is silent.
+[[nodiscard]] SnapshotLoadResult read_v25_placement_and_resync_section(SnapshotReader& reader, WorldState& state) {
+    std::uint64_t placement_count = 0;
+    if (!reader.read_u64(placement_count)) {
+        return load_error(SnapshotErrorCode::TruncatedData, "Snapshot building placement section is truncated");
+    }
+    if (placement_count != static_cast<std::uint64_t>(state.buildings.size())) {
+        return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot building placement count does not match buildings");
+    }
+
+    std::unordered_map<BuildingId, Building*> building_by_id;
+    building_by_id.reserve(state.buildings.size());
+    for (auto& building : state.buildings) {
+        building_by_id.emplace(building.id, &building);
+    }
+
+    BuildingId previous_id = 0;
+    for (std::uint64_t i = 0; i < placement_count; ++i) {
+        BuildingId building_id = 0;
+        std::int64_t position_x = 0;
+        std::int64_t position_z = 0;
+        std::uint16_t facing_degrees = 0;
+        if (!reader.read_u64(building_id) || !reader.read_i64(position_x) || !reader.read_i64(position_z) ||
+            !reader.read_u16(facing_degrees)) {
+            return load_error(SnapshotErrorCode::TruncatedData, "Snapshot building placement record is truncated");
+        }
+        if (building_id <= previous_id) {
+            return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot building placements must be in ascending id order");
+        }
+        previous_id = building_id;
+        const auto building_it = building_by_id.find(building_id);
+        if (building_it == building_by_id.end()) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot building placement references unknown building");
+        }
+        if (position_x < -kMaxSnapshotPositionMagnitude || position_x > kMaxSnapshotPositionMagnitude ||
+            position_z < -kMaxSnapshotPositionMagnitude || position_z > kMaxSnapshotPositionMagnitude) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot building placement is out of range");
+        }
+        if (facing_degrees >= kMaxFacingDegreesExclusive) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot building facing must be below 360 degrees");
+        }
+        building_it->second->position_x = position_x;
+        building_it->second->position_z = position_z;
+        building_it->second->facing_degrees = facing_degrees;
+    }
+
+    std::uint64_t resync_count = 0;
+    if (!reader.read_u64(resync_count)) {
+        return load_error(SnapshotErrorCode::TruncatedData, "Snapshot occupation resync section is truncated");
+    }
+    if (resync_count > reader.remaining() / 8U) {
+        return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot occupation resync section has invalid length");
+    }
+
+    std::unordered_map<PersonId, Person*> person_by_id;
+    person_by_id.reserve(state.people.size());
+    for (auto& person : state.people) {
+        person_by_id.emplace(person.id, &person);
+    }
+
+    PersonId previous_person_id = 0;
+    for (std::uint64_t i = 0; i < resync_count; ++i) {
+        PersonId person_id = 0;
+        if (!reader.read_u64(person_id)) {
+            return load_error(SnapshotErrorCode::TruncatedData, "Snapshot occupation resync id is truncated");
+        }
+        if (person_id <= previous_person_id) {
+            return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot occupation resync ids must be ascending");
+        }
+        previous_person_id = person_id;
+        const auto person_it = person_by_id.find(person_id);
+        if (person_it == person_by_id.end()) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot occupation resync references unknown person");
+        }
+        person_it->second->occupation_history_resync_pending = true;
+    }
+
+    return SnapshotLoadResult{.ok = true, .code = SnapshotErrorCode::None, .message = {}};
+}
+
 [[nodiscard]] bool is_valid_household_id(const HouseholdId id) noexcept {
     return id > 0U;
 }
@@ -566,6 +649,26 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
             payload.write_u64(payload_data->survivor_settlement_id);
             payload.write_u64(payload_data->absorbed_settlement_id);
             payload.write_u64(payload_data->region_id);
+        } else if (event->type == EventType::OccupationChanged) {
+            const auto* payload_data = std::get_if<OccupationChangedEventPayload>(&event->payload);
+            if (payload_data == nullptr) {
+                throw std::invalid_argument("OccupationChanged event payload mismatch");
+            }
+            payload.write_u64(payload_data->person_id);
+            payload.write_u8(static_cast<std::uint8_t>(payload_data->from));
+            payload.write_u8(static_cast<std::uint8_t>(payload_data->to));
+        } else if (event->type == EventType::HouseholdRelocated) {
+            const auto* payload_data = std::get_if<HouseholdRelocatedEventPayload>(&event->payload);
+            if (payload_data == nullptr) {
+                throw std::invalid_argument("HouseholdRelocated event payload mismatch");
+            }
+            payload.write_u64(payload_data->household_id);
+            payload.write_u64(payload_data->from_settlement_id);
+            payload.write_u64(payload_data->to_settlement_id);
+            payload.write_u64(static_cast<std::uint64_t>(payload_data->member_ids.size()));
+            for (const auto member_id : payload_data->member_ids) {
+                payload.write_u64(member_id);
+            }
         } else {
             throw std::invalid_argument("Unknown event type");
         }
@@ -958,6 +1061,37 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
 
     // Aggregate demography totals are written last so earlier field offsets stay
     // stable across schema revisions.
+    // Schema v25 section: canonical building placement, then people whose next
+    // occupation reassignment is recorded silently. Placed before the aggregate
+    // totals so the totals remain the final 16 bytes.
+    std::vector<const Building*> placement_order;
+    placement_order.reserve(simulation.state_.buildings.size());
+    for (const auto& building : simulation.state_.buildings) {
+        placement_order.push_back(&building);
+    }
+    std::sort(placement_order.begin(), placement_order.end(), [](const Building* lhs, const Building* rhs) {
+        return lhs->id < rhs->id;
+    });
+    payload.write_u64(static_cast<std::uint64_t>(placement_order.size()));
+    for (const auto* building : placement_order) {
+        payload.write_u64(building->id);
+        payload.write_i64(building->position_x);
+        payload.write_i64(building->position_z);
+        payload.write_u16(building->facing_degrees);
+    }
+
+    std::vector<PersonId> resync_pending_ids;
+    for (const auto& person : simulation.state_.people) {
+        if (person.occupation_history_resync_pending) {
+            resync_pending_ids.push_back(person.id);
+        }
+    }
+    std::sort(resync_pending_ids.begin(), resync_pending_ids.end());
+    payload.write_u64(static_cast<std::uint64_t>(resync_pending_ids.size()));
+    for (const auto person_id : resync_pending_ids) {
+        payload.write_u64(person_id);
+    }
+
     payload.write_u64(simulation.state_.aggregate_births_total);
     payload.write_u64(simulation.state_.aggregate_deaths_total);
 
@@ -997,9 +1131,10 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         return load_error(SnapshotErrorCode::InvalidMagic, "Snapshot magic does not match");
     }
 
-    if (version != kSchemaVersion) {
+    if (version != kSchemaVersion && version != kMinimumMigratableSchemaVersion) {
         return load_error(SnapshotErrorCode::UnsupportedVersion, "Snapshot schema version is unsupported");
     }
+    const bool is_v24_migration = version == kMinimumMigratableSchemaVersion;
 
     if (reserved != 0U) {
         return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot reserved header field must be zero");
@@ -1412,7 +1547,10 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
             return load_error(SnapshotErrorCode::TruncatedData, "Snapshot event record is truncated");
         }
 
-        if (type_raw > 6U) {
+        const auto max_event_type = is_v24_migration
+            ? static_cast<std::uint8_t>(EventType::SettlementMerged)
+            : static_cast<std::uint8_t>(EventType::HouseholdRelocated);
+        if (type_raw > max_event_type) {
             return load_error(SnapshotErrorCode::InvalidEnum, "Snapshot event type is invalid");
         }
         event.type = static_cast<EventType>(type_raw);
@@ -1494,6 +1632,43 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
                 !payload_reader.read_u64(payload_data.absorbed_settlement_id) ||
                 !payload_reader.read_u64(payload_data.region_id)) {
                 return load_error(SnapshotErrorCode::TruncatedData, "Snapshot settlement merged event payload is truncated");
+            }
+            event.payload = payload_data;
+        } else if (event.type == EventType::OccupationChanged) {
+            OccupationChangedEventPayload payload_data{};
+            std::uint8_t from_raw = 0;
+            std::uint8_t to_raw = 0;
+            if (!payload_reader.read_u64(payload_data.person_id) ||
+                !payload_reader.read_u8(from_raw) ||
+                !payload_reader.read_u8(to_raw)) {
+                return load_error(SnapshotErrorCode::TruncatedData, "Snapshot occupation changed event payload is truncated");
+            }
+            if (from_raw > static_cast<std::uint8_t>(Occupation::CraftWorker) ||
+                to_raw > static_cast<std::uint8_t>(Occupation::CraftWorker)) {
+                return load_error(SnapshotErrorCode::InvalidEnum, "Snapshot occupation changed event occupation is invalid");
+            }
+            payload_data.from = static_cast<Occupation>(from_raw);
+            payload_data.to = static_cast<Occupation>(to_raw);
+            event.payload = payload_data;
+        } else if (event.type == EventType::HouseholdRelocated) {
+            HouseholdRelocatedEventPayload payload_data{};
+            std::uint64_t member_count = 0;
+            if (!payload_reader.read_u64(payload_data.household_id) ||
+                !payload_reader.read_u64(payload_data.from_settlement_id) ||
+                !payload_reader.read_u64(payload_data.to_settlement_id) ||
+                !payload_reader.read_u64(member_count)) {
+                return load_error(SnapshotErrorCode::TruncatedData, "Snapshot household relocated event payload is truncated");
+            }
+            if (member_count > payload_reader.remaining() / 8U) {
+                return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot household relocated member list has invalid length");
+            }
+            payload_data.member_ids.reserve(static_cast<std::size_t>(member_count));
+            for (std::uint64_t member = 0; member < member_count; ++member) {
+                PersonId member_id = 0;
+                if (!payload_reader.read_u64(member_id)) {
+                    return load_error(SnapshotErrorCode::TruncatedData, "Snapshot household relocated member id is truncated");
+                }
+                payload_data.member_ids.push_back(member_id);
             }
             event.payload = payload_data;
         }
@@ -2624,6 +2799,13 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         restored_state.settlement_aggregates.push_back(aggregate);
     }
 
+    if (!is_v24_migration) {
+        const auto section_result = read_v25_placement_and_resync_section(payload_reader, restored_state);
+        if (!section_result.ok) {
+            return section_result;
+        }
+    }
+
     if (!payload_reader.read_u64(restored_state.aggregate_births_total) ||
         !payload_reader.read_u64(restored_state.aggregate_deaths_total)) {
         return load_error(SnapshotErrorCode::TruncatedData, "Snapshot aggregate demography totals are truncated");
@@ -3236,6 +3418,39 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
                 return load_error(SnapshotErrorCode::InvalidState, "Snapshot settlement has duplicate merged-away events");
             }
             merged_event_id_by_absorbed_settlement.emplace(payload_data.absorbed_settlement_id, event.id);
+        } else if (event.type == EventType::OccupationChanged) {
+            if (!std::holds_alternative<OccupationChangedEventPayload>(event.payload)) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot event payload does not match occupation changed type");
+            }
+            const auto& payload_data = std::get<OccupationChangedEventPayload>(event.payload);
+            if (!person_by_id.contains(payload_data.person_id)) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot occupation changed event references unknown person");
+            }
+            if (payload_data.from == payload_data.to) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot occupation changed event must record a real change");
+            }
+        } else if (event.type == EventType::HouseholdRelocated) {
+            if (!std::holds_alternative<HouseholdRelocatedEventPayload>(event.payload)) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot event payload does not match household relocated type");
+            }
+            const auto& payload_data = std::get<HouseholdRelocatedEventPayload>(event.payload);
+            if (!household_by_id.contains(payload_data.household_id)) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot household relocated event references unknown household");
+            }
+            if (!settlement_by_id.contains(payload_data.from_settlement_id) ||
+                !settlement_by_id.contains(payload_data.to_settlement_id)) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot household relocated event references unknown settlement");
+            }
+            if (payload_data.from_settlement_id == payload_data.to_settlement_id) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot household relocated event must change settlement");
+            }
+            PersonId previous_member_id = 0;
+            for (const auto member_id : payload_data.member_ids) {
+                if (member_id <= previous_member_id || !person_by_id.contains(member_id)) {
+                    return load_error(SnapshotErrorCode::InvalidReference, "Snapshot household relocated members must be known and ascending");
+                }
+                previous_member_id = member_id;
+            }
         }
     }
 
@@ -4134,6 +4349,17 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     destination.knowledge_index_by_semantic_key_ = std::move(rebuilt_knowledge_index_by_semantic_key);
     destination.rebuild_communication_indexes();
     destination.rebuild_record_indexes();
+
+    // v24 -> v25 migration. Placement is a pure function of settlement
+    // geography and lower-id buildings, so replaying it reproduces what v25
+    // would have placed. v24 recorded no occupation history, so every living
+    // person's next reassignment is treated as a resolution, never a change.
+    if (is_v24_migration) {
+        destination.recompute_building_placements();
+        for (auto& person : destination.state_.people) {
+            person.occupation_history_resync_pending = person.alive;
+        }
+    }
 
     return SnapshotLoadResult{.ok = true, .code = SnapshotErrorCode::None, .message = ""};
 }

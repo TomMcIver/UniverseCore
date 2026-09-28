@@ -362,6 +362,16 @@ Current implementation status:
 - canonical collection ordering during serialization (people/households/events by stable ID, household members by person ID)
 - explicit load validation for malformed/truncated data, enum validity, ID uniqueness, references and scheduler invariants
 - snapshot schema v15 is the canonical persistence baseline for typed event journal + material/tool/environment state + agent memory + agent knowledge + knowledge transmission + records + institutions provenance
+- snapshot schema v25 adds person life events and canonical building placement, and is the first schema that migrates its predecessor (v24) on load instead of rejecting it:
+  - `OccupationChanged` is recorded only for a living person's real change of job across the yearly reassignment. People resolved to individual detail (promotion out of a population group, or v24 migration) carry `occupation_history_resync_pending`, so a resolution transition is never recorded as a job change.
+  - `HouseholdRelocated` is recorded when a household moves settlement, whether through settlement founding or settlement merging. It carries the living members who moved.
+  - A building's placement (`position_x`, `position_z`, `facing_degrees`) is fixed when it is planned (ADR 0001):
+    - Household-owned buildings go in the owner's yard, around the household's canonical position.
+    - Shared stores and workshops go by the settlement's common.
+    - Every other building takes the first free plot along three tracks, whose directions come from the settlement's seed.
+    - Placement uses integer geometry only and depends only on settlement geography and lower-id buildings, so v24 saves are migrated by replaying it in id order.
+    - Buildings of extinct or absorbed settlements keep their placement and remain obstacles.
+  - The v25 section (placements, then resync ids) sits just before the aggregate demography totals, which stay the final 16 bytes.
 
 Snapshot invariants:
 

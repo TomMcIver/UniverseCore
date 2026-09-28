@@ -149,6 +149,10 @@ struct UiState {
             return "InstitutionFounded";
         case EventType::SettlementMerged:
             return "SettlementMerged";
+        case EventType::OccupationChanged:
+            return "OccupationChanged";
+        case EventType::HouseholdRelocated:
+            return "HouseholdRelocated";
     }
     return "Unknown";
 }

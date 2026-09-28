@@ -120,6 +120,93 @@ void assign_household_offset(Household& household, const SimulationSeed househol
         static_cast<std::int32_t>(seed_random_bounded(z_seed, span)) - kHouseholdOffsetMaxUnits;
 }
 
+// Canonical building placement (ticket #46): household yards strung along a
+// deterministic track network growing out of the settlement's common, with
+// shared stores and workshops by the common. Integer geometry only -- a
+// 10-degree direction table scaled by kDirectionScale -- so placement never
+// depends on platform floating point.
+constexpr std::int64_t kDirectionScale = 1024;
+constexpr std::size_t kDirectionCount = 36;
+constexpr std::array<Point2D, kDirectionCount> kDirections{{
+    {1024, 0}, {1008, 178}, {962, 350}, {887, 512}, {784, 658}, {658, 784}, {512, 887}, {350, 962}, {178, 1008},
+    {0, 1024}, {-178, 1008}, {-350, 962}, {-512, 887}, {-658, 784}, {-784, 658}, {-887, 512}, {-962, 350}, {-1008, 178},
+    {-1024, 0}, {-1008, -178}, {-962, -350}, {-887, -512}, {-784, -658}, {-658, -784}, {-512, -887}, {-350, -962}, {-178, -1008},
+    {0, -1024}, {178, -1008}, {350, -962}, {512, -887}, {658, -784}, {784, -658}, {887, -512}, {962, -350}, {1008, -178},
+}};
+constexpr std::size_t kQuarterTurn = kDirectionCount / 4;
+constexpr std::size_t kHalfTurn = kDirectionCount / 2;
+constexpr std::uint64_t kTrackCount = 3;
+constexpr std::int64_t kTrackAngleJitterSteps = 2;
+constexpr std::int64_t kBuildingMinSeparationUnits = 7;
+constexpr std::int64_t kFirstPlotDistanceUnits = 12;
+constexpr std::int64_t kPlotSpacingUnits = 9;
+constexpr std::int64_t kPlotSetbackUnits = 6;
+constexpr std::int64_t kPlotJitterUnits = 2;
+constexpr std::array<std::int64_t, 5> kCommonRingRadiiUnits{{8, 11, 14, 17, 20}};
+constexpr std::array<std::int64_t, 2> kYardRadiiUnits{{7, 12}};
+constexpr std::size_t kCommonRingDirectionStep = 7;
+constexpr std::size_t kYardDirectionStep = 4;
+
+[[nodiscard]] Point2D offset_along(const Point2D origin, const std::size_t direction, const std::int64_t distance) noexcept {
+    const auto unit = kDirections[direction % kDirectionCount];
+    return Point2D{origin.x + ((unit.x * distance) / kDirectionScale), origin.z + ((unit.z * distance) / kDirectionScale)};
+}
+
+[[nodiscard]] std::uint16_t facing_degrees_for(const std::size_t direction) noexcept {
+    return static_cast<std::uint16_t>((direction % kDirectionCount) * (360U / kDirectionCount));
+}
+
+[[nodiscard]] bool placement_is_free(const Point2D candidate, const std::vector<Point2D>& obstacles) noexcept {
+    const auto min_sq = kBuildingMinSeparationUnits * kBuildingMinSeparationUnits;
+    return std::none_of(obstacles.begin(), obstacles.end(), [&](const Point2D other) {
+        return squared_distance(candidate, other) < min_sq;
+    });
+}
+
+[[nodiscard]] std::int64_t seeded_offset(const SimulationSeed seed, const std::uint64_t stable_id, const std::int64_t magnitude) noexcept {
+    const auto span = static_cast<std::uint64_t>((magnitude * 2) + 1);
+    return static_cast<std::int64_t>(seed_random_bounded(derive_seed(seed, SeedDomain::BuildingPlacement, stable_id), span)) - magnitude;
+}
+
+[[nodiscard]] std::array<std::size_t, kTrackCount> settlement_track_directions(const SimulationSeed settlement_seed_value) noexcept {
+    const auto base = seed_random_bounded(derive_seed(settlement_seed_value, SeedDomain::SettlementTracks, 0U), kDirectionCount);
+    std::array<std::size_t, kTrackCount> directions{};
+    for (std::uint64_t track = 0; track < kTrackCount; ++track) {
+        const auto jitter_span = static_cast<std::uint64_t>((kTrackAngleJitterSteps * 2) + 1);
+        const auto jitter = static_cast<std::int64_t>(
+            seed_random_bounded(derive_seed(settlement_seed_value, SeedDomain::SettlementTracks, track + 1U), jitter_span)) -
+            kTrackAngleJitterSteps;
+        const auto spread = static_cast<std::int64_t>(track * (kDirectionCount / kTrackCount));
+        const auto raw = static_cast<std::int64_t>(base) + spread + jitter + static_cast<std::int64_t>(kDirectionCount);
+        directions[track] = static_cast<std::size_t>(raw % static_cast<std::int64_t>(kDirectionCount));
+    }
+    return directions;
+}
+
+struct PlacementChoice {
+    Point2D point{};
+    std::uint16_t facing_degrees{};
+};
+
+// Plot k alternates tracks, then sides of the track, then steps outward, so a
+// growing village fills its tracks evenly and extends them as it grows.
+[[nodiscard]] PlacementChoice track_plot(
+    const Point2D centre,
+    const std::array<std::size_t, kTrackCount>& tracks,
+    const SimulationSeed building_seed,
+    const std::uint64_t plot_index) noexcept {
+    const auto track_direction = tracks[static_cast<std::size_t>(plot_index % kTrackCount)];
+    const auto step = plot_index / kTrackCount;
+    const auto along = kFirstPlotDistanceUnits + (static_cast<std::int64_t>(step / 2U) * kPlotSpacingUnits);
+    const bool left_side = (step % 2U) == 1U;
+    const auto side_direction = left_side ? track_direction + kQuarterTurn : track_direction + (kQuarterTurn * 3U);
+    const auto on_track = offset_along(centre, track_direction, along);
+    auto plot = offset_along(on_track, side_direction, kPlotSetbackUnits);
+    plot.x += seeded_offset(building_seed, plot_index << 1U, kPlotJitterUnits);
+    plot.z += seeded_offset(building_seed, (plot_index << 1U) | 1U, kPlotJitterUnits);
+    return PlacementChoice{.point = plot, .facing_degrees = facing_degrees_for(side_direction + kHalfTurn)};
+}
+
 // Ticket #34/#37: a deterministic daily activity pick. Seeded selection
 // among the candidate ActivityKinds gives real day-to-day and
 // person-to-person variety, and Travel is one of the picked kinds so the
@@ -484,6 +571,10 @@ std::int64_t environment_class_wild_capacity_units_per_area(const EnvironmentCla
             return std::holds_alternative<InstitutionFoundedEventPayload>(event.payload);
         case EventType::SettlementMerged:
             return std::holds_alternative<SettlementMergedEventPayload>(event.payload);
+        case EventType::OccupationChanged:
+            return std::holds_alternative<OccupationChangedEventPayload>(event.payload);
+        case EventType::HouseholdRelocated:
+            return std::holds_alternative<HouseholdRelocatedEventPayload>(event.payload);
     }
     return false;
 }
@@ -2134,7 +2225,15 @@ void Simulation::process_demography_period(const std::uint64_t demographic_year)
     process_local_exchange(demographic_year);
     process_construction(demographic_year);
     process_local_exchange(demographic_year);
+
+    std::unordered_map<PersonId, Occupation> occupations_before;
+    occupations_before.reserve(state_.people.size());
+    for (const auto& person : state_.people) {
+        occupations_before.emplace(person.id, person.occupation);
+    }
     process_occupation_reassignment(demographic_year);
+    record_occupation_changes(occupations_before);
+
     process_household_access_allocation();
     refresh_population_count();
     refresh_food_aggregates();
@@ -2798,6 +2897,7 @@ void Simulation::promote_region_to_detailed(const RegionId region_id) {
                 break;
             }
             person->alive = true;
+            person->occupation_history_resync_pending = true;
             auto* household = [&]() -> Household* {
                 for (auto& entry : state_.households) {
                     if (entry.id == person->household_id) {
@@ -2861,6 +2961,7 @@ void Simulation::promote_region_to_detailed(const RegionId region_id) {
                 .occupation = occupation,
                 .materialized_from_cohort = true,
                 .source_cohort_id = cohort.id,
+                .occupation_history_resync_pending = true,
             });
             household->member_ids.push_back(person_id);
         }
@@ -5592,6 +5693,15 @@ void Simulation::process_settlement_founding(const std::uint64_t demographic_yea
 
         const auto event_id = emit_settlement_founded_event(new_settlement_id, region_id, source_settlement_id);
         append_direct_observation_memories(event_id, moved_observers, state_.time);
+
+        std::vector<const Household*> moved_households(
+            source_alive_households.begin(), source_alive_households.begin() + static_cast<std::ptrdiff_t>(move_count));
+        std::sort(moved_households.begin(), moved_households.end(), [](const Household* lhs, const Household* rhs) {
+            return lhs->id < rhs->id;
+        });
+        for (const auto* household : moved_households) {
+            emit_household_relocated_event(*household, source_settlement_id, new_settlement_id);
+        }
     }
 
     std::sort(state_.settlements.begin(), state_.settlements.end(), [](const Settlement& lhs, const Settlement& rhs) {
@@ -5606,12 +5716,15 @@ void Simulation::merge_settlements(const SettlementId survivor_id, const Settlem
         return;
     }
 
+    std::vector<HouseholdId> relocated_household_ids;
     for (auto& household : state_.households) {
         if (household.settlement_id == absorbed_id) {
             household.settlement_id = survivor_id;
             household.region_id = survivor->region_id;
+            relocated_household_ids.push_back(household.id);
         }
     }
+    std::sort(relocated_household_ids.begin(), relocated_household_ids.end());
     for (auto& cohort : state_.population_cohorts) {
         if (cohort.settlement_id == absorbed_id) {
             cohort.settlement_id = survivor_id;
@@ -5652,6 +5765,19 @@ void Simulation::merge_settlements(const SettlementId survivor_id, const Settlem
     absorbed->access_share_points = 0U;
 
     emit_settlement_merged_event(survivor_id, absorbed_id, absorbed_region_id);
+
+    // Absorbed buildings keep their settlement_id and canonical placement,
+    // standing where they were built as the absorbed site's old quarter.
+    for (const auto household_id : relocated_household_ids) {
+        for (const auto& household : state_.households) {
+            if (household.id == household_id) {
+                if (alive_count_in_household(household_id) > 0U) {
+                    emit_household_relocated_event(household, absorbed_id, survivor_id);
+                }
+                break;
+            }
+        }
+    }
 }
 
 void Simulation::process_settlement_merging() {
@@ -6522,6 +6648,174 @@ EventId Simulation::emit_settlement_merged_event(
         },
     });
     return event_id;
+}
+
+void Simulation::record_occupation_changes(const std::unordered_map<PersonId, Occupation>& occupations_before) {
+    std::vector<Person*> ordered;
+    ordered.reserve(state_.people.size());
+    for (auto& person : state_.people) {
+        ordered.push_back(&person);
+    }
+    std::sort(ordered.begin(), ordered.end(), [](const Person* lhs, const Person* rhs) {
+        return lhs->id < rhs->id;
+    });
+
+    for (auto* person : ordered) {
+        if (!person->alive) {
+            continue;
+        }
+        if (person->occupation_history_resync_pending) {
+            person->occupation_history_resync_pending = false;
+            continue;
+        }
+        const auto before_it = occupations_before.find(person->id);
+        if (before_it != occupations_before.end() && before_it->second != person->occupation) {
+            emit_occupation_changed_event(person->id, before_it->second, person->occupation);
+        }
+    }
+}
+
+EventId Simulation::emit_occupation_changed_event(const PersonId person_id, const Occupation from, const Occupation to) {
+    return append_event(SimulationEvent{
+        .id = 0,
+        .timestamp = state_.time,
+        .type = EventType::OccupationChanged,
+        .payload = OccupationChangedEventPayload{
+            .person_id = person_id,
+            .from = from,
+            .to = to,
+        },
+    });
+}
+
+EventId Simulation::emit_household_relocated_event(
+    const Household& household,
+    const SettlementId from_settlement_id,
+    const SettlementId to_settlement_id) {
+    std::vector<PersonId> member_ids;
+    member_ids.reserve(household.member_ids.size());
+    for (const auto member_id : household.member_ids) {
+        for (const auto& person : state_.people) {
+            if (person.id == member_id && person.alive) {
+                member_ids.push_back(member_id);
+                break;
+            }
+        }
+    }
+    std::sort(member_ids.begin(), member_ids.end());
+    return append_event(SimulationEvent{
+        .id = 0,
+        .timestamp = state_.time,
+        .type = EventType::HouseholdRelocated,
+        .payload = HouseholdRelocatedEventPayload{
+            .household_id = household.id,
+            .from_settlement_id = from_settlement_id,
+            .to_settlement_id = to_settlement_id,
+            .member_ids = std::move(member_ids),
+        },
+    });
+}
+
+void Simulation::place_building(Building& building, const std::span<const Building> earlier_buildings) const {
+    const auto* settlement = find_settlement(building.settlement_id);
+    if (settlement == nullptr) {
+        building.position_x = 0;
+        building.position_z = 0;
+        building.facing_degrees = 0;
+        return;
+    }
+
+    // Every earlier building in the region is an obstacle, including those
+    // of extinct or absorbed settlements, whose buildings keep their place.
+    std::vector<Point2D> obstacles;
+    obstacles.reserve(earlier_buildings.size());
+    for (const auto& earlier : earlier_buildings) {
+        const auto* earlier_settlement = find_settlement(earlier.settlement_id);
+        if (earlier_settlement != nullptr && earlier_settlement->region_id == settlement->region_id) {
+            obstacles.push_back(Point2D{earlier.position_x, earlier.position_z});
+        }
+    }
+
+    const Point2D centre{settlement->position_x, settlement->position_z};
+    const auto settlement_seed_value = settlement_seed(settlement->id);
+    const auto building_seed = derive_seed(settlement_seed_value, SeedDomain::BuildingPlacement, building.id);
+    const auto start_direction = static_cast<std::size_t>(seed_random_bounded(building_seed, kDirectionCount));
+
+    const auto accept = [&](const PlacementChoice choice) {
+        building.position_x = choice.point.x;
+        building.position_z = choice.point.z;
+        building.facing_degrees = choice.facing_degrees;
+    };
+
+    const bool shared_service = building.settlement_commons_owned && building.type != BuildingType::Dwelling;
+    if (shared_service) {
+        for (const auto radius : kCommonRingRadiiUnits) {
+            for (std::size_t step = 0; step < kDirectionCount; ++step) {
+                const auto direction = start_direction + (step * kCommonRingDirectionStep);
+                const auto candidate = offset_along(centre, direction, radius);
+                if (placement_is_free(candidate, obstacles)) {
+                    accept(PlacementChoice{.point = candidate, .facing_degrees = facing_degrees_for(direction + kHalfTurn)});
+                    return;
+                }
+            }
+        }
+    }
+
+    if (building.owner_household_id.has_value()) {
+        const Household* owner = nullptr;
+        for (const auto& household : state_.households) {
+            if (household.id == *building.owner_household_id) {
+                owner = &household;
+                break;
+            }
+        }
+        if (owner != nullptr) {
+            const Point2D yard{centre.x + owner->settlement_offset_x, centre.z + owner->settlement_offset_z};
+            for (const auto radius : kYardRadiiUnits) {
+                for (std::size_t step = 0; step < kDirectionCount / kYardDirectionStep; ++step) {
+                    const auto direction = start_direction + (step * kYardDirectionStep);
+                    const auto candidate = offset_along(yard, direction, radius);
+                    if (placement_is_free(candidate, obstacles)) {
+                        accept(PlacementChoice{.point = candidate, .facing_degrees = facing_degrees_for(direction + kHalfTurn)});
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    // Plots extend outward without bound and obstacles are finite, so the
+    // first free plot always exists.
+    const auto tracks = settlement_track_directions(settlement_seed_value);
+    for (std::uint64_t plot_index = 0;; ++plot_index) {
+        const auto choice = track_plot(centre, tracks, building_seed, plot_index);
+        if (placement_is_free(choice.point, obstacles)) {
+            accept(choice);
+            return;
+        }
+    }
+}
+
+void Simulation::recompute_building_placements() {
+    std::vector<Building> ordered = state_.buildings;
+    std::sort(ordered.begin(), ordered.end(), [](const Building& lhs, const Building& rhs) {
+        return lhs.id < rhs.id;
+    });
+    for (std::size_t i = 0; i < ordered.size(); ++i) {
+        place_building(ordered[i], std::span<const Building>{ordered.data(), i});
+    }
+
+    std::unordered_map<BuildingId, const Building*> placed_by_id;
+    placed_by_id.reserve(ordered.size());
+    for (const auto& building : ordered) {
+        placed_by_id.emplace(building.id, &building);
+    }
+    for (auto& building : state_.buildings) {
+        const auto* placed = placed_by_id.at(building.id);
+        building.position_x = placed->position_x;
+        building.position_z = placed->position_z;
+        building.facing_degrees = placed->facing_degrees;
+    }
 }
 
 EventId Simulation::emit_discovery_made_event(
@@ -7691,6 +7985,7 @@ void Simulation::process_construction(const std::uint64_t demographic_year) {
             project.stone_required = stone_required;
             project.labour_required = labour_required;
             project.started_at = state_.time;
+            place_building(project, state_.buildings);
             state_.buildings.push_back(project);
             settlement_buildings.push_back(project.id);
         };
