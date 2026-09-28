@@ -124,6 +124,10 @@ using detail::occupation_label;
             return "InstitutionFounded";
         case EventType::SettlementMerged:
             return "SettlementMerged";
+        case EventType::OccupationChanged:
+            return "OccupationChanged";
+        case EventType::HouseholdRelocated:
+            return "HouseholdRelocated";
     }
     return "Unknown";
 }
@@ -215,18 +219,8 @@ WorldSnapshotView build_world_snapshot(const SimulationController& controller) {
         return lhs.id < rhs.id;
     });
 
-    // Buildings within a settlement used to scatter at an independent
-    // random (angle, radius) each -- with no collision avoidance at all,
-    // which visibly placed buildings on top of each other once real
-    // asset models replaced the old placeholder boxes. A golden-angle
-    // spiral (radius grows with sqrt(index), angle advances by the
-    // golden angle each step) is a standard even-spacing technique
-    // (phyllotaxis/sunflower-seed packing) that guarantees increasing
-    // separation between consecutive buildings in the same settlement,
-    // deterministically, with no retry/rejection logic needed.
-    std::unordered_map<SettlementId, std::uint64_t> building_slot_within_settlement;
-    constexpr float golden_angle_radians = 2.39996323F;
-
+    // Building placement is canonical simulation state (ADR 0001); this
+    // adapter forwards it unchanged.
     snapshot.buildings.reserve(buildings.size());
     for (const auto& building : buildings) {
         const auto settlement_it = settlement_view_by_id.find(building.settlement_id);
@@ -235,11 +229,8 @@ WorldSnapshotView build_world_snapshot(const SimulationController& controller) {
         }
 
         const auto settlement = settlement_it->second;
-        const auto building_index = building_slot_within_settlement[building.settlement_id]++;
-        const auto angle = static_cast<float>(building_index) * golden_angle_radians;
-        const auto radius = 4.0F + (std::sqrt(static_cast<float>(building_index)) * 3.2F);
-        const auto x = settlement.x + (std::cos(angle) * radius);
-        const auto z = settlement.z + (std::sin(angle) * radius);
+        const auto x = static_cast<float>(building.position_x);
+        const auto z = static_cast<float>(building.position_z);
 
         float progress = 0.0F;
         if (building.labour_required > 0) {
@@ -261,6 +252,7 @@ WorldSnapshotView build_world_snapshot(const SimulationController& controller) {
             .x = x,
             .y = 0.0F,
             .z = z,
+            .facing_degrees = building.facing_degrees,
         });
     }
 
@@ -484,6 +476,7 @@ void write_building_json(std::ostringstream& out, const BuildingRenderView& buil
         << ",\"settlementCommonsOwned\":" << (building.settlement_commons_owned ? "true" : "false")
         << ",\"ownerHouseholdId\":" << building.owner_household_id
         << ",\"progress\":" << building.progress
+        << ",\"facingDegrees\":" << building.facing_degrees
         << ",\"position\":{\"x\":" << building.x << ",\"y\":" << building.y << ",\"z\":" << building.z << "}}";
 }
 
@@ -606,6 +599,12 @@ std::string make_world_event_message(const std::uint32_t protocol_version, const
     } else if (event.type == EventType::Death) {
         const auto& payload = std::get<DeathEventPayload>(event.payload);
         out << ",\"entityId\":" << payload.person_id;
+    } else if (event.type == EventType::OccupationChanged) {
+        const auto& payload = std::get<OccupationChangedEventPayload>(event.payload);
+        out << ",\"entityId\":" << payload.person_id;
+    } else if (event.type == EventType::HouseholdRelocated) {
+        const auto& payload = std::get<HouseholdRelocatedEventPayload>(event.payload);
+        out << ",\"entityId\":" << payload.household_id;
     }
 
     out << "}}";

@@ -1552,6 +1552,11 @@ EventSectionInfo locate_event_section(const universe::WorldState& state) {
             cursor += 25U;
         } else if (type == universe::EventType::SettlementMerged) {
             cursor += 24U;
+        } else if (type == universe::EventType::OccupationChanged) {
+            cursor += 10U;
+        } else if (type == universe::EventType::HouseholdRelocated) {
+            const auto& payload = std::get<universe::HouseholdRelocatedEventPayload>(event->payload);
+            cursor += 32U + (payload.member_ids.size() * 8U);
         }
 
         info.payload_discriminator_offsets.push_back(discriminator_offset);

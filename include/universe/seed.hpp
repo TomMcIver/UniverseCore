@@ -65,6 +65,8 @@ enum class SeedDomain : std::uint64_t {
     SettlementPosition = 0xE29B47C0A6D3158FULL,
     HouseholdPosition = 0x76D4C1A9E38F502BULL,
     Schedule = 0x3B96A1D0E4C75F28ULL,
+    SettlementTracks = 0x5E07B3C9A12D86F4ULL,
+    BuildingPlacement = 0xC8A51F3D07E69B21ULL,
 };
 
 [[nodiscard]] constexpr std::uint64_t mix_u64(const std::uint64_t value) noexcept {

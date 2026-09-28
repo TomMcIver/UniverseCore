@@ -181,6 +181,12 @@ struct Person {
     // alongside occupation reassignment -- it is not itself independently
     // serialized state beyond this cached value.
     ActivityKind current_activity{ActivityKind::Idle};
+
+    // Set when a person is resolved to individual detail (initial world,
+    // promotion from a population group, snapshot migration): their next
+    // occupation reassignment is recorded silently, so a resolution
+    // transition never appears as a job change in their life history.
+    bool occupation_history_resync_pending{false};
 };
 
 struct Household {
@@ -273,6 +279,12 @@ struct Building {
     std::int64_t labour_completed{};
     SimulationTime started_at{};
     std::optional<SimulationTime> completed_at{};
+
+    // Canonical building placement (ADR 0001), fixed when the building is
+    // planned, in the same world units as Settlement.position.
+    std::int64_t position_x{};
+    std::int64_t position_z{};
+    std::uint16_t facing_degrees{};
 };
 
 enum class EnvironmentClass : std::uint8_t {
@@ -313,6 +325,8 @@ enum class EventType : std::uint8_t {
     DiscoveryMade = 4,
     InstitutionFounded = 5,
     SettlementMerged = 6,
+    OccupationChanged = 7,
+    HouseholdRelocated = 8,
 };
 
 struct BirthEventPayload {
@@ -375,6 +389,25 @@ struct InstitutionFoundedEventPayload {
     [[nodiscard]] bool operator==(const InstitutionFoundedEventPayload& other) const = default;
 };
 
+struct OccupationChangedEventPayload {
+    PersonId person_id{};
+    Occupation from{Occupation::None};
+    Occupation to{Occupation::None};
+
+    [[nodiscard]] bool operator==(const OccupationChangedEventPayload& other) const = default;
+};
+
+// member_ids records the living members who moved, so each member's life
+// history stays exact after later household membership changes.
+struct HouseholdRelocatedEventPayload {
+    HouseholdId household_id{};
+    SettlementId from_settlement_id{};
+    SettlementId to_settlement_id{};
+    std::vector<PersonId> member_ids{};
+
+    [[nodiscard]] bool operator==(const HouseholdRelocatedEventPayload& other) const = default;
+};
+
 using SimulationEventPayload = std::variant<
     BirthEventPayload,
     DeathEventPayload,
@@ -382,7 +415,9 @@ using SimulationEventPayload = std::variant<
     SettlementExtinctEventPayload,
     DiscoveryMadeEventPayload,
     InstitutionFoundedEventPayload,
-    SettlementMergedEventPayload>;
+    SettlementMergedEventPayload,
+    OccupationChangedEventPayload,
+    HouseholdRelocatedEventPayload>;
 
 struct SimulationEvent {
     EventId id{};
@@ -670,6 +705,10 @@ public:
     void add_aggregate_population(RegionId region_id, SettlementId settlement_id, std::uint64_t population);
     void promote_region_to_detailed(RegionId region_id);
     void demote_region_to_settlement_aggregate(RegionId region_id);
+    // Re-derives every building placement in building-id order. Placement is a
+    // pure function of settlement geography and lower-id buildings, so this
+    // reproduces planning-time placement exactly; used to migrate v24 saves.
+    void recompute_building_placements();
     [[nodiscard]] std::uint64_t aggregate_population() const noexcept;
     [[nodiscard]] std::uint64_t detailed_population() const noexcept;
 
@@ -791,6 +830,10 @@ private:
     EventId emit_settlement_founded_event(SettlementId settlement_id, RegionId region_id, std::optional<SettlementId> source_settlement_id);
     EventId emit_settlement_extinct_event(SettlementId settlement_id, RegionId region_id);
     EventId emit_settlement_merged_event(SettlementId survivor_settlement_id, SettlementId absorbed_settlement_id, RegionId region_id);
+    EventId emit_occupation_changed_event(PersonId person_id, Occupation from, Occupation to);
+    void record_occupation_changes(const std::unordered_map<PersonId, Occupation>& occupations_before);
+    EventId emit_household_relocated_event(const Household& household, SettlementId from_settlement_id, SettlementId to_settlement_id);
+    void place_building(Building& building, std::span<const Building> earlier_buildings) const;
     EventId emit_discovery_made_event(std::uint32_t discovery_key, PersonId discoverer_id, SettlementId settlement_id);
     EventId emit_institution_founded_event(InstitutionId institution_id, InstitutionKind kind, SettlementId settlement_id, PersonId founder_id);
     [[nodiscard]] MemoryId append_memory(AgentMemory memory);

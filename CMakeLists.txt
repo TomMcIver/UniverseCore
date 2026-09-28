@@ -111,6 +111,11 @@ if(UNIVERSECORE_BUILD_TESTS)
     add_test(NAME universe_core_tests_fast COMMAND universe_core_tests_fast)
     set_tests_properties(universe_core_tests_fast PROPERTIES LABELS "fast")
 
+    add_executable(universe_life_events_placement_tests tests/life_events_placement_tests.cpp)
+    target_link_libraries(universe_life_events_placement_tests PRIVATE universe_core)
+    add_test(NAME universe_life_events_placement_tests COMMAND universe_life_events_placement_tests)
+    set_tests_properties(universe_life_events_placement_tests PROPERTIES LABELS "fast")
+
     add_executable(universe_ui_protocol_tests tests/ui_protocol_tests.cpp)
     target_link_libraries(universe_ui_protocol_tests PRIVATE universe_ui_support)
     add_test(NAME universe_ui_protocol_tests COMMAND universe_ui_protocol_tests)

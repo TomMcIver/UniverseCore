@@ -48,6 +48,7 @@ struct BuildingRenderView {
     float x{};
     float y{};
     float z{};
+    std::uint16_t facing_degrees{};
 };
 
 struct RegionRenderView {
