@@ -12,6 +12,7 @@ add_library(universe_core
     src/resources.cpp
     src/simulation.cpp
     src/snapshot.cpp
+    src/demo_scenario.cpp
 )
 
 target_include_directories(universe_core
@@ -32,6 +33,9 @@ target_link_libraries(universe_sim PRIVATE universe_core)
 
 add_executable(universe_lod_benchmark src/lod_benchmark.cpp)
 target_link_libraries(universe_lod_benchmark PRIVATE universe_core)
+
+add_executable(universe_demo_seed_search src/demo_seed_search_main.cpp)
+target_link_libraries(universe_demo_seed_search PRIVATE universe_core)
 
 add_executable(universe_ui_bridge src/ui_bridge_main.cpp)
 target_link_libraries(universe_ui_bridge PRIVATE universe_ui_support)
@@ -115,6 +119,11 @@ if(UNIVERSECORE_BUILD_TESTS)
     target_link_libraries(universe_life_events_placement_tests PRIVATE universe_core)
     add_test(NAME universe_life_events_placement_tests COMMAND universe_life_events_placement_tests)
     set_tests_properties(universe_life_events_placement_tests PROPERTIES LABELS "fast")
+
+    add_executable(universe_demo_scenario_tests tests/demo_scenario_tests.cpp)
+    target_link_libraries(universe_demo_scenario_tests PRIVATE universe_core)
+    add_test(NAME universe_demo_scenario_tests COMMAND universe_demo_scenario_tests)
+    set_tests_properties(universe_demo_scenario_tests PROPERTIES LABELS "fast")
 
     add_executable(universe_ui_protocol_tests tests/ui_protocol_tests.cpp)
     target_link_libraries(universe_ui_protocol_tests PRIVATE universe_ui_support)
