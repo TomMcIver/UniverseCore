@@ -1,6 +1,8 @@
 #include "universe/ui/simulation_controller.hpp"
+#include "universe/ui/view_models.hpp"
 #include "universe/ui/web_protocol.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <iostream>
 #include <optional>
@@ -27,14 +29,162 @@ bool test_reject_bad_speed() {
     return !command.has_value() && error == "Invalid speed";
 }
 
-bool test_parse_entity_details_command() {
+bool contains(const std::string& haystack, const std::string& needle) {
+    return haystack.find(needle) != std::string::npos;
+}
+
+bool test_parse_request_view_model_command() {
+    std::string error;
+    const auto command = universe::ui::parse_client_command(
+        "{\"type\":\"request_view_model\",\"kind\":\"settlement_economy\",\"entityId\":42}",
+        error);
+    return command.has_value() &&
+        command->type == universe::ui::ClientCommandType::RequestViewModel &&
+        command->view_model_kind == universe::ui::ViewModelKind::SettlementEconomy &&
+        command->entity_id == 42U;
+}
+
+bool test_reject_unknown_view_model_kind() {
+    std::string error;
+    const auto command = universe::ui::parse_client_command(
+        "{\"type\":\"request_view_model\",\"kind\":\"raw_snapshot\",\"entityId\":42}",
+        error);
+    return !command.has_value() && error == "Unknown view model kind";
+}
+
+bool test_reject_view_model_without_entity() {
+    std::string error;
+    const auto command = universe::ui::parse_client_command(
+        "{\"type\":\"request_view_model\",\"kind\":\"person_summary\"}",
+        error);
+    return !command.has_value() && error == "Invalid entityId";
+}
+
+bool test_legacy_entity_details_command_removed() {
     std::string error;
     const auto command = universe::ui::parse_client_command(
         "{\"type\":\"request_entity_details\",\"entityId\":42}",
         error);
-    return command.has_value() &&
-        command->type == universe::ui::ClientCommandType::RequestEntityDetails &&
-        command->entity_id == 42U;
+    return !command.has_value();
+}
+
+bool test_view_model_kind_labels_round_trip() {
+    for (const auto kind : {
+             universe::ui::ViewModelKind::PersonSummary,
+             universe::ui::ViewModelKind::BuildingSummary,
+             universe::ui::ViewModelKind::SettlementEconomy}) {
+        const auto parsed = universe::ui::parse_view_model_kind(universe::ui::view_model_kind_label(kind));
+        if (!parsed.has_value() || *parsed != kind || universe::ui::view_model_version(kind) == 0U) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool test_person_summary_view_model() {
+    universe::ui::SimulationController controller{universe::SimulationConfig{.seed = 42, .initial_population = 200}};
+    controller.advance_days(3);
+    const auto& person = controller.people().front();
+    const auto view = universe::ui::build_person_summary(controller, person.id);
+    if (!view.has_value() || view->id != person.id || view->household_id != person.household_id ||
+        view->current_activity != person.current_activity) {
+        return false;
+    }
+
+    const auto message = universe::ui::make_view_model_message(
+        2U, controller, universe::ui::ViewModelKind::PersonSummary, person.id);
+    return contains(message, "\"type\":\"view_model\"") &&
+        contains(message, "\"kind\":\"person_summary\"") &&
+        contains(message, "\"entityId\":" + std::to_string(person.id)) &&
+        contains(message, "\"version\":1") &&
+        contains(message, "\"data\":{") &&
+        contains(message, "\"occupation\":\"") &&
+        contains(message, "\"currentActivity\":\"");
+}
+
+bool test_building_summary_view_model() {
+    universe::ui::SimulationController controller{universe::SimulationConfig{.seed = 42, .initial_population = 200}};
+    for (std::uint32_t year = 0; year < 10U && controller.buildings().empty(); ++year) {
+        controller.advance_years(1);
+    }
+    if (controller.buildings().empty()) {
+        std::cerr << "no buildings after 10 years at seed 42\n";
+        return false;
+    }
+
+    const auto& building = controller.buildings().front();
+    const auto view = universe::ui::build_building_summary(controller, building.id);
+    if (!view.has_value() || view->id != building.id || view->settlement_id != building.settlement_id ||
+        view->labour_required != building.labour_required) {
+        return false;
+    }
+
+    const auto message = universe::ui::make_view_model_message(
+        2U, controller, universe::ui::ViewModelKind::BuildingSummary, building.id);
+    return contains(message, "\"kind\":\"building_summary\"") &&
+        contains(message, "\"buildingType\":\"") &&
+        contains(message, "\"constructionState\":\"");
+}
+
+bool test_settlement_economy_view_model_matches_canonical_state() {
+    universe::ui::SimulationController controller{universe::SimulationConfig{.seed = 42, .initial_population = 200}};
+    controller.advance_years(2);
+
+    const auto summaries = controller.settlement_summaries();
+    const auto summary_it = std::find_if(summaries.begin(), summaries.end(), [](const auto& summary) {
+        return summary.active && summary.alive_population > 0U;
+    });
+    if (summary_it == summaries.end()) {
+        return false;
+    }
+
+    std::int64_t produced = 0;
+    std::int64_t consumed = 0;
+    for (const auto& household : controller.households()) {
+        if (household.settlement_id == summary_it->id) {
+            produced += household.resources.food_produced_total;
+            consumed += household.resources.food_consumed_total;
+        }
+    }
+
+    const auto* settlement = [&]() -> const universe::Settlement* {
+        for (const auto& candidate : controller.settlements()) {
+            if (candidate.id == summary_it->id) {
+                return &candidate;
+            }
+        }
+        return nullptr;
+    }();
+
+    const auto view = universe::ui::build_settlement_economy(controller, summary_it->id);
+    if (!view.has_value() || settlement == nullptr) {
+        return false;
+    }
+    if (view->food_produced_total != produced || view->food_consumed_total != consumed ||
+        view->alive_population != summary_it->alive_population || view->tier != settlement->tier ||
+        view->cultivators != summary_it->cultivators || view->craft_workers != summary_it->craft_workers ||
+        view->unallocated_workers != summary_it->unallocated_workers) {
+        return false;
+    }
+    if (view->min_household_wealth > view->median_household_wealth ||
+        view->median_household_wealth > view->max_household_wealth) {
+        return false;
+    }
+
+    const auto message = universe::ui::make_view_model_message(
+        2U, controller, universe::ui::ViewModelKind::SettlementEconomy, summary_it->id);
+    return contains(message, "\"kind\":\"settlement_economy\"") &&
+        contains(message, "\"tier\":\"") &&
+        contains(message, "\"food\":{") &&
+        contains(message, "\"jobs\":{") &&
+        contains(message, "\"wealth\":{");
+}
+
+bool test_view_model_for_missing_entity_is_error() {
+    universe::ui::SimulationController controller{universe::SimulationConfig{.seed = 42, .initial_population = 200}};
+    const auto message = universe::ui::make_view_model_message(
+        2U, controller, universe::ui::ViewModelKind::PersonSummary, 999'999'999U);
+    return contains(message, "\"type\":\"error\"") && contains(message, "\"code\":\"view_model_not_found\"");
 }
 
 bool test_snapshot_is_read_only() {
@@ -300,6 +450,13 @@ bool test_determinism_with_observer_idle() {
         observed.advance(universe::days(1));
         observer_controller.advance_days(1);
         static_cast<void>(universe::ui::build_world_snapshot(observer_controller));
+        if ((day % 90U) == 0U && !observer_controller.people().empty()) {
+            const auto& person = observer_controller.people().front();
+            static_cast<void>(universe::ui::make_view_model_message(
+                2U, observer_controller, universe::ui::ViewModelKind::PersonSummary, person.id));
+            static_cast<void>(universe::ui::make_view_model_message(
+                2U, observer_controller, universe::ui::ViewModelKind::SettlementEconomy, 1U));
+        }
     }
 
     const auto baseline_snapshot = baseline.save_snapshot();
@@ -319,21 +476,42 @@ bool test_determinism_with_observer_idle() {
 }  // namespace
 
 int main() {
-    const bool ok =
-        test_parse_known_command() &&
-        test_reject_unknown_command() &&
-        test_reject_bad_speed() &&
-        test_parse_entity_details_command() &&
-        test_snapshot_is_read_only() &&
-        test_snapshot_includes_varying_region_environment_data() &&
-        test_protocol_version_in_message() &&
-        test_world_delta_buckets_by_id() &&
-        test_world_delta_message_json_shape() &&
-        test_dead_agent_removed_not_updated() &&
-        test_protocol_version_two_on_delta_and_hello_roundtrips() &&
-        test_snapshot_forwards_real_canonical_positions() &&
-        test_snapshot_message_includes_current_activity() &&
-        test_determinism_with_observer_idle();
+    struct NamedTest {
+        const char* name;
+        bool (*fn)();
+    };
+    const NamedTest tests[] = {
+        {"parse_known_command", test_parse_known_command},
+        {"reject_unknown_command", test_reject_unknown_command},
+        {"reject_bad_speed", test_reject_bad_speed},
+        {"parse_request_view_model_command", test_parse_request_view_model_command},
+        {"reject_unknown_view_model_kind", test_reject_unknown_view_model_kind},
+        {"reject_view_model_without_entity", test_reject_view_model_without_entity},
+        {"legacy_entity_details_command_removed", test_legacy_entity_details_command_removed},
+        {"view_model_kind_labels_round_trip", test_view_model_kind_labels_round_trip},
+        {"person_summary_view_model", test_person_summary_view_model},
+        {"building_summary_view_model", test_building_summary_view_model},
+        {"settlement_economy_view_model_matches_canonical_state", test_settlement_economy_view_model_matches_canonical_state},
+        {"view_model_for_missing_entity_is_error", test_view_model_for_missing_entity_is_error},
+        {"snapshot_is_read_only", test_snapshot_is_read_only},
+        {"snapshot_includes_varying_region_environment_data", test_snapshot_includes_varying_region_environment_data},
+        {"protocol_version_in_message", test_protocol_version_in_message},
+        {"world_delta_buckets_by_id", test_world_delta_buckets_by_id},
+        {"world_delta_message_json_shape", test_world_delta_message_json_shape},
+        {"dead_agent_removed_not_updated", test_dead_agent_removed_not_updated},
+        {"protocol_version_two_on_delta_and_hello_roundtrips", test_protocol_version_two_on_delta_and_hello_roundtrips},
+        {"snapshot_forwards_real_canonical_positions", test_snapshot_forwards_real_canonical_positions},
+        {"snapshot_message_includes_current_activity", test_snapshot_message_includes_current_activity},
+        {"determinism_with_observer_idle", test_determinism_with_observer_idle},
+    };
+
+    bool ok = true;
+    for (const auto& test : tests) {
+        if (!test.fn()) {
+            std::cerr << "FAILED: " << test.name << '\n';
+            ok = false;
+        }
+    }
 
     if (!ok) {
         std::cerr << "ui protocol tests failed\n";

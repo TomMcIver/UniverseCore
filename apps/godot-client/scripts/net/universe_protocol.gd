@@ -9,12 +9,14 @@ extends RefCounted
 const HOST := "127.0.0.1"
 const PORT := 19081
 
+## Same override variable ws-bridge.mjs reads, so a second client/bridge pair can run side by side.
 static func url() -> String:
-	return "ws://%s:%d" % [HOST, PORT]
+	var port_override := OS.get_environment("UNIVERSE_WS_PORT")
+	return "ws://%s:%d" % [HOST, int(port_override) if port_override.is_valid_int() else PORT]
 
 ## -- Outbound commands (client -> UniverseCore) --
 ## Field names/shapes must match parse_client_command in web_protocol.cpp
-## exactly: "type" plus "speed" (set_speed) or "entityId" (request_entity_details).
+## exactly: "type" plus "speed" (set_speed) or "kind"/"entityId" (request_view_model).
 
 static func command_hello() -> Dictionary:
 	return {"type": "hello"}
@@ -34,8 +36,8 @@ static func command_single_step() -> Dictionary:
 static func command_set_speed(speed: int) -> Dictionary:
 	return {"type": "set_speed", "speed": speed}
 
-static func command_request_entity_details(entity_id: int) -> Dictionary:
-	return {"type": "request_entity_details", "entityId": entity_id}
+static func command_request_view_model(kind: String, entity_id: int) -> Dictionary:
+	return {"type": "request_view_model", "kind": kind, "entityId": entity_id}
 
 static func encode(command: Dictionary) -> String:
 	return JSON.stringify(command)

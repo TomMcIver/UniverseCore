@@ -1,38 +1,20 @@
 class_name Hud
-extends Control
+extends "res://scripts/ui/ui_panel.gd"
 
-## Minimal native Control-node HUD for ticket #15's scope: connection state,
-## sim time/tick/speed display, and Pause/Resume/Step/SetSpeed controls.
-## Full parity with the PlayCanvas client's inspector (entity details, event
-## log) is ticket #17's job, not this one.
+## Top-bar panel: connection state, world time, and simulation controls.
 
-signal pause_pressed
-signal resume_pressed
-signal step_pressed
-signal speed_selected(speed: int)
+const UniverseProtocol := preload("res://scripts/net/universe_protocol.gd")
+
+const SPEEDS := [1, 2, 4, 8, 16, 32, 64]
 
 var _status_label: Label
 var _world_label: Label
 var _feedback_label: Label
 
 func _init() -> void:
-	# Hud fills the whole viewport (PRESET_FULL_RECT, set by main.gd) so
-	# that its child panels can anchor to corners. Control's default mouse
-	# filter is STOP, which -- because this root covers the entire screen
-	# -- was swallowing every click before it ever reached the 3D scene's
-	# _unhandled_input, making agents/buildings unclickable everywhere.
-	# IGNORE here lets clicks pass through the empty areas; the button
-	# panel/inspector/event-log children below keep their own default STOP
-	# filter, so they're still clickable themselves.
-	mouse_filter = Control.MOUSE_FILTER_IGNORE
-
-	var panel := PanelContainer.new()
-	panel.set_anchors_preset(Control.PRESET_TOP_LEFT)
-	panel.position = Vector2(12, 12)
-	add_child(panel)
-
+	name = "Hud"
 	var vbox := VBoxContainer.new()
-	panel.add_child(vbox)
+	add_child(vbox)
 
 	_status_label = Label.new()
 	_status_label.text = "Connecting..."
@@ -43,43 +25,44 @@ func _init() -> void:
 	vbox.add_child(_world_label)
 
 	_feedback_label = Label.new()
-	_feedback_label.text = ""
 	_feedback_label.modulate = Color(1.0, 0.45, 0.45)
 	vbox.add_child(_feedback_label)
 
 	var buttons := HBoxContainer.new()
 	vbox.add_child(buttons)
+	_add_button(buttons, "Pause", "pause", UniverseProtocol.command_pause())
+	_add_button(buttons, "Resume", "resume", UniverseProtocol.command_resume())
+	_add_button(buttons, "Step", "single_step", UniverseProtocol.command_single_step())
+	for speed in SPEEDS:
+		_add_button(buttons, "%dx" % speed, "set_speed", UniverseProtocol.command_set_speed(speed))
 
-	var pause_button := Button.new()
-	pause_button.text = "Pause"
-	pause_button.pressed.connect(func() -> void: pause_pressed.emit())
-	buttons.add_child(pause_button)
+func _add_button(parent: Control, label: String, action_name: String, command: Dictionary) -> void:
+	var button := Button.new()
+	button.text = label
+	button.pressed.connect(func() -> void: action_requested.emit(action_name, command))
+	parent.add_child(button)
 
-	var resume_button := Button.new()
-	resume_button.text = "Resume"
-	resume_button.pressed.connect(func() -> void: resume_pressed.emit())
-	buttons.add_child(resume_button)
+func panel_slot() -> String:
+	return SLOT_TOP_BAR
 
-	var step_button := Button.new()
-	step_button.text = "Step"
-	step_button.pressed.connect(func() -> void: step_pressed.emit())
-	buttons.add_child(step_button)
+func message_types() -> PackedStringArray:
+	return PackedStringArray(["connection_status", "simulation_status", "initial_snapshot", "world_delta"])
 
-	for speed in [1, 2, 4, 8]:
-		var speed_button := Button.new()
-		speed_button.text = "%dx" % speed
-		var captured_speed: int = speed
-		speed_button.pressed.connect(func() -> void: speed_selected.emit(captured_speed))
-		buttons.add_child(speed_button)
+func actions() -> PackedStringArray:
+	return PackedStringArray(["pause", "resume", "single_step", "set_speed"])
 
-func set_connection_status(text: String) -> void:
-	_status_label.text = text
+func on_message(message_type: String, message: Dictionary) -> void:
+	var payload := UniverseProtocol.message_payload(message)
+	match message_type:
+		"connection_status":
+			_status_label.text = str(payload.get("status", ""))
+		"simulation_status":
+			var paused: bool = payload.get("paused", true)
+			_status_label.text = "Connected -- %s (%dx)" % ["Paused" if paused else "Running", int(payload.get("speed", 1))]
+		"initial_snapshot", "world_delta":
+			_world_label.text = "Year %d | Tick %d | Population %d" % [
+				int(payload.get("year", 0)), int(message.get("tick", 0)), int(payload.get("population", 0))]
 
-func set_world_info(year: int, tick: int, population: int) -> void:
-	_world_label.text = "Year %d | Tick %d | Population %d" % [year, tick, population]
-
-## Ticket #16: a command sent while disconnected must fail visibly, not
-## silently vanish. Called by main.gd with the boolean UniverseClient.
-## send_command already returns.
+## A command sent while disconnected must fail visibly, not silently vanish.
 func show_command_result(succeeded: bool, action_name: String) -> void:
 	_feedback_label.text = "" if succeeded else "%s failed -- not connected" % action_name

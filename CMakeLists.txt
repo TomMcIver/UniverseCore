@@ -38,6 +38,7 @@ target_link_libraries(universe_ui_bridge PRIVATE universe_ui_support)
 
 add_library(universe_ui_support
     src/ui/simulation_controller.cpp
+    src/ui/view_models.cpp
     src/ui/web_protocol.cpp
 )
 

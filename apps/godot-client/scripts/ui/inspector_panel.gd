@@ -1,65 +1,73 @@
 class_name InspectorPanel
-extends PanelContainer
+extends "res://scripts/ui/ui_panel.gd"
 
-## Ticket #17: displays either an agent's entity_details payload (fetched
-## from the server on click) or a building's snapshot data (already local
-## -- there is no server round trip for building details).
+## Shows the selected person or building from its server-built view model.
 
+const PLACEHOLDER := "Select a villager or building"
+
+var _title: Label
 var _content: Label
 
 func _init() -> void:
+	name = "Inspector"
 	var vbox := VBoxContainer.new()
 	add_child(vbox)
 
-	var title := Label.new()
-	title.text = "Inspector"
-	vbox.add_child(title)
+	_title = Label.new()
+	_title.text = "Inspector"
+	vbox.add_child(_title)
 
 	_content = Label.new()
-	_content.text = "Select an agent or building"
-	_content.custom_minimum_size = Vector2(220, 0)
+	_content.text = PLACEHOLDER
+	_content.custom_minimum_size = Vector2(240, 0)
 	_content.autowrap_mode = TextServer.AUTOWRAP_WORD
 	vbox.add_child(_content)
 
-func show_agent_details(payload: Dictionary) -> void:
-	var family: Dictionary = payload.get("family", {})
-	var settlement_info: Dictionary = payload.get("settlement", {})
-	var mother_id := int(family.get("motherId", 0))
-	var father_id := int(family.get("fatherId", 0))
+func view_model_kinds() -> Dictionary:
+	return {
+		"person_summary": PackedStringArray(["agent"]),
+		"building_summary": PackedStringArray(["building"]),
+	}
 
+func show_view_model(kind: String, entity_id: int, data: Dictionary) -> void:
+	match kind:
+		"person_summary":
+			_show_person(entity_id, data)
+		"building_summary":
+			_show_building(entity_id, data)
+
+func _show_person(entity_id: int, data: Dictionary) -> void:
+	_title.text = "Villager %d" % entity_id
 	_content.text = "\n".join(PackedStringArray([
-		"ID: %d" % int(payload.get("id", 0)),
-		"Age: %d" % int(payload.get("age", 0)),
-		"Sex: %s" % str(payload.get("sex", "")),
-		"Occupation: %s" % str(payload.get("occupation", "")),
-		"Alive: %s" % str(payload.get("alive", false)),
-		"Household: %d" % int(payload.get("householdId", 0)),
-		"Settlement: %d" % int(payload.get("settlementId", 0)),
-		"Region: %d" % int(payload.get("regionId", 0)),
-		"Nutrition: %d" % int(payload.get("nutrition", 0)),
-		"Health: %d" % int(payload.get("health", 0)),
-		"Memory items: %d" % int(payload.get("memoryCount", 0)),
-		"Knowledge items: %d" % int(payload.get("knowledgeCount", 0)),
-		"Mother: %s" % (str(mother_id) if mother_id > 0 else "Unavailable"),
-		"Father: %s" % (str(father_id) if father_id > 0 else "Unavailable"),
-		"Settlement active: %s" % str(settlement_info.get("active", false)),
-		"Settlement access share points: %d" % int(settlement_info.get("accessSharePoints", 0)),
+		"Age: %d  %s" % [int(data.get("age", 0)), str(data.get("sex", ""))],
+		"Alive: %s" % ("yes" if data.get("alive", false) else "no"),
+		"Occupation: %s" % str(data.get("occupation", "")),
+		"Doing now: %s" % str(data.get("currentActivity", "")),
+		"Household: %d" % int(data.get("householdId", 0)),
+		"Settlement: %d  Region: %d" % [int(data.get("settlementId", 0)), int(data.get("regionId", 0))],
+		"Nutrition: %d  Health: %d" % [int(data.get("nutrition", 0)), int(data.get("health", 0))],
+		"Memories: %d  Knowledge: %d" % [int(data.get("memoryCount", 0)), int(data.get("knowledgeCount", 0))],
+		"Mother: %s" % _id_or(data.get("motherId"), "Unknown"),
+		"Father: %s" % _id_or(data.get("fatherId"), "Unknown"),
 	]))
 
-func show_building_details(building: Dictionary) -> void:
-	var owner_id := int(building.get("ownerHouseholdId", 0))
-	var progress := float(building.get("progress", 0.0))
-
+func _show_building(entity_id: int, data: Dictionary) -> void:
+	var labour: Dictionary = data.get("labour", {})
+	var required := int(labour.get("required", 0))
+	var progress := 100 if required <= 0 else int(round(100.0 * float(labour.get("completed", 0)) / float(required)))
+	_title.text = "Building %d" % entity_id
 	_content.text = "\n".join(PackedStringArray([
-		"ID: %d" % int(building.get("id", 0)),
-		"Type: %s" % str(building.get("type", "")),
-		"State: %s" % str(building.get("state", "")),
-		"Progress: %d%%" % int(round(progress * 100.0)),
-		"Settlement: %d" % int(building.get("settlementId", 0)),
-		"Region: %d" % int(building.get("regionId", 0)),
-		"Commons owned: %s" % str(building.get("settlementCommonsOwned", true)),
-		"Owner household: %s" % (str(owner_id) if owner_id > 0 else "None"),
+		"Type: %s" % str(data.get("buildingType", "")),
+		"State: %s" % str(data.get("constructionState", "")),
+		"Labour: %d%%" % clampi(progress, 0, 100),
+		"Timber: %s" % _progress_pair(data.get("timber", {})),
+		"Stone: %s" % _progress_pair(data.get("stone", {})),
+		"Settlement: %d" % int(data.get("settlementId", 0)),
+		"Owner household: %s" % _id_or(data.get("ownerHouseholdId"), "Commons"),
 	]))
 
-func clear() -> void:
-	_content.text = "Select an agent or building"
+func _progress_pair(pair: Dictionary) -> String:
+	return "%d / %d" % [int(pair.get("committed", 0)), int(pair.get("required", 0))]
+
+func _id_or(value, fallback: String) -> String:
+	return fallback if value == null else str(int(value))

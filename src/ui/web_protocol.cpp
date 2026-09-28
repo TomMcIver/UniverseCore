@@ -14,17 +14,19 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "protocol_text.hpp"
+
 namespace universe::ui {
 
 namespace {
 
-[[nodiscard]] std::uint32_t age_years_from_person(const SimulationSummary& summary, const Person& person) noexcept {
-    const auto year_i64 = static_cast<std::int64_t>(summary.year);
-    if (year_i64 <= person.birth_year) {
-        return 0U;
-    }
-    return static_cast<std::uint32_t>(year_i64 - person.birth_year);
-}
+using detail::activity_kind_label;
+using detail::age_years_from_person;
+using detail::biological_sex_label;
+using detail::building_state_label;
+using detail::building_type_label;
+using detail::json_escape;
+using detail::occupation_label;
 
 [[nodiscard]] std::optional<std::string_view> extract_string_field(
     std::string_view json,
@@ -92,80 +94,6 @@ namespace {
     return parsed;
 }
 
-[[nodiscard]] const Person* find_person(const std::span<const Person> people, const PersonId person_id) {
-    for (const auto& person : people) {
-        if (person.id == person_id) {
-            return &person;
-        }
-    }
-    return nullptr;
-}
-
-[[nodiscard]] std::string biological_sex_label(const BiologicalSex sex) {
-    if (sex == BiologicalSex::Female) {
-        return "Female";
-    }
-    return "Male";
-}
-
-[[nodiscard]] std::string occupation_label(const Occupation occupation) {
-    switch (occupation) {
-        case Occupation::None:
-            return "None";
-        case Occupation::SubsistenceCultivator:
-            return "SubsistenceCultivator";
-        case Occupation::WildFoodGatherer:
-            return "WildFoodGatherer";
-        case Occupation::WoodGatherer:
-            return "WoodGatherer";
-        case Occupation::StoneExtractor:
-            return "StoneExtractor";
-        case Occupation::CraftWorker:
-            return "CraftWorker";
-    }
-    return "Unknown";
-}
-
-[[nodiscard]] std::string activity_kind_label(const ActivityKind activity) {
-    switch (activity) {
-        case ActivityKind::Sleep:
-            return "Sleep";
-        case ActivityKind::Travel:
-            return "Travel";
-        case ActivityKind::Work:
-            return "Work";
-        case ActivityKind::Eat:
-            return "Eat";
-        case ActivityKind::Social:
-            return "Social";
-        case ActivityKind::Teaching:
-            return "Teaching";
-        case ActivityKind::RecordKeeping:
-            return "RecordKeeping";
-        case ActivityKind::Discovery:
-            return "Discovery";
-        case ActivityKind::Childcare:
-            return "Childcare";
-        case ActivityKind::Rest:
-            return "Rest";
-        case ActivityKind::Idle:
-            return "Idle";
-    }
-    return "Unknown";
-}
-
-[[nodiscard]] std::string building_type_label(const BuildingType type) {
-    switch (type) {
-        case BuildingType::Dwelling:
-            return "Dwelling";
-        case BuildingType::FoodStore:
-            return "FoodStore";
-        case BuildingType::Workshop:
-            return "Workshop";
-    }
-    return "Unknown";
-}
-
 [[nodiscard]] std::string environment_class_label(const EnvironmentClass environment_class) {
     switch (environment_class) {
         case EnvironmentClass::ProductiveArable:
@@ -176,18 +104,6 @@ namespace {
             return "Marginal";
         case EnvironmentClass::WaterWetland:
             return "WaterWetland";
-    }
-    return "Unknown";
-}
-
-[[nodiscard]] std::string building_state_label(const ConstructionState state) {
-    switch (state) {
-        case ConstructionState::Planned:
-            return "Planned";
-        case ConstructionState::ActiveConstruction:
-            return "ActiveConstruction";
-        case ConstructionState::Complete:
-            return "Complete";
     }
     return "Unknown";
 }
@@ -210,34 +126,6 @@ namespace {
             return "SettlementMerged";
     }
     return "Unknown";
-}
-
-[[nodiscard]] std::string json_escape(std::string_view text) {
-    std::string escaped;
-    escaped.reserve(text.size());
-    for (const auto ch : text) {
-        switch (ch) {
-            case '"':
-                escaped += "\\\"";
-                break;
-            case '\\':
-                escaped += "\\\\";
-                break;
-            case '\n':
-                escaped += "\\n";
-                break;
-            case '\r':
-                escaped += "\\r";
-                break;
-            case '\t':
-                escaped += "\\t";
-                break;
-            default:
-                escaped.push_back(ch);
-                break;
-        }
-    }
-    return escaped;
 }
 
 }  // namespace
@@ -525,15 +413,22 @@ std::optional<ClientCommand> parse_client_command(std::string_view json, std::st
             .speed = static_cast<std::uint32_t>(*speed),
         };
     }
-    if (*type == "request_entity_details" || *type == "inspect_entity") {
+    if (*type == "request_view_model") {
+        const auto kind_label = extract_string_field(json, "kind");
+        const auto kind = kind_label.has_value() ? parse_view_model_kind(*kind_label) : std::nullopt;
+        if (!kind.has_value()) {
+            error_message = "Unknown view model kind";
+            return std::nullopt;
+        }
         const auto entity_id = extract_u64_field(json, "entityId");
         if (!entity_id.has_value() || *entity_id == 0U) {
             error_message = "Invalid entityId";
             return std::nullopt;
         }
         return ClientCommand{
-            .type = ClientCommandType::RequestEntityDetails,
+            .type = ClientCommandType::RequestViewModel,
             .entity_id = *entity_id,
+            .view_model_kind = *kind,
         };
     }
 
@@ -692,72 +587,6 @@ std::string make_delta_message(const std::uint32_t protocol_version, const World
     write_id_array(out, delta.removed_building_ids);
 
     out << "}}";
-    return out.str();
-}
-
-std::string make_entity_details_message(
-    const std::uint32_t protocol_version,
-    const SimulationController& controller,
-    const PersonId person_id) {
-    const auto summary = controller.summary();
-    const auto people = controller.people();
-    const auto households = controller.households();
-    const auto settlements = controller.settlements();
-
-    const Person* person = find_person(people, person_id);
-    if (person == nullptr) {
-        return make_error_message(protocol_version, "entity_not_found", "Entity not found");
-    }
-
-    const Household* household = nullptr;
-    for (const auto& candidate : households) {
-        if (candidate.id == person->household_id) {
-            household = &candidate;
-            break;
-        }
-    }
-
-    const Settlement* settlement = nullptr;
-    if (household != nullptr) {
-        for (const auto& candidate : settlements) {
-            if (candidate.id == household->settlement_id) {
-                settlement = &candidate;
-                break;
-            }
-        }
-    }
-
-    const auto memory_count = controller.memory_count_for_person(person_id);
-    const auto knowledge_count = controller.knowledge_count_for_person(person_id);
-
-    std::ostringstream out;
-    out << "{\"protocolVersion\":" << protocol_version
-        << ",\"type\":\"entity_details\""
-        << ",\"tick\":" << static_cast<std::uint64_t>(summary.time.ticks < 0 ? 0 : summary.time.ticks)
-        << ",\"payload\":{"
-        << "\"entityType\":\"agent\""
-        << ",\"id\":" << person->id
-        << ",\"alive\":" << (person->alive ? "true" : "false")
-        << ",\"age\":" << age_years_from_person(summary, *person)
-        << ",\"sex\":\"" << biological_sex_label(person->sex) << "\""
-        << ",\"occupation\":\"" << occupation_label(person->occupation) << "\""
-        << ",\"householdId\":" << person->household_id
-        << ",\"settlementId\":" << (household != nullptr ? household->settlement_id : 0ULL)
-        << ",\"regionId\":" << (household != nullptr ? household->region_id : 0ULL)
-        << ",\"nutrition\":" << person->nutrition_points
-        << ",\"health\":" << person->health_points
-        << ",\"memoryCount\":" << memory_count
-        << ",\"knowledgeCount\":" << knowledge_count
-        << ",\"family\":{"
-        << "\"motherId\":" << (person->mother_id.has_value() ? *person->mother_id : 0ULL)
-        << ",\"fatherId\":" << (person->father_id.has_value() ? *person->father_id : 0ULL)
-        << "}"
-        << ",\"settlement\":{"
-        << "\"active\":" << (settlement != nullptr && settlement->active ? "true" : "false")
-        << ",\"accessSharePoints\":" << (settlement != nullptr ? settlement->access_share_points : 0U)
-        << "}"
-        << "}}";
-
     return out.str();
 }
 

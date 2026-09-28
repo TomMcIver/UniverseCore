@@ -146,8 +146,8 @@ int main(int argc, char** argv) {
                     previous_snapshot = snapshot;
                     break;
                 }
-                case ClientCommandType::RequestEntityDetails: {
-                    emit_line(runtime, universe::ui::make_entity_details_message(kProtocolVersion, controller, command.entity_id));
+                case ClientCommandType::RequestViewModel: {
+                    emit_line(runtime, universe::ui::make_view_model_message(kProtocolVersion, controller, command.view_model_kind, command.entity_id));
                     break;
                 }
             }

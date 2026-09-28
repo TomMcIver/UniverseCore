@@ -8,9 +8,8 @@ extends Node3D
 const UniverseClientScript := preload("res://scripts/net/universe_client.gd")
 const UniverseProtocol := preload("res://scripts/net/universe_protocol.gd")
 const WorldViewScript := preload("res://scripts/world/world_view.gd")
-const HudScript := preload("res://scripts/ui/hud.gd")
-const InspectorPanelScript := preload("res://scripts/ui/inspector_panel.gd")
-const EventLogScript := preload("res://scripts/ui/event_log.gd")
+const PanelRegistryScript := preload("res://scripts/ui/panel_registry.gd")
+const PanelManifest := preload("res://scripts/ui/panel_manifest.gd")
 const TerrainGeneratorScript := preload("res://scripts/terrain_generator.gd")
 const OrbitCameraScript := preload("res://scripts/orbit_camera.gd")
 const DayNight := preload("res://scripts/world/day_night.gd")
@@ -18,9 +17,7 @@ const NavmeshManagerScript := preload("res://scripts/world/navmesh_manager.gd")
 
 var _client: Node
 var _world_view: Node3D
-var _hud: Control
-var _inspector: PanelContainer
-var _event_log: PanelContainer
+var _panels: Control
 var _terrain: MeshInstance3D
 var _sun: DirectionalLight3D
 var _world_environment: WorldEnvironment
@@ -43,39 +40,19 @@ func _ready() -> void:
 	add_child(_world_view)
 	_world_view.set_navmesh_manager(_navmesh_manager)
 
-	_hud = HudScript.new()
-	_hud.name = "Hud"
-	_hud.set_anchors_preset(Control.PRESET_FULL_RECT)
-	add_child(_hud)
-
-	_inspector = InspectorPanelScript.new()
-	_inspector.name = "Inspector"
-	_inspector.set_anchors_preset(Control.PRESET_TOP_RIGHT)
-	_inspector.position = Vector2(-232, 12)
-	_hud.add_child(_inspector)
-
-	_event_log = EventLogScript.new()
-	_event_log.name = "EventLog"
-	_event_log.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
-	_event_log.position = Vector2(12, -172)
-	_hud.add_child(_event_log)
-
 	_client = UniverseClientScript.new()
 	_client.name = "UniverseClient"
 	add_child(_client)
-	_client.connected.connect(_on_connected)
-	_client.disconnected.connect(_on_disconnected)
-	_client.reconnecting.connect(_on_reconnecting)
+	_client.connected.connect(_route_connection_status.bind("Connected"))
+	_client.disconnected.connect(_route_connection_status.bind("Disconnected"))
+	_client.reconnecting.connect(_route_connection_status.bind("Reconnecting..."))
 	_client.message_received.connect(_on_message_received)
 
-	_hud.pause_pressed.connect(func() -> void:
-		_hud.show_command_result(_client.send_command(UniverseProtocol.command_pause()), "Pause"))
-	_hud.resume_pressed.connect(func() -> void:
-		_hud.show_command_result(_client.send_command(UniverseProtocol.command_resume()), "Resume"))
-	_hud.step_pressed.connect(func() -> void:
-		_hud.show_command_result(_client.send_command(UniverseProtocol.command_single_step()), "Step"))
-	_hud.speed_selected.connect(func(speed: int) -> void:
-		_hud.show_command_result(_client.send_command(UniverseProtocol.command_set_speed(speed)), "Set speed"))
+	_panels = PanelRegistryScript.new()
+	_panels.name = "Panels"
+	add_child(_panels)
+	_panels.set_command_sink(Callable(_client, "send_command"))
+	PanelManifest.register_all(_panels)
 
 	_client.connect_to_bridge()
 
@@ -174,6 +151,7 @@ func _center_camera_on_settlements(settlements: Array) -> void:
 		return
 	var center := _first_settlement_position(active)
 	_camera.center_on(center.x, center.y)
+	_panels.select("settlement", _first_settlement_id(active))
 
 func _active_settlements(settlements: Array) -> Array:
 	var active: Array = []
@@ -191,6 +169,12 @@ func _active_settlements(settlements: Array) -> Array:
 ## keeping a lower id than every settlement still standing, which centered
 ## the camera/terrain on a long-dead, empty spot (observed directly against
 ## a long-running world).
+func _first_settlement_id(settlements: Array) -> int:
+	var first_id := int(settlements[0].get("id", 0))
+	for settlement in settlements:
+		first_id = min(first_id, int(settlement.get("id", 0)))
+	return first_id
+
 func _first_settlement_position(settlements: Array) -> Vector2:
 	var first: Dictionary = settlements[0]
 	for settlement in settlements:
@@ -252,16 +236,14 @@ func _apply_day_night(tick: int) -> void:
 	_world_environment.environment.ambient_light_energy = lighting.ambient_energy
 	_world_environment.environment.fog_light_color = lighting.fog_color
 
-func _on_connected() -> void:
-	_hud.set_connection_status("Connected")
-
-func _on_disconnected() -> void:
-	_hud.set_connection_status("Disconnected")
-
-func _on_reconnecting() -> void:
-	_hud.set_connection_status("Reconnecting...")
+func _route_connection_status(status: String) -> void:
+	_panels.route_message({"type": "connection_status", "payload": {"status": status}})
 
 func _on_message_received(message: Dictionary) -> void:
+	_apply_world_message(message)
+	_panels.route_message(message)
+
+func _apply_world_message(message: Dictionary) -> void:
 	var message_type := UniverseProtocol.message_type(message)
 	var payload := UniverseProtocol.message_payload(message)
 
@@ -273,9 +255,7 @@ func _on_message_received(message: Dictionary) -> void:
 				_navmeshes_baked = true
 				_center_camera_on_settlements(payload.get("settlements", []))
 			_world_view.apply_snapshot(payload, Callable(_terrain, "get_height_at_world"))
-			var tick := int(message.get("tick", 0))
-			_apply_day_night(tick)
-			_hud.set_world_info(int(payload.get("year", 0)), tick, int(payload.get("population", 0)))
+			_apply_day_night(int(message.get("tick", 0)))
 		"world_delta":
 			# world_delta (ticket #7) is a real diff, not a restated world --
 			# it carries no "regions"/full "settlements" list to regenerate
@@ -283,19 +263,10 @@ func _on_message_received(message: Dictionary) -> void:
 			# every entity every tick. Terrain is generated once from the
 			# initial_snapshot and stays static; only the entities change.
 			_world_view.apply_delta(payload, Callable(_terrain, "get_height_at_world"))
-			var delta_tick := int(message.get("tick", 0))
-			_apply_day_night(delta_tick)
-			_hud.set_world_info(int(payload.get("year", 0)), delta_tick, int(payload.get("population", 0)))
-		"simulation_status":
-			var paused: bool = payload.get("paused", true)
-			var speed: int = int(payload.get("speed", 1))
 			_apply_day_night(int(message.get("tick", 0)))
-			_world_view.set_simulation_playback(paused, speed)
-			_hud.set_connection_status("Connected -- %s (%dx)" % ["Paused" if paused else "Running", speed])
-		"entity_details":
-			_inspector.show_agent_details(payload)
-		"world_event":
-			_event_log.append_event(payload)
+		"simulation_status":
+			_apply_day_night(int(message.get("tick", 0)))
+			_world_view.set_simulation_playback(bool(payload.get("paused", true)), int(payload.get("speed", 1)))
 		"error":
 			push_warning("UniverseCore error: %s" % payload.get("message", "unknown"))
 		_:
@@ -324,10 +295,4 @@ func _handle_click(screen_position: Vector2) -> void:
 	if collider == null or not collider.has_meta("entity_type"):
 		return
 
-	var entity_type: String = collider.get_meta("entity_type")
-	var entity_id: int = int(collider.get_meta("entity_id"))
-
-	if entity_type == "agent":
-		_client.send_command(UniverseProtocol.command_request_entity_details(entity_id))
-	elif entity_type == "building":
-		_inspector.show_building_details(_world_view.building_data(entity_id))
+	_panels.select(str(collider.get_meta("entity_type")), int(collider.get_meta("entity_id")))

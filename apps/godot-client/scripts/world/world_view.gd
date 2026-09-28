@@ -238,10 +238,11 @@ func _update_agent(id: int, agent: Dictionary) -> void:
 		_request_path_to_target(id)
 
 func _spawn_settlement(settlement: Dictionary) -> void:
-	var marker := BuildingAssets.make_settlement_marker()
-	marker.position = _grounded_position(settlement)
-	add_child(marker)
-	_settlement_nodes[int(settlement.get("id", 0))] = marker
+	var id := int(settlement.get("id", 0))
+	var area := _make_pickable_area("settlement", id, BuildingAssets.make_settlement_marker(), Vector3(2.0, 4.0, 2.0))
+	area.position = _grounded_position(settlement)
+	add_child(area)
+	_settlement_nodes[id] = area
 
 func _spawn_building(building: Dictionary) -> void:
 	var visual := BuildingAssets.make_building(str(building.get("type", "Dwelling")))

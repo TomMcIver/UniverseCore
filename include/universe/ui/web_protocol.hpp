@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "universe/ui/simulation_controller.hpp"
+#include "universe/ui/view_models.hpp"
 
 namespace universe::ui {
 
@@ -93,13 +94,14 @@ enum class ClientCommandType : std::uint8_t {
     SetSpeed = 3,
     SingleStep = 4,
     RequestSnapshot = 5,
-    RequestEntityDetails = 6,
+    RequestViewModel = 6,
 };
 
 struct ClientCommand {
     ClientCommandType type{ClientCommandType::Hello};
     std::uint32_t speed{};
     std::uint64_t entity_id{};
+    ViewModelKind view_model_kind{ViewModelKind::PersonSummary};
 };
 
 [[nodiscard]] WorldSnapshotView build_world_snapshot(const SimulationController& controller);
@@ -109,7 +111,6 @@ struct ClientCommand {
 [[nodiscard]] std::string make_status_message(std::uint32_t protocol_version, std::uint64_t tick, bool paused, std::uint32_t speed);
 [[nodiscard]] std::string make_snapshot_message(std::uint32_t protocol_version, const WorldSnapshotView& snapshot, bool initial);
 [[nodiscard]] std::string make_delta_message(std::uint32_t protocol_version, const WorldDeltaView& delta);
-[[nodiscard]] std::string make_entity_details_message(std::uint32_t protocol_version, const SimulationController& controller, PersonId person_id);
 [[nodiscard]] std::string make_world_event_message(std::uint32_t protocol_version, const SimulationEvent& event);
 [[nodiscard]] std::string make_error_message(std::uint32_t protocol_version, std::string_view code, std::string_view message);
 

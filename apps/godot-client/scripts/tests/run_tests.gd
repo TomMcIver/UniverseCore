@@ -6,6 +6,36 @@ const UniverseClient := preload("res://scripts/net/universe_client.gd")
 const FakeSocket := preload("res://scripts/tests/fake_socket.gd")
 const InspectorPanel := preload("res://scripts/ui/inspector_panel.gd")
 const EventLog := preload("res://scripts/ui/event_log.gd")
+const SettlementEconomyPanel := preload("res://scripts/ui/settlement_economy_panel.gd")
+const PanelRegistryScript := preload("res://scripts/ui/panel_registry.gd")
+const PanelManifest := preload("res://scripts/ui/panel_manifest.gd")
+const HudPanel := preload("res://scripts/ui/hud.gd")
+
+class FakePanel extends "res://scripts/ui/ui_panel.gd":
+	var slot := "inspector"
+	var kinds := {}
+	var streams := PackedStringArray()
+	var shown: Array = []
+	var messages: Array = []
+	var results: Array = []
+
+	func panel_slot() -> String:
+		return slot
+
+	func view_model_kinds() -> Dictionary:
+		return kinds
+
+	func message_types() -> PackedStringArray:
+		return streams
+
+	func show_view_model(kind: String, entity_id: int, data: Dictionary) -> void:
+		shown.append([kind, entity_id, data])
+
+	func on_message(message_type: String, _message: Dictionary) -> void:
+		messages.append(message_type)
+
+	func show_command_result(succeeded: bool, action_name: String) -> void:
+		results.append([succeeded, action_name])
 const TerrainGenerator := preload("res://scripts/terrain_generator.gd")
 const DayNight := preload("res://scripts/world/day_night.gd")
 const NavmeshManager := preload("res://scripts/world/navmesh_manager.gd")
@@ -31,7 +61,7 @@ var _current_failed := false
 func _initialize() -> void:
 	_run_test("command_pause round-trips through encode/decode as type=pause", Callable(self, "_test_command_pause"))
 	_run_test("command_set_speed carries the speed field", Callable(self, "_test_command_set_speed"))
-	_run_test("command_request_entity_details carries entityId", Callable(self, "_test_command_entity_details"))
+	_run_test("command_request_view_model carries kind and entityId", Callable(self, "_test_command_request_view_model"))
 	_run_test("message_type/message_payload extract envelope fields correctly", Callable(self, "_test_message_accessors"))
 	_run_test("position_from reads x/y/z with a safe zero-vector default", Callable(self, "_test_position_from"))
 	_run_test("world_view spawns one node per agent/settlement/building", Callable(self, "_test_world_view_spawns"))
@@ -45,10 +75,20 @@ func _initialize() -> void:
 	_run_test("client reconnects after the retry interval elapses while closed", Callable(self, "_test_client_reconnects_after_interval"))
 	_run_test("client emits disconnected exactly once when the connection drops", Callable(self, "_test_client_emits_disconnected_once"))
 	_run_test("world_view spawns agents/buildings as pickable areas with entity metadata", Callable(self, "_test_world_view_pickable_metadata"))
-	_run_test("world_view exposes raw building data for the inspector (no server round trip)", Callable(self, "_test_world_view_building_data"))
-	_run_test("inspector panel formats agent details", Callable(self, "_test_inspector_agent_details"))
-	_run_test("inspector panel formats building details", Callable(self, "_test_inspector_building_details"))
-	_run_test("event log appends and counts entries", Callable(self, "_test_event_log_append"))
+	_run_test("world_view exposes raw building data (no server round trip)", Callable(self, "_test_world_view_building_data"))
+	_run_test("world_view makes settlement markers pickable", Callable(self, "_test_world_view_settlement_pickable"))
+	_run_test("inspector panel renders a person_summary view model", Callable(self, "_test_inspector_person_summary"))
+	_run_test("inspector panel renders a building_summary view model", Callable(self, "_test_inspector_building_summary"))
+	_run_test("economy panel renders a settlement_economy view model", Callable(self, "_test_economy_panel_renders"))
+	_run_test("event log panel appends world_event messages", Callable(self, "_test_event_log_append"))
+	_run_test("registry places panels in their declared slots", Callable(self, "_test_registry_slots"))
+	_run_test("registry selection requests only kinds for the selected entity type", Callable(self, "_test_registry_selection_requests"))
+	_run_test("registry routes a view_model only to matching kind and current selection", Callable(self, "_test_registry_routes_view_model"))
+	_run_test("registry drops view models with an unsupported version", Callable(self, "_test_registry_drops_unsupported_version"))
+	_run_test("registry routes stream messages by declared message type", Callable(self, "_test_registry_routes_stream_messages"))
+	_run_test("registry sends panel actions and reports the result back", Callable(self, "_test_registry_panel_actions"))
+	_run_test("registry refreshes the selection after new world state", Callable(self, "_test_registry_refreshes_selection"))
+	_run_test("manifest registers every standard panel without main.gd", Callable(self, "_test_manifest_registers_panels"))
 	_run_test("terrain finds the nearest region center for a world point", Callable(self, "_test_terrain_nearest_region_id"))
 	_run_test("terrain samples height via bilinear interpolation matching the mesh surface", Callable(self, "_test_terrain_height_bilinear_interpolation"))
 	_run_test("terrain derives region centers from settlement positions", Callable(self, "_test_terrain_region_centers_from_settlements"))
@@ -216,8 +256,11 @@ func _test_command_pause() -> void:
 func _test_command_set_speed() -> void:
 	_assert_eq(UniverseProtocol.command_set_speed(4).get("speed"), 4)
 
-func _test_command_entity_details() -> void:
-	_assert_eq(UniverseProtocol.command_request_entity_details(7).get("entityId"), 7)
+func _test_command_request_view_model() -> void:
+	var command := UniverseProtocol.command_request_view_model("person_summary", 7)
+	_assert_eq(command.get("type"), "request_view_model")
+	_assert_eq(command.get("kind"), "person_summary")
+	_assert_eq(command.get("entityId"), 7)
 
 func _test_message_accessors() -> void:
 	var msg := {"type": "initial_snapshot", "payload": {"population": 200}}
@@ -366,44 +409,183 @@ func _test_world_view_building_data() -> void:
 	_assert_eq(view.building_data(404), {})
 	view.queue_free()
 
-func _test_inspector_agent_details() -> void:
+func _test_world_view_settlement_pickable() -> void:
+	var view := WorldView.new()
+	root.add_child(view)
+	view.apply_snapshot({"agents": [], "settlements": [{"id": 4, "position": {}}], "buildings": []})
+	var area: Area3D = view.get_child(0)
+	_assert_eq(area.get_meta("entity_type"), "settlement")
+	_assert_eq(int(area.get_meta("entity_id")), 4)
+	view.queue_free()
+
+func _test_inspector_person_summary() -> void:
 	var inspector := InspectorPanel.new()
 	root.add_child(inspector)
-	inspector.show_agent_details({
-		"id": 1, "age": 34, "sex": "Female", "occupation": "SubsistenceCultivator",
+	inspector.show_view_model("person_summary", 1, {
+		"age": 34, "sex": "Female", "occupation": "SubsistenceCultivator", "currentActivity": "Work",
 		"alive": true, "householdId": 1, "settlementId": 4, "regionId": 2,
-		"nutrition": 820, "health": 877, "memoryCount": 0, "knowledgeCount": 0,
-		"family": {"motherId": 0, "fatherId": 0},
-		"settlement": {"active": true, "accessSharePoints": 4082},
+		"nutrition": 820, "health": 877, "memoryCount": 3, "knowledgeCount": 1,
+		"motherId": null, "fatherId": 12,
 	})
 	var text: String = inspector._content.text
-	_assert_eq(text.find("ID: 1") >= 0, true, "expected ID line")
+	_assert_eq(inspector._title.text, "Villager 1")
 	_assert_eq(text.find("Age: 34") >= 0, true, "expected Age line")
-	_assert_eq(text.find("Mother: Unavailable") >= 0, true, "zero mother id should read Unavailable")
+	_assert_eq(text.find("Doing now: Work") >= 0, true, "expected current activity")
+	_assert_eq(text.find("Mother: Unknown") >= 0, true, "null mother reads Unknown")
+	_assert_eq(text.find("Father: 12") >= 0, true, "expected father id")
 	inspector.queue_free()
 
-func _test_inspector_building_details() -> void:
+func _test_inspector_building_summary() -> void:
 	var inspector := InspectorPanel.new()
 	root.add_child(inspector)
-	inspector.show_building_details({
-		"id": 9, "type": "Granary", "state": "Complete", "progress": 1.0,
-		"settlementId": 4, "regionId": 2, "settlementCommonsOwned": true, "ownerHouseholdId": 0,
+	inspector.show_view_model("building_summary", 9, {
+		"buildingType": "FoodStore", "constructionState": "ActiveConstruction", "settlementId": 4,
+		"ownerHouseholdId": null, "labour": {"required": 200, "completed": 50},
+		"timber": {"required": 10, "committed": 10}, "stone": {"required": 4, "committed": 1},
 	})
 	var text: String = inspector._content.text
-	_assert_eq(text.find("Type: Granary") >= 0, true, "expected Type line")
-	_assert_eq(text.find("Progress: 100%") >= 0, true, "expected Progress line")
-	_assert_eq(text.find("Owner household: None") >= 0, true, "zero owner id should read None")
+	_assert_eq(text.find("Type: FoodStore") >= 0, true, "expected Type line")
+	_assert_eq(text.find("Labour: 25%") >= 0, true, "expected labour progress")
+	_assert_eq(text.find("Stone: 1 / 4") >= 0, true, "expected stone progress")
+	_assert_eq(text.find("Owner household: Commons") >= 0, true, "null owner reads Commons")
 	inspector.queue_free()
+
+func _test_economy_panel_renders() -> void:
+	var panel := SettlementEconomyPanel.new()
+	root.add_child(panel)
+	panel.show_view_model("settlement_economy", 3, {
+		"active": true, "tier": "Town", "alivePopulation": 180, "households": 30,
+		"food": {"producedTotal": 9000, "consumedTotal": 8000, "unmetTotal": 12, "householdStored": 500, "commonsStored": 40, "accessibleCapacityPerDay": 2500},
+		"jobs": {"SubsistenceCultivator": 40, "CraftWorker": 5, "Unallocated": 2},
+		"wealth": {"min": 1, "median": 10, "max": 90, "inequalityPer10k": 3500},
+	})
+	var text: String = panel._content.text
+	_assert_eq(panel._title.text, "Town 3")
+	_assert_eq(text.find("Food produced: 9000  eaten: 8000") >= 0, true, "expected food line")
+	_assert_eq(text.find("Farmers: 40") >= 0, true, "expected job line")
+	_assert_eq(text.find("Quarriers: 0") >= 0, true, "missing job reads zero")
+	_assert_eq(text.find("Inequality: 0.35") >= 0, true, "expected inequality")
+	panel.queue_free()
 
 func _test_event_log_append() -> void:
 	var log := EventLog.new()
 	root.add_child(log)
 	_assert_eq(log.entry_count(), 0)
-	log.append_event({"eventType": "Birth", "entityId": 42})
+	log.on_message("world_event", {"type": "world_event", "payload": {"eventType": "Birth", "entityId": 42}})
 	_assert_eq(log.entry_count(), 1)
-	log.append_event({"eventType": "SettlementFounded"})
+	log.on_message("world_event", {"type": "world_event", "payload": {"eventType": "SettlementFounded"}})
 	_assert_eq(log.entry_count(), 2)
 	log.queue_free()
+
+func _make_registry(sent: Array):
+	var registry = PanelRegistryScript.new()
+	root.add_child(registry)
+	registry.set_command_sink(func(command: Dictionary) -> bool:
+		sent.append(command)
+		return true)
+	return registry
+
+func _fake_panel(slot: String, kinds: Dictionary, streams: PackedStringArray = PackedStringArray()) -> FakePanel:
+	var panel := FakePanel.new()
+	panel.slot = slot
+	panel.kinds = kinds
+	panel.streams = streams
+	return panel
+
+func _test_registry_slots() -> void:
+	var registry = _make_registry([])
+	var top := _fake_panel("top_bar", {})
+	var inspector := _fake_panel("inspector", {})
+	var bogus := _fake_panel("nowhere", {})
+	registry.register(top)
+	registry.register(inspector)
+	registry.register(bogus)
+	_assert_eq(registry.slot_of(top), "top_bar")
+	_assert_eq(registry.slot_of(inspector), "inspector")
+	_assert_eq(registry.panels().size(), 2, "a panel with an unknown slot is rejected")
+	bogus.free()
+	registry.queue_free()
+
+func _test_registry_selection_requests() -> void:
+	var sent: Array = []
+	var registry = _make_registry(sent)
+	registry.register(_fake_panel("inspector", {"person_summary": PackedStringArray(["agent"])}))
+	registry.register(_fake_panel("inspector", {"settlement_economy": PackedStringArray(["settlement"])}))
+	registry.select("agent", 7)
+	_assert_eq(sent.size(), 1)
+	_assert_eq(sent[0], UniverseProtocol.command_request_view_model("person_summary", 7))
+	registry.queue_free()
+
+func _test_registry_routes_view_model() -> void:
+	var registry = _make_registry([])
+	var person_panel := _fake_panel("inspector", {"person_summary": PackedStringArray(["agent"])})
+	var economy_panel := _fake_panel("inspector", {"settlement_economy": PackedStringArray(["settlement"])})
+	registry.register(person_panel)
+	registry.register(economy_panel)
+	registry.select("agent", 7)
+	registry.route_message({"type": "view_model", "payload": {"kind": "person_summary", "entityId": 8, "version": 1, "data": {}}})
+	_assert_eq(person_panel.shown.size(), 0, "a stale entity is dropped")
+	registry.route_message({"type": "view_model", "payload": {"kind": "person_summary", "entityId": 7, "version": 1, "data": {"age": 3}}})
+	_assert_eq(person_panel.shown.size(), 1)
+	_assert_eq(person_panel.shown[0][2].get("age"), 3)
+	_assert_eq(economy_panel.shown.size(), 0, "other kinds are not delivered")
+	registry.queue_free()
+
+func _test_registry_drops_unsupported_version() -> void:
+	var registry = _make_registry([])
+	var panel := _fake_panel("inspector", {"person_summary": PackedStringArray(["agent"])})
+	registry.register(panel)
+	registry.select("agent", 7)
+	registry.route_message({"type": "view_model", "payload": {"kind": "person_summary", "entityId": 7, "version": 2, "data": {}}})
+	_assert_eq(panel.shown.size(), 0)
+	registry.queue_free()
+
+func _test_registry_routes_stream_messages() -> void:
+	var registry = _make_registry([])
+	var log_panel := _fake_panel("timeline", {}, PackedStringArray(["world_event"]))
+	var other := _fake_panel("inspector", {})
+	registry.register(log_panel)
+	registry.register(other)
+	registry.route_message({"type": "world_event", "payload": {}})
+	_assert_eq(log_panel.messages, ["world_event"])
+	_assert_eq(other.messages, [])
+	registry.queue_free()
+
+func _test_registry_panel_actions() -> void:
+	var sent: Array = []
+	var registry = _make_registry(sent)
+	var hud = HudPanel.new()
+	registry.register(hud)
+	hud.action_requested.emit("pause", UniverseProtocol.command_pause())
+	_assert_eq(sent, [UniverseProtocol.command_pause()])
+	_assert_eq(hud._feedback_label.text, "")
+	hud.action_requested.emit("self_destruct", {"type": "nope"})
+	_assert_eq(sent.size(), 1, "undeclared actions are not sent")
+	registry.set_command_sink(func(_command: Dictionary) -> bool: return false)
+	hud.action_requested.emit("resume", UniverseProtocol.command_resume())
+	_assert_eq(hud._feedback_label.text, "resume failed -- not connected")
+	registry.queue_free()
+
+func _test_registry_refreshes_selection() -> void:
+	var sent: Array = []
+	var registry = _make_registry(sent)
+	registry.register(_fake_panel("inspector", {"building_summary": PackedStringArray(["building"])}))
+	registry.select("building", 9)
+	registry.route_message({"type": "world_delta", "payload": {}})
+	_assert_eq(sent.size(), 2)
+	_assert_eq(sent[1], UniverseProtocol.command_request_view_model("building_summary", 9))
+	registry.route_message({"type": "simulation_status", "payload": {}})
+	_assert_eq(sent.size(), 2, "status messages do not trigger a refresh")
+	registry.queue_free()
+
+func _test_manifest_registers_panels() -> void:
+	var registry = _make_registry([])
+	PanelManifest.register_all(registry)
+	var slots := {}
+	for panel in registry.panels():
+		slots[panel.name] = registry.slot_of(panel)
+	_assert_eq(slots, {"Hud": "top_bar", "Inspector": "inspector", "SettlementEconomy": "inspector", "EventLog": "timeline"})
+	registry.queue_free()
 
 func _test_terrain_nearest_region_id() -> void:
 	var terrain := TerrainGenerator.new()
