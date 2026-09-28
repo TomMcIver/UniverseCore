@@ -16,6 +16,7 @@ const DayNight := preload("res://scripts/world/day_night.gd")
 const NavmeshManagerScript := preload("res://scripts/world/navmesh_manager.gd")
 const VillageDressingScript := preload("res://scripts/world/village_dressing.gd")
 const VegetationScatterScript := preload("res://scripts/world/vegetation_scatter.gd")
+const GroundViewScript := preload("res://scripts/ground/ground_view.gd")
 
 var _client: Node
 var _world_view: Node3D
@@ -23,6 +24,7 @@ var _panels: Control
 var _terrain: Node3D
 var _dressing: Node3D
 var _vegetation: Node3D
+var _ground_view: Node3D
 var _sun: DirectionalLight3D
 var _world_environment: WorldEnvironment
 var _sky_material: ProceduralSkyMaterial
@@ -72,6 +74,11 @@ func _ready() -> void:
 	add_child(_panels)
 	_panels.set_command_sink(Callable(_client, "send_command"))
 	PanelManifest.register_all(_panels)
+
+	_ground_view = GroundViewScript.new()
+	_ground_view.setup(_camera, _terrain, _world_view, func(entity_type: String, entity_id: int) -> void:
+		_panels.select(entity_type, entity_id))
+	add_child(_ground_view)
 
 	_client.connect_to_bridge()
 

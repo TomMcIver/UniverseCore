@@ -127,6 +127,15 @@ func building_count() -> int:
 func building_data(id: int) -> Dictionary:
 	return _building_data.get(id, {})
 
+func agent_ids() -> Array:
+	return _agent_nodes.keys()
+
+func agent_node(id: int) -> Node3D:
+	return _agent_nodes.get(id)
+
+func agent_label(id: int) -> Label3D:
+	return _agent_labels.get(id)
+
 func _clear_all() -> void:
 	# free(), not queue_free(): this is a full-replace on every snapshot, so
 	# the old nodes must be gone from the tree immediately, not on the next
