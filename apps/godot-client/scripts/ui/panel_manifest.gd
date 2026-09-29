@@ -8,6 +8,8 @@ const PANEL_SCRIPTS := [
 	preload("res://scripts/ui/inspector_panel.gd"),
 	preload("res://scripts/ui/settlement_economy_panel.gd"),
 	preload("res://scripts/ui/event_log.gd"),
+	preload("res://scripts/ui/life_history_panel.gd"),
+	preload("res://scripts/ui/demo_focus_marker.gd"),
 ]
 
 static func register_all(registry) -> void:

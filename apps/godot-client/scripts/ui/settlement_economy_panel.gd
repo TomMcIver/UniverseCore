@@ -33,10 +33,14 @@ func _init() -> void:
 func view_model_kinds() -> Dictionary:
 	return {"settlement_economy": PackedStringArray(["settlement"])}
 
+func supported_version(_kind: String) -> int:
+	return 2
+
 func show_view_model(_kind: String, entity_id: int, data: Dictionary) -> void:
 	var food: Dictionary = data.get("food", {})
 	var jobs: Dictionary = data.get("jobs", {})
 	var wealth: Dictionary = data.get("wealth", {})
+	var buildings: Dictionary = data.get("buildings", {})
 
 	_title.text = "%s %d%s" % [str(data.get("tier", "Settlement")), entity_id, "" if data.get("active", false) else " (abandoned)"]
 
@@ -53,4 +57,6 @@ func show_view_model(_kind: String, entity_id: int, data: Dictionary) -> void:
 	lines.append("Household wealth: %d / %d / %d (min/median/max)" % [
 		int(wealth.get("min", 0)), int(wealth.get("median", 0)), int(wealth.get("max", 0))])
 	lines.append("Inequality: %.2f" % (float(wealth.get("inequalityPer10k", 0)) / 10000.0))
+	lines.append("Buildings: %d complete, %d building, %d planned" % [
+		int(buildings.get("complete", 0)), int(buildings.get("underConstruction", 0)), int(buildings.get("planned", 0))])
 	_content.text = "\n".join(lines)

@@ -10,6 +10,8 @@ const SettlementEconomyPanel := preload("res://scripts/ui/settlement_economy_pan
 const PanelRegistryScript := preload("res://scripts/ui/panel_registry.gd")
 const PanelManifest := preload("res://scripts/ui/panel_manifest.gd")
 const HudPanel := preload("res://scripts/ui/hud.gd")
+const LifeHistoryPanel := preload("res://scripts/ui/life_history_panel.gd")
+const DemoFocusMarker := preload("res://scripts/ui/demo_focus_marker.gd")
 
 class FakePanel extends "res://scripts/ui/ui_panel.gd":
 	var slot := "inspector"
@@ -80,6 +82,13 @@ func _initialize() -> void:
 	_run_test("inspector panel renders a building_summary view model", Callable(self, "_test_inspector_building_summary"))
 	_run_test("economy panel renders a settlement_economy view model", Callable(self, "_test_economy_panel_renders"))
 	_run_test("event log panel appends world_event messages", Callable(self, "_test_event_log_append"))
+	_run_test("event log panel prefers the summary field over the bare event type", Callable(self, "_test_event_log_uses_summary"))
+	_run_test("life history panel renders entries oldest first and hides until selected", Callable(self, "_test_life_history_panel_renders"))
+	_run_test("demo focus marker asks the world to highlight the focused villager", Callable(self, "_test_demo_focus_marker_highlights"))
+	_run_test("demo focus marker clears the highlight when there is no focus", Callable(self, "_test_demo_focus_marker_clears"))
+	_run_test("hud jump button requests run_until_year from the current year", Callable(self, "_test_hud_jump_button"))
+	_run_test("command_run_until_year carries the target year", Callable(self, "_test_command_run_until_year"))
+	_run_test("world_view marks and unmarks a highlighted agent", Callable(self, "_test_world_view_highlight_marker"))
 	_run_test("registry places panels in their declared slots", Callable(self, "_test_registry_slots"))
 	_run_test("registry selection requests only kinds for the selected entity type", Callable(self, "_test_registry_selection_requests"))
 	_run_test("registry routes a view_model only to matching kind and current selection", Callable(self, "_test_registry_routes_view_model"))
@@ -469,6 +478,77 @@ func _test_event_log_append() -> void:
 	_assert_eq(log.entry_count(), 2)
 	log.queue_free()
 
+func _test_event_log_uses_summary() -> void:
+	var log := EventLog.new()
+	root.add_child(log)
+	log.on_message("world_event", {"type": "world_event", "payload": {"eventType": "Birth", "entityId": 42, "summary": "Villager 42 was born to Villager 7"}})
+	var label: Label = log._list.get_child(0)
+	_assert_eq(label.text, "Villager 42 was born to Villager 7")
+	log.queue_free()
+
+func _test_life_history_panel_renders() -> void:
+	var panel := LifeHistoryPanel.new()
+	root.add_child(panel)
+	_assert_eq(panel.visible, false, "hidden until a villager is selected")
+	panel.show_view_model("person_life_history", 12, {
+		"alive": true, "omittedEntries": 1,
+		"entries": [
+			{"atTicks": 0, "kind": "Born", "sourceId": 1, "otherPersonId": 3, "text": "Born to Villager 3"},
+			{"atTicks": 100, "kind": "OccupationChanged", "sourceId": 2, "otherPersonId": null, "text": "Changed job: no job to farmer"},
+		],
+	})
+	_assert_eq(panel.visible, true)
+	_assert_eq(panel._title.text, "Villager 12")
+	var text: String = panel._content.text
+	_assert_eq(text.find("(1 earlier entries not shown)") >= 0, true, "expected omitted-entries notice")
+	_assert_eq(text.find("Born to Villager 3") < text.find("Changed job"), true, "expected oldest-first order")
+	panel.queue_free()
+
+func _test_demo_focus_marker_highlights() -> void:
+	var marker := DemoFocusMarker.new()
+	root.add_child(marker)
+	var received: Array = []
+	marker.world_highlight_requested.connect(func(entity_type: String, entity_id: int) -> void: received.append([entity_type, entity_id]))
+	marker.show_view_model("demo_focus", 1, {"settlementId": 1, "personId": 9, "lifeEventCount": 4})
+	_assert_eq(received, [["agent", 9]])
+	marker.queue_free()
+
+func _test_demo_focus_marker_clears() -> void:
+	var marker := DemoFocusMarker.new()
+	root.add_child(marker)
+	var received: Array = []
+	marker.world_highlight_requested.connect(func(entity_type: String, entity_id: int) -> void: received.append([entity_type, entity_id]))
+	marker.show_view_model("demo_focus", 1, {"settlementId": 1, "personId": null, "lifeEventCount": 0})
+	_assert_eq(received, [["agent", 0]])
+	marker.queue_free()
+
+func _test_hud_jump_button() -> void:
+	var hud := HudPanel.new()
+	root.add_child(hud)
+	hud.on_message("initial_snapshot", {"type": "initial_snapshot", "payload": {"year": 5, "population": 100}})
+	var sent: Array = []
+	hud.action_requested.connect(func(action_name: String, command: Dictionary) -> void: sent.append([action_name, command]))
+	hud.request_jump()
+	_assert_eq(sent, [["run_until_year", UniverseProtocol.command_run_until_year(5 + HudPanel.JUMP_YEARS)]])
+	hud.queue_free()
+
+func _test_command_run_until_year() -> void:
+	_assert_eq(UniverseProtocol.command_run_until_year(20), {"type": "run_until_year", "year": 20})
+
+func _test_world_view_highlight_marker() -> void:
+	var view := WorldView.new()
+	root.add_child(view)
+	view.apply_snapshot({
+		"agents": [{"id": 5, "sex": "Female", "position": {"x": 0, "y": 0, "z": 0}}],
+		"settlements": [], "buildings": [],
+	})
+	view.set_highlighted_entity("agent", 5)
+	var node: Node3D = view._agent_nodes[5]
+	_assert_eq(node.get_node_or_null("Highlight") != null, true, "expected a highlight marker on the focused agent")
+	view.set_highlighted_entity("agent", 0)
+	_assert_eq(node.get_node_or_null("Highlight") != null, false, "highlight must be removed when cleared")
+	view.queue_free()
+
 func _make_registry(sent: Array):
 	var registry = PanelRegistryScript.new()
 	root.add_child(registry)
@@ -576,7 +656,10 @@ func _test_manifest_registers_panels() -> void:
 	var slots := {}
 	for panel in registry.panels():
 		slots[panel.name] = registry.slot_of(panel)
-	_assert_eq(slots, {"Hud": "top_bar", "Inspector": "inspector", "SettlementEconomy": "inspector", "EventLog": "timeline"})
+	_assert_eq(slots, {
+		"Hud": "top_bar", "Inspector": "inspector", "SettlementEconomy": "inspector", "EventLog": "timeline",
+		"LifeHistory": "modal", "DemoFocusMarker": "timeline",
+	})
 	registry.queue_free()
 
 func _test_world_view_agent_renders_at_real_position_on_spawn() -> void:

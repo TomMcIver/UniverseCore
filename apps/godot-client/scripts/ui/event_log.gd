@@ -25,11 +25,13 @@ func message_types() -> PackedStringArray:
 
 func on_message(_message_type: String, message: Dictionary) -> void:
 	var payload := UniverseProtocol.message_payload(message)
-	var event_type := str(payload.get("eventType", "Unknown"))
-	var entity_id := int(payload.get("entityId", 0))
+	var summary := str(payload.get("summary", ""))
+	if summary == "":
+		summary = str(payload.get("eventType", "Unknown"))
 
 	var label := Label.new()
-	label.text = "%s -- entity %d" % [event_type, entity_id] if entity_id > 0 else event_type
+	label.text = summary
+	label.autowrap_mode = TextServer.AUTOWRAP_WORD
 	_list.add_child(label)
 	_list.move_child(label, 0)
 
