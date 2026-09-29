@@ -311,6 +311,10 @@ constexpr std::int64_t kFoodStoreLabourRequired = 680;
 constexpr std::int64_t kWorkshopTimberRequired = 18;
 constexpr std::int64_t kWorkshopStoneRequired = 20;
 constexpr std::int64_t kWorkshopLabourRequired = 620;
+// Construction runs once per demographic year, so its labour budget is annual:
+// idle workers' daily capacity plus this share of employed workers' daily
+// capacity (seasonal slack outside the daily food model), times days per year.
+constexpr std::int64_t kConstructionSeasonalLabourSharePer10k = 50;
 constexpr std::int64_t kDwellingCapacityBonusPerBuilding = 18;
 constexpr std::int64_t kFoodStoreCapacityBonusPerBuilding = 32;
 constexpr std::int64_t kWorkshopCapacityBonusPerBuilding = 14;
@@ -2237,6 +2241,7 @@ void Simulation::process_demography_period(const std::uint64_t demographic_year)
     process_household_access_allocation();
     refresh_population_count();
     refresh_food_aggregates();
+    refresh_environment_aggregates();
     refresh_labour_aggregates();
     refresh_material_aggregates();
     refresh_economic_aggregates();
@@ -7850,6 +7855,67 @@ void Simulation::process_local_exchange(const std::uint64_t demographic_year) {
     }
 }
 
+// Builders source their own shortfall before building: they hew timber from
+// the settlement's wood stock and quarry stone from the region, bounded by the
+// settlement's regional access share. Returns the labour spent.
+std::int64_t Simulation::source_construction_materials(
+    Settlement& settlement,
+    const std::int64_t timber_shortfall,
+    const std::int64_t stone_shortfall,
+    const std::int64_t labour_budget) {
+    auto labour_remaining = std::max<std::int64_t>(0, labour_budget);
+    auto* region = find_region_mutable(settlement.region_id);
+
+    auto regional_share = [&](const std::int64_t regional_stock) {
+        return (std::max<std::int64_t>(0, regional_stock) * static_cast<std::int64_t>(settlement.access_share_points)) /
+            kSettlementMaterialShareScale;
+    };
+
+    const auto wood_needed_for_timber =
+        timber_shortfall * std::max<std::int64_t>(1, material_parameters_.wood_per_timber) -
+        std::max<std::int64_t>(0, settlement.materials.wood.value);
+    if (region != nullptr && wood_needed_for_timber > 0) {
+        const auto wood_felled = safe_min3_i64(wood_needed_for_timber, regional_share(region->wood_stock), labour_remaining);
+        if (wood_felled > 0) {
+            if (!checked_sub_nonnegative_i64(region->wood_stock, wood_felled, region->wood_stock)) {
+                throw std::overflow_error("Construction felling exceeded region wood");
+            }
+            region->cumulative_wood_harvested += wood_felled;
+            settlement.cumulative_wood_extracted += wood_felled;
+            settlement.materials.wood.value += wood_felled;
+            labour_remaining -= wood_felled;
+        }
+    }
+
+    const auto labour_per_timber = std::max<std::int64_t>(1, material_parameters_.craft_labour_per_timber);
+    const auto wood_per_timber = std::max<std::int64_t>(1, material_parameters_.wood_per_timber);
+    const auto timber_made = safe_min3_i64(
+        timber_shortfall,
+        std::max<std::int64_t>(0, settlement.materials.wood.value) / wood_per_timber,
+        labour_remaining / labour_per_timber);
+    if (timber_made > 0) {
+        settlement.materials.wood.value -= timber_made * wood_per_timber;
+        settlement.materials.timber.value += timber_made;
+        settlement.cumulative_timber_produced += timber_made;
+        labour_remaining -= timber_made * labour_per_timber;
+    }
+
+    if (region != nullptr && stone_shortfall > 0) {
+        const auto stone_quarried = safe_min3_i64(stone_shortfall, regional_share(region->stone_remaining), labour_remaining);
+        if (stone_quarried > 0) {
+            if (!checked_sub_nonnegative_i64(region->stone_remaining, stone_quarried, region->stone_remaining)) {
+                throw std::overflow_error("Construction quarrying exceeded region stone");
+            }
+            region->cumulative_stone_extracted += stone_quarried;
+            settlement.cumulative_stone_extracted += stone_quarried;
+            settlement.materials.stone.value += stone_quarried;
+            labour_remaining -= stone_quarried;
+        }
+    }
+
+    return std::max<std::int64_t>(0, labour_budget) - labour_remaining;
+}
+
 void Simulation::process_construction(const std::uint64_t demographic_year) {
     (void)demographic_year;
 
@@ -7933,6 +7999,7 @@ void Simulation::process_construction(const std::uint64_t demographic_year) {
         std::int64_t required_food = 0;
         std::int64_t stored_food = std::max<std::int64_t>(0, settlement.commons_food.value);
         std::int64_t unallocated_labour_capacity = 0;
+        std::int64_t allocated_labour_capacity = 0;
         for (const auto& household : state_.households) {
             if (household.settlement_id != settlement.id) {
                 continue;
@@ -7952,12 +8019,13 @@ void Simulation::process_construction(const std::uint64_t demographic_year) {
                 if (!checked_add_i64(required_food, food_requirement_for_person(person), required_food)) {
                     throw std::overflow_error("Construction required food aggregation overflow");
                 }
-                if (!occupation_eligible_for_productive_work(person) || person.occupation != Occupation::None) {
+                if (!occupation_eligible_for_productive_work(person)) {
                     continue;
                 }
 
-                if (!checked_add_i64(unallocated_labour_capacity, productive_effort_for_person(person), unallocated_labour_capacity)) {
-                    throw std::overflow_error("Construction unallocated labour overflow");
+                auto& labour_pool = person.occupation == Occupation::None ? unallocated_labour_capacity : allocated_labour_capacity;
+                if (!checked_add_i64(labour_pool, productive_effort_for_person(person), labour_pool)) {
+                    throw std::overflow_error("Construction labour capacity overflow");
                 }
             }
         }
@@ -8002,7 +8070,21 @@ void Simulation::process_construction(const std::uint64_t demographic_year) {
 
         std::sort(settlement_buildings.begin(), settlement_buildings.end());
 
-        auto labour_budget = subsistence_constrained ? 0 : std::max<std::int64_t>(0, unallocated_labour_capacity);
+        std::int64_t labour_budget = 0;
+        if (!subsistence_constrained) {
+            const auto seasonal_share =
+                (std::max<std::int64_t>(0, allocated_labour_capacity) * kConstructionSeasonalLabourSharePer10k) / 10'000;
+            std::int64_t daily_budget = 0;
+            if (!checked_add_i64(std::max<std::int64_t>(0, unallocated_labour_capacity), seasonal_share, daily_budget) ||
+                !checked_mul_i64(daily_budget, DemographicCalendarAdapter::kDaysPerYear, labour_budget)) {
+                throw std::overflow_error("Construction annual labour budget overflow");
+            }
+
+            const auto demand = construction_demand_for_settlement(settlement.id, state_.buildings);
+            const auto timber_shortfall = std::max<std::int64_t>(0, demand.timber_remaining - settlement.materials.timber.value);
+            const auto stone_shortfall = std::max<std::int64_t>(0, demand.stone_remaining - settlement.materials.stone.value);
+            labour_budget -= source_construction_materials(settlement, timber_shortfall, stone_shortfall, labour_budget);
+        }
         for (const auto building_id : settlement_buildings) {
             auto* building = find_building_mutable(building_id);
             if (building == nullptr) {

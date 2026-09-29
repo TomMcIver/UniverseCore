@@ -13,6 +13,28 @@ const HudPanel := preload("res://scripts/ui/hud.gd")
 const LifeHistoryPanel := preload("res://scripts/ui/life_history_panel.gd")
 const DemoFocusMarker := preload("res://scripts/ui/demo_focus_marker.gd")
 
+## GDScript runtime errors can abort a test's Callable without changing the
+## process exit code. Count them so an interrupted test cannot report a pass.
+class ScriptErrorLogger extends Logger:
+	var _count := 0
+	var _mutex := Mutex.new()
+
+	func _log_error(_function: String, _file: String, _line: int, _code: String, _rationale: String, _editor_notify: bool, error_type: int, _script_backtraces: Array[ScriptBacktrace]) -> void:
+		if error_type == Logger.ERROR_TYPE_SCRIPT:
+			_mutex.lock()
+			_count += 1
+			_mutex.unlock()
+
+	func error_count() -> int:
+		_mutex.lock()
+		var count := _count
+		_mutex.unlock()
+		return count
+
+class FakeVillageDressing extends Node3D:
+	func fields_in_region(_region_id: int) -> Array:
+		return [{"household_id": 17, "centre": Vector2(50.0, 5.0)}]
+
 class FakePanel extends "res://scripts/ui/ui_panel.gd":
 	var slot := "inspector"
 	var kinds := {}
@@ -53,13 +75,16 @@ const NavmeshManager := preload("res://scripts/world/navmesh_manager.gd")
 ## rather than silently deviating from the spec.
 ##
 ## Run with:
+##   Godot_v4.7.2-stable_win64_console.exe --headless --editor --import --path .
 ##   Godot_v4.7.2-stable_win64_console.exe --headless --path . --script res://scripts/tests/run_tests.gd
 
 var _failures := 0
 var _total := 0
 var _current_failed := false
+var _script_errors := ScriptErrorLogger.new()
 
 func _initialize() -> void:
+	OS.add_logger(_script_errors)
 	_run_test("command_pause round-trips through encode/decode as type=pause", Callable(self, "_test_command_pause"))
 	_run_test("command_set_speed carries the speed field", Callable(self, "_test_command_set_speed"))
 	_run_test("command_request_view_model carries kind and entityId", Callable(self, "_test_command_request_view_model"))
@@ -106,21 +131,24 @@ func _initialize() -> void:
 	await _run_async_test("navmesh bakes multiple regions independently", Callable(self, "_test_navmesh_multiple_regions_independent"))
 
 	_run_test("world_view renders a newly spawned agent at its real canonical position", Callable(self, "_test_world_view_agent_renders_at_real_position_on_spawn"))
-	_run_test("world_view walks an agent back to target after a Travel transition", Callable(self, "_test_world_view_agent_walks_back_to_target_after_travel_transition"))
-	_run_test("world_view near-player agent reaches its target without a real navmesh path", Callable(self, "_test_world_view_near_player_agent_reaches_target"))
-	_run_test("world_view halts agent movement while the simulation is paused", Callable(self, "_test_world_view_pause_halts_movement"))
-	_run_test("world_view scales movement progression with simulation speed", Callable(self, "_test_world_view_speed_scales_movement_progression"))
+	_run_test("world_view walks an agent to the server-given target on schedule", Callable(self, "_test_world_view_agent_walks_to_server_given_target_on_schedule"))
+	_run_test("world_view never walks a Home-kind agent", Callable(self, "_test_world_view_home_kind_agent_never_walks"))
+	_run_test("world_view snaps instead of walking above the high-speed threshold", Callable(self, "_test_world_view_high_speed_snaps_instead_of_walking"))
+	_run_test("world_view resolves a Field target from VillageDressing", Callable(self, "_test_world_view_field_target_resolved_from_village_dressing"))
 	_run_test("world_view updates an agent's activity label on a delta update", Callable(self, "_test_world_view_activity_label_updates_on_delta"))
 	_run_test("world_view preserves agent node identity across a delta upsert", Callable(self, "_test_world_view_upsert_preserves_node_identity"))
 
+	# Let queued test nodes leave the tree before shutting down the engine.
+	await process_frame
 	print("\n%d/%d tests passed" % [_total - _failures, _total])
-	quit(1 if _failures > 0 else 0)
+	quit(1 if _failures > 0 or _script_errors.error_count() > 0 else 0)
 
 func _run_async_test(name: String, fn: Callable) -> void:
 	_total += 1
 	_current_failed = false
+	var errors_before := _script_errors.error_count()
 	await fn.call()
-	if _current_failed:
+	if _current_failed or _script_errors.error_count() > errors_before:
 		_failures += 1
 		print("  [FAIL] %s" % name)
 	else:
@@ -238,8 +266,9 @@ func _test_navmesh_multiple_regions_independent() -> void:
 func _run_test(name: String, fn: Callable) -> void:
 	_total += 1
 	_current_failed = false
+	var errors_before := _script_errors.error_count()
 	fn.call()
-	if _current_failed:
+	if _current_failed or _script_errors.error_count() > errors_before:
 		_failures += 1
 		print("  [FAIL] %s" % name)
 	else:
@@ -663,162 +692,117 @@ func _test_manifest_registers_panels() -> void:
 	registry.queue_free()
 
 func _test_world_view_agent_renders_at_real_position_on_spawn() -> void:
-	# A brand new agent must render at its real canonical position
-	# immediately -- never an invented placement, even momentarily.
+	# A brand new Home-kind agent must render at its real canonical home
+	# position immediately -- never an invented placement, even momentarily.
 	var view := WorldView.new()
 	root.add_child(view)
 	view.apply_snapshot({
-		"agents": [{"id": 42, "sex": "Female", "position": {"x": 4.0, "y": 0.0, "z": -2.0}, "currentActivity": "Idle"}],
+		"agents": [{"id": 42, "sex": "Female", "position": {"x": 4.0, "y": 0.0, "z": -2.0}, "currentActivity": "Idle", "targetKind": "Home"}],
 		"settlements": [],
 		"buildings": [],
 	})
 	var node: Node3D = view.get_child(0)
-	var expected := Vector3(4.0, 0.0, -2.0) + view._household_spacing_offset_for_person(42)
-	_assert_eq(node.position, expected, "a newly spawned agent must render exactly at its real canonical position (plus its small deterministic household-spacing offset)")
+	var expected := Vector3(4.0, 0.0, -2.0) + Vector3(view._crowd_offset_for_person(42).x, 0.0, view._crowd_offset_for_person(42).y)
+	_assert_eq(node.position, expected, "a newly spawned Home-kind agent must render exactly at its real canonical home position (plus its small deterministic crowd offset)")
 	view.queue_free()
 
-func _test_world_view_agent_walks_back_to_target_after_travel_transition() -> void:
-	# Movement is a real response to a schedule transition, not a cosmetic
-	# join-time flourish: an agent transitioning into Travel briefly steps
-	# away from its canonical point, then a real navmesh-driven path walks
-	# it back -- proof of the bake -> gate -> pooled query -> arrival
-	# pipeline (per the map's decision that home and work are the same
-	# canonical point this slice).
+func _test_world_view_agent_walks_to_server_given_target_on_schedule() -> void:
+	# Route-based movement (ticket #56, ADR 0001): a working agent walks from
+	# home to the server-given target once its depart tick arrives, and is
+	# home again once its return tick plus travel time has passed -- no
+	# NavigationAgent3D, no client-invented path, no random spread.
 	var view := WorldView.new()
 	root.add_child(view)
 	view.apply_snapshot({
-		"agents": [{"id": 42, "sex": "Female", "position": {"x": 0.0, "y": 0.0, "z": 0.0}, "currentActivity": "Idle"}],
-		"settlements": [],
-		"buildings": [],
-	})
-	view.set_simulation_playback(false, 1)
-	var node: Node3D = view.get_child(0)
-	var canonical_target: Vector3 = view._household_spacing_offset_for_person(42)
-	_assert_eq(node.position, canonical_target, "agent should still be at its real position before any Travel transition")
-
-	view.apply_delta({
-		"addedAgents": [],
-		"updatedAgents": [{"id": 42, "sex": "Female", "position": {"x": 0.0, "y": 0.0, "z": 0.0}, "currentActivity": "Travel"}],
-		"removedAgentIds": [],
-		"addedSettlements": [], "updatedSettlements": [], "removedSettlementIds": [],
-		"addedBuildings": [], "updatedBuildings": [], "removedBuildingIds": [],
-	})
-	_assert_eq(node.position.distance_to(canonical_target) > 0.5, true, "a Travel transition should visibly step the agent away from its canonical point")
-
-	for i in range(200):
-		view._process(0.1)
-	_assert_eq(node.position.distance_to(canonical_target) < 0.05, true, "agent should have walked back to its canonical target once unpaused")
-	view.queue_free()
-
-func _test_world_view_near_player_agent_reaches_target() -> void:
-	# A real bug this test guards against: near-player movement originally
-	# only updated position inside NavigationAgent3D's velocity_computed
-	# signal callback, which only fires once the underlying navigation map
-	# finishes synchronizing -- if that never happens in time (observed
-	# directly against the live bridge), the agent stayed stuck forever.
-	# Movement must progress even when the navmesh has no real path data
-	# for this agent yet.
-	var camera := Camera3D.new()
-	root.add_child(camera)
-	camera.current = true
-	camera.global_position = Vector3.ZERO
-
-	var view := WorldView.new()
-	root.add_child(view)
-	view.apply_snapshot({
-		"agents": [{"id": 99, "sex": "Male", "position": {"x": 0.0, "y": 0.0, "z": 0.0}, "currentActivity": "Idle"}],
+		"agents": [{
+			"id": 42, "sex": "Female", "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+			"currentActivity": "Work", "targetKind": "Common",
+			"target": {"x": 20.0, "z": 0.0}, "departTick": 100, "returnDepartTick": 500,
+		}],
 		"settlements": [],
 		"buildings": [],
 	})
 	view.set_simulation_playback(false, 1)
 	var node: Node3D = view.get_child(0)
 
-	view.apply_delta({
-		"addedAgents": [],
-		"updatedAgents": [{"id": 99, "sex": "Male", "position": {"x": 0.0, "y": 0.0, "z": 0.0}, "currentActivity": "Travel"}],
-		"removedAgentIds": [],
-		"addedSettlements": [], "updatedSettlements": [], "removedSettlementIds": [],
-		"addedBuildings": [], "updatedBuildings": [], "removedBuildingIds": [],
-	})
-	_assert_eq(view._agent_movement.get(99, {}).get("mode", ""), "near", "an agent within NEAR_PLAYER_RADIUS of the camera must use near-player movement")
+	view.set_tick(0)
+	view._process(0.0)
+	var home_x := node.position.x
+	_assert_eq(absf(home_x) < 2.0, true, "before the depart tick, the agent must still be at home")
 
-	var canonical_target: Vector3 = view._household_spacing_offset_for_person(99)
-	for i in range(200):
-		view._process(0.1)
-	_assert_eq(node.position.distance_to(canonical_target) < 0.05, true, "a near-player agent must still reach its canonical target even without a real navmesh path")
-	camera.queue_free()
+	view.set_tick(500)
+	view._process(0.0)
+	_assert_eq(node.position.x > 15.0, true, "once at work, the agent must be at the server-given target, not a client-invented point")
+
+	view.set_tick(100000)
+	view._process(0.0)
+	_assert_eq(absf(node.position.x - home_x) < 2.0, true, "long after the return tick plus travel time, the agent must be home again")
 	view.queue_free()
 
-func _test_world_view_speed_scales_movement_progression() -> void:
-	# Ticket #40: changing the speed multiplier must visibly scale movement
-	# progression -- at 2x speed, the same number of ticks should cover
-	# roughly twice the distance as at 1x.
-	var view_1x := WorldView.new()
-	root.add_child(view_1x)
-	view_1x.apply_snapshot({
-		"agents": [{"id": 1, "sex": "Female", "position": {"x": 0.0, "y": 0.0, "z": 0.0}, "currentActivity": "Idle"}],
-		"settlements": [], "buildings": [],
-	})
-	view_1x.apply_delta({
-		"addedAgents": [],
-		"updatedAgents": [{"id": 1, "sex": "Female", "position": {"x": 0.0, "y": 0.0, "z": 0.0}, "currentActivity": "Travel"}],
-		"removedAgentIds": [],
-		"addedSettlements": [], "updatedSettlements": [], "removedSettlementIds": [],
-		"addedBuildings": [], "updatedBuildings": [], "removedBuildingIds": [],
-	})
-	var node_1x: Node3D = view_1x.get_child(0)
-	var start_1x := node_1x.position
-	view_1x.set_simulation_playback(false, 1)
-	for i in range(5):
-		view_1x._process(0.1)
-	var distance_1x := start_1x.distance_to(node_1x.position)
-
-	var view_2x := WorldView.new()
-	root.add_child(view_2x)
-	view_2x.apply_snapshot({
-		"agents": [{"id": 1, "sex": "Female", "position": {"x": 0.0, "y": 0.0, "z": 0.0}, "currentActivity": "Idle"}],
-		"settlements": [], "buildings": [],
-	})
-	view_2x.apply_delta({
-		"addedAgents": [],
-		"updatedAgents": [{"id": 1, "sex": "Female", "position": {"x": 0.0, "y": 0.0, "z": 0.0}, "currentActivity": "Travel"}],
-		"removedAgentIds": [],
-		"addedSettlements": [], "updatedSettlements": [], "removedSettlementIds": [],
-		"addedBuildings": [], "updatedBuildings": [], "removedBuildingIds": [],
-	})
-	var node_2x: Node3D = view_2x.get_child(0)
-	var start_2x := node_2x.position
-	view_2x.set_simulation_playback(false, 2)
-	for i in range(5):
-		view_2x._process(0.1)
-	var distance_2x := start_2x.distance_to(node_2x.position)
-
-	_assert_eq(distance_2x > distance_1x * 1.5, true, "2x simulation speed should cover noticeably more distance than 1x in the same number of ticks")
-	view_1x.queue_free()
-	view_2x.queue_free()
-
-func _test_world_view_pause_halts_movement() -> void:
+func _test_world_view_home_kind_agent_never_walks() -> void:
 	var view := WorldView.new()
 	root.add_child(view)
 	view.apply_snapshot({
-		"agents": [{"id": 7, "sex": "Male", "position": {"x": 0.0, "y": 0.0, "z": 0.0}, "currentActivity": "Idle"}],
+		"agents": [{"id": 7, "sex": "Male", "position": {"x": 3.0, "y": 0.0, "z": 3.0}, "currentActivity": "Sleep", "targetKind": "Home"}],
 		"settlements": [],
 		"buildings": [],
 	})
-	view.set_simulation_playback(true, 1)
-	view.apply_delta({
-		"addedAgents": [],
-		"updatedAgents": [{"id": 7, "sex": "Male", "position": {"x": 0.0, "y": 0.0, "z": 0.0}, "currentActivity": "Travel"}],
-		"removedAgentIds": [],
-		"addedSettlements": [], "updatedSettlements": [], "removedSettlementIds": [],
-		"addedBuildings": [], "updatedBuildings": [], "removedBuildingIds": [],
-	})
+	view.set_simulation_playback(false, 1)
 	var node: Node3D = view.get_child(0)
-	var start_position := node.position
-	for i in range(20):
-		view._process(0.1)
-	_assert_eq(node.position, start_position, "movement must not progress while the simulation is paused, even for a freshly-triggered walk")
+	var start := node.position
+	view.set_tick(500000)
+	view._process(0.0)
+	_assert_eq(node.position, start, "a Home-kind agent has nowhere to walk to and must never move")
 	view.queue_free()
+
+func _test_world_view_high_speed_snaps_instead_of_walking() -> void:
+	# Decision M4: above WALKING_VISIBLE_MAX_SPEED, a working agent must be
+	# drawn exactly at home or exactly at the target, never mid-walk.
+	var view := WorldView.new()
+	root.add_child(view)
+	view.apply_snapshot({
+		"agents": [{
+			"id": 3, "sex": "Male", "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+			"currentActivity": "Work", "targetKind": "Common",
+			"target": {"x": 40.0, "z": 0.0}, "departTick": 100, "returnDepartTick": 500,
+		}],
+		"settlements": [], "buildings": [],
+	})
+	view.set_simulation_playback(false, view.WALKING_VISIBLE_MAX_SPEED + 1)
+	var node: Node3D = view.get_child(0)
+
+	view.set_tick(300)  # Between depart and return: mid-walk under normal speed.
+	view._process(0.0)
+	var at_work := node.position.x > 35.0
+	var at_home := absf(node.position.x) < 5.0
+	_assert_eq(at_work or at_home, true, "at a speed above the walking-visible threshold, an agent must snap to home or the target, never a mid-walk point")
+	view.queue_free()
+
+func _test_world_view_field_target_resolved_from_village_dressing() -> void:
+	# A cultivator's field is whatever VillageDressing already laid out for
+	# that household -- looked up, never recomputed, so what's walked can
+	# never disagree with what's drawn.
+	var view := WorldView.new()
+	root.add_child(view)
+	var dressing := FakeVillageDressing.new()
+	root.add_child(dressing)
+	view.set_village_dressing(dressing)
+	view.apply_snapshot({
+		"agents": [{
+			"id": 9, "sex": "Female", "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+			"householdId": 17, "regionId": 1,
+			"currentActivity": "Work", "targetKind": "Field",
+			"target": null, "departTick": 100, "returnDepartTick": 500,
+		}],
+		"settlements": [], "buildings": [],
+	})
+	view.set_simulation_playback(false, 1)
+	var node: Node3D = view.get_child(0)
+	view.set_tick(500)
+	view._process(0.0)
+	_assert_eq(node.position.x > 45.0, true, "a Field-kind agent must walk to the household's actual field, as looked up from VillageDressing")
+	view.queue_free()
+	dressing.queue_free()
 
 func _test_world_view_activity_label_updates_on_delta() -> void:
 	var view := WorldView.new()

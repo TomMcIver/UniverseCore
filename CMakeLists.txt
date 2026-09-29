@@ -42,6 +42,7 @@ target_link_libraries(universe_ui_bridge PRIVATE universe_ui_support)
 
 add_library(universe_ui_support
     src/ui/life_history.cpp
+    src/ui/presentation_movement.cpp
     src/ui/simulation_controller.cpp
     src/ui/view_models.cpp
     src/ui/web_protocol.cpp
@@ -120,6 +121,11 @@ if(UNIVERSECORE_BUILD_TESTS)
     target_link_libraries(universe_life_events_placement_tests PRIVATE universe_core)
     add_test(NAME universe_life_events_placement_tests COMMAND universe_life_events_placement_tests)
     set_tests_properties(universe_life_events_placement_tests PROPERTIES LABELS "fast")
+
+    add_executable(universe_construction_tests tests/construction_tests.cpp)
+    target_link_libraries(universe_construction_tests PRIVATE universe_core)
+    add_test(NAME universe_construction_tests COMMAND universe_construction_tests)
+    set_tests_properties(universe_construction_tests PROPERTIES LABELS "integration")
 
     add_executable(universe_demo_scenario_tests tests/demo_scenario_tests.cpp)
     target_link_libraries(universe_demo_scenario_tests PRIVATE universe_core)

@@ -330,8 +330,10 @@ bool test_world_delta_message_json_shape() {
 }
 
 bool test_dead_agent_removed_not_updated() {
-    // A person who dies between two snapshots must appear in removed_agent_ids
-    // and never in updated_agents.
+    // A person who dies (or is folded into a population group) between two
+    // snapshots must appear in removed_agent_ids and never in agents/
+    // updated_agents on the wire at all: dead and merged people are never
+    // drawn (decision #45/#50, catalogue defect A3).
     universe::ui::SimulationController controller{universe::SimulationConfig{.seed = 42, .initial_population = 200}};
     const auto before = universe::ui::build_world_snapshot(controller);
 
@@ -339,16 +341,23 @@ bool test_dead_agent_removed_not_updated() {
     universe::ui::WorldSnapshotView after{};
     for (int day = 0; day < 36500 && dead_person_id == 0; ++day) {
         controller.advance_days(1);
-        after = universe::ui::build_world_snapshot(controller);
-        for (const auto& current : after.agents) {
-            if (!current.alive) {
-                dead_person_id = current.id;
+        for (const auto& person : controller.people()) {
+            if (!person.alive) {
+                dead_person_id = person.id;
                 break;
             }
         }
+        after = universe::ui::build_world_snapshot(controller);
     }
     if (dead_person_id == 0) {
         return false;
+    }
+
+    bool found_in_agents = false;
+    for (const auto& agent : after.agents) {
+        if (agent.id == dead_person_id) {
+            found_in_agents = true;
+        }
     }
 
     const auto delta = universe::ui::build_world_delta(after, before);
@@ -365,7 +374,7 @@ bool test_dead_agent_removed_not_updated() {
         }
     }
 
-    return found_in_removed && !found_in_updated;
+    return found_in_removed && !found_in_updated && !found_in_agents;
 }
 
 bool test_protocol_version_two_on_delta_and_hello_roundtrips() {
@@ -443,6 +452,72 @@ bool test_snapshot_message_includes_current_activity() {
     }
     const auto message = universe::ui::make_snapshot_message(2U, snapshot, true);
     return message.find("\"currentActivity\":\"") != std::string::npos;
+}
+
+bool test_villager_movement_target_is_job_appropriate() {
+    // Ticket #56 (villager movement, ADR 0001): a person's presentation
+    // target kind must follow their occupation while working, and every
+    // Common/Woodland/Quarry/Workshop target must be a real, settlement-local
+    // point -- only Field is left for the client to resolve (it owns the
+    // per-household field layout).
+    universe::ui::SimulationController controller{universe::SimulationConfig{.seed = 42, .initial_population = 200}};
+    bool saw_field_unset = false;
+    bool saw_non_field_set = false;
+    for (int day = 0; day < 60; ++day) {
+        controller.advance_days(1);
+        const auto snapshot = universe::ui::build_world_snapshot(controller);
+        for (const auto& agent : snapshot.agents) {
+            if (agent.current_activity != universe::ActivityKind::Work ||
+                agent.occupation != universe::Occupation::SubsistenceCultivator) {
+                continue;
+            }
+            if (agent.target_kind != universe::ui::ActivityTargetKind::Field) {
+                return false;
+            }
+            if (agent.target.has_value()) {
+                return false;
+            }
+            saw_field_unset = true;
+        }
+        for (const auto& agent : snapshot.agents) {
+            if (agent.target_kind == universe::ui::ActivityTargetKind::Home ||
+                agent.target_kind == universe::ui::ActivityTargetKind::Field) {
+                continue;
+            }
+            if (!agent.target.has_value()) {
+                return false;
+            }
+            saw_non_field_set = true;
+        }
+    }
+    return saw_field_unset && saw_non_field_set;
+}
+
+bool test_dead_and_demoted_people_absent_from_snapshot() {
+    // A snapshot must never contain a dead person, and demotion into a
+    // population-group cohort (which sets alive=false, not a real death)
+    // must not fabricate a Death event on the wire either.
+    universe::ui::SimulationController controller{universe::SimulationConfig{.seed = 42, .initial_population = 200}};
+    for (int day = 0; day < 36500; ++day) {
+        controller.advance_days(1);
+        const auto snapshot = universe::ui::build_world_snapshot(controller);
+        for (const auto& agent : snapshot.agents) {
+            if (!agent.alive) {
+                return false;
+            }
+        }
+        bool any_dead = false;
+        for (const auto& person : controller.people()) {
+            if (!person.alive) {
+                any_dead = true;
+                break;
+            }
+        }
+        if (any_dead) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool test_determinism_with_observer_idle() {
@@ -739,6 +814,8 @@ int main() {
         {"protocol_version_two_on_delta_and_hello_roundtrips", test_protocol_version_two_on_delta_and_hello_roundtrips},
         {"snapshot_forwards_real_canonical_positions", test_snapshot_forwards_real_canonical_positions},
         {"snapshot_message_includes_current_activity", test_snapshot_message_includes_current_activity},
+        {"villager_movement_target_is_job_appropriate", test_villager_movement_target_is_job_appropriate},
+        {"dead_and_demoted_people_absent_from_snapshot", test_dead_and_demoted_people_absent_from_snapshot},
         {"determinism_with_observer_idle", test_determinism_with_observer_idle},
         {"life_history_records_birth_for_child_and_parents", test_life_history_records_birth_for_child_and_parents},
         {"life_history_records_occupation_change", test_life_history_records_occupation_change},

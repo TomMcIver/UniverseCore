@@ -154,6 +154,8 @@ WorldSnapshotView build_world_snapshot(const SimulationController& controller) {
     snapshot.year = summary.year;
     snapshot.population = summary.population;
 
+    const auto presentation = build_agent_presentations(controller, static_cast<std::int64_t>(snapshot.tick));
+
     // Ticket #24/#25/#38: Region and Settlement now carry real canonical
     // (x, z) positions derived deterministically in UniverseCore itself
     // (SeedDomain::RegionPosition/SettlementPosition, with real min-distance
@@ -180,25 +182,28 @@ WorldSnapshotView build_world_snapshot(const SimulationController& controller) {
         settlement_view_by_id.emplace(settlement.id, settlement);
     }
 
-    // Ticket #35/#38: a person's canonical position is always
-    // Settlement.position + Household.settlement_offset -- constant
-    // regardless of current_activity, since no sub-settlement geography
-    // (Building position) exists yet to distinguish home from work. This
-    // replaces the previous invented day-phase orbit/jitter, which had no
-    // relationship to canonical state at all.
+    // Person positions are presentation state (ADR 0001) owned here: where
+    // someone stands or walks derives from their activity, job, household and
+    // the canonical building layout. Dead people and people folded into
+    // population groups are never sent.
     snapshot.agents.reserve(people.size());
     for (const auto& person : people) {
+        if (!person.alive) {
+            continue;
+        }
         const auto household_it = household_by_id.find(person.household_id);
         if (household_it == household_by_id.end()) {
             continue;
         }
         const auto* household = household_it->second;
-        const auto settlement_it = settlement_view_by_id.find(household->settlement_id);
-        if (settlement_it == settlement_view_by_id.end()) {
+        if (!settlement_view_by_id.contains(household->settlement_id)) {
             continue;
         }
-
-        const auto base = settlement_it->second;
+        const auto placed_it = presentation.find(person.id);
+        if (placed_it == presentation.end()) {
+            continue;
+        }
+        const auto& placed = placed_it->second;
 
         snapshot.agents.push_back(AgentRenderView{
             .id = person.id,
@@ -210,9 +215,13 @@ WorldSnapshotView build_world_snapshot(const SimulationController& controller) {
             .sex = person.sex,
             .occupation = person.occupation,
             .current_activity = person.current_activity,
-            .x = base.x + static_cast<float>(household->settlement_offset_x),
-            .y = 0.9F,
-            .z = base.z + static_cast<float>(household->settlement_offset_z),
+            .x = placed.home.x,
+            .y = 0.0F,
+            .z = placed.home.z,
+            .target_kind = placed.target_kind,
+            .target = placed.target,
+            .depart_tick = placed.depart_tick,
+            .return_depart_tick = placed.return_depart_tick,
         });
     }
 
@@ -297,9 +306,11 @@ WorldDeltaView build_world_delta(const WorldSnapshotView& current, const WorldSn
         const auto previous_it = previous_agents_by_id.find(agent.id);
         const bool was_present = previous_it != previous_agents_by_id.end();
         if (!agent.alive) {
-            // An agent is removed from the wire once dead, regardless of
-            // whether its record still lingers in the underlying query view --
-            // it never appears as "updated" once its removal is observed.
+            // build_world_snapshot never includes a dead person (decision
+            // #45/#50, catalogue defect A3), so this only matters for a
+            // caller that hands build_world_delta a WorldSnapshotView
+            // containing one directly: it must still never appear as
+            // "updated" once its removal is observed.
             if (was_present && previous_it->second->alive) {
                 delta.removed_agent_ids.push_back(agent.id);
             }
@@ -460,6 +471,28 @@ std::string make_status_message(
 
 namespace {
 
+void write_point_json(std::ostringstream& out, const PresentationPoint point) {
+    out << "{\"x\":" << point.x << ",\"z\":" << point.z << "}";
+}
+
+[[nodiscard]] std::string target_kind_label(const ActivityTargetKind kind) {
+    switch (kind) {
+        case ActivityTargetKind::Home:
+            return "Home";
+        case ActivityTargetKind::Common:
+            return "Common";
+        case ActivityTargetKind::Field:
+            return "Field";
+        case ActivityTargetKind::Woodland:
+            return "Woodland";
+        case ActivityTargetKind::Quarry:
+            return "Quarry";
+        case ActivityTargetKind::Workshop:
+            return "Workshop";
+    }
+    return "Home";
+}
+
 void write_agent_json(std::ostringstream& out, const AgentRenderView& agent) {
     out << "{\"id\":" << agent.id
         << ",\"householdId\":" << agent.household_id
@@ -470,7 +503,17 @@ void write_agent_json(std::ostringstream& out, const AgentRenderView& agent) {
         << ",\"sex\":\"" << (agent.sex == BiologicalSex::Female ? "Female" : "Male") << "\""
         << ",\"occupation\":\"" << occupation_label(agent.occupation) << "\""
         << ",\"currentActivity\":\"" << activity_kind_label(agent.current_activity) << "\""
-        << ",\"position\":{\"x\":" << agent.x << ",\"y\":" << agent.y << ",\"z\":" << agent.z << "}}";
+        << ",\"position\":{\"x\":" << agent.x << ",\"y\":" << agent.y << ",\"z\":" << agent.z << "}"
+        << ",\"targetKind\":\"" << target_kind_label(agent.target_kind) << "\""
+        << ",\"target\":";
+    if (agent.target.has_value()) {
+        write_point_json(out, *agent.target);
+    } else {
+        out << "null";
+    }
+    out << ",\"departTick\":" << agent.depart_tick
+        << ",\"returnDepartTick\":" << agent.return_depart_tick
+        << "}";
 }
 
 void write_settlement_json(std::ostringstream& out, const SettlementRenderView& settlement) {

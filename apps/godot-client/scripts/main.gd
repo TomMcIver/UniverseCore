@@ -49,6 +49,7 @@ func _ready() -> void:
 	_dressing.name = "VillageDressing"
 	_dressing.set_terrain(_terrain)
 	add_child(_dressing)
+	_world_view.set_village_dressing(_dressing)
 
 	_vegetation = VegetationScatterScript.new()
 	_vegetation.name = "Vegetation"
@@ -340,6 +341,7 @@ func _apply_world_message(message: Dictionary) -> void:
 				_navmeshes_baked = true
 				_center_camera_on_settlements(payload.get("settlements", []))
 			_world_view.apply_snapshot(payload, Callable(_terrain, "get_height_at_world"))
+			_world_view.set_tick(int(message.get("tick", 0)))
 			_apply_day_night(int(message.get("tick", 0)))
 		"world_delta":
 			# world_delta (ticket #7) is a real diff, not a restated world --
@@ -350,8 +352,10 @@ func _apply_world_message(message: Dictionary) -> void:
 			_terrain.apply_delta(payload)
 			_world_view.apply_delta(payload, Callable(_terrain, "get_height_at_world"))
 			_dressing.apply_delta(payload)
+			_world_view.set_tick(int(message.get("tick", 0)))
 			_apply_day_night(int(message.get("tick", 0)))
 		"simulation_status":
+			_world_view.set_tick(int(message.get("tick", 0)))
 			_apply_day_night(int(message.get("tick", 0)))
 			_world_view.set_simulation_playback(bool(payload.get("paused", true)), int(payload.get("speed", 1)))
 		"error":

@@ -780,6 +780,11 @@ private:
     void process_household_stabilization_transfers();
     void process_local_exchange(std::uint64_t demographic_year);
     void process_construction(std::uint64_t demographic_year);
+    [[nodiscard]] std::int64_t source_construction_materials(
+        Settlement& settlement,
+        std::int64_t timber_shortfall,
+        std::int64_t stone_shortfall,
+        std::int64_t labour_budget);
     void clear_occupations_for_extinct_or_invalid_households();
     void refresh_labour_aggregates();
     void apply_person_nutrition_and_health(Person& person, std::int64_t required_food, std::int64_t allocated_food);

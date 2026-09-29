@@ -6,6 +6,7 @@
 #include <string_view>
 #include <vector>
 
+#include "universe/ui/presentation_movement.hpp"
 #include "universe/ui/simulation_controller.hpp"
 #include "universe/ui/view_models.hpp"
 
@@ -24,6 +25,10 @@ struct AgentRenderView {
     float x{};
     float y{};
     float z{};
+    ActivityTargetKind target_kind{ActivityTargetKind::Home};
+    std::optional<PresentationPoint> target{};
+    std::int64_t depart_tick{};
+    std::int64_t return_depart_tick{};
 };
 
 struct SettlementRenderView {
