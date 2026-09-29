@@ -1,3 +1,4 @@
+#include "universe/demo_scenario.hpp"
 #include "universe/ui/simulation_controller.hpp"
 #include "universe/ui/web_protocol.hpp"
 
@@ -5,9 +6,11 @@
 #include <chrono>
 #include <cstdint>
 #include <deque>
+#include <fstream>
 #include <iostream>
 #include <mutex>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -64,6 +67,17 @@ void command_reader_thread(RuntimeState& runtime) {
     runtime.running.store(false);
 }
 
+std::optional<universe::DemoScenario> load_scenario_file(const std::string& path, std::string& error) {
+    std::ifstream file{path, std::ios::binary};
+    if (!file) {
+        error = "cannot open file";
+        return std::nullopt;
+    }
+    std::ostringstream contents;
+    contents << file.rdbuf();
+    return universe::parse_demo_scenario(contents.str(), error);
+}
+
 std::vector<ClientCommand> drain_commands(RuntimeState& runtime) {
     std::vector<ClientCommand> commands;
     std::lock_guard<std::mutex> lock{runtime.queue_mutex};
@@ -85,6 +99,16 @@ int main(int argc, char** argv) {
                 config.seed = static_cast<std::uint64_t>(std::stoull(argv[++i]));
             } else if (arg == "--population" && i + 1 < argc) {
                 config.initial_population = static_cast<std::uint64_t>(std::stoull(argv[++i]));
+            } else if (arg == "--scenario" && i + 1 < argc) {
+                const std::string path{argv[++i]};
+                std::string error;
+                const auto scenario = load_scenario_file(path, error);
+                if (!scenario.has_value()) {
+                    std::cerr << "Invalid scenario " << path << ": " << error << '\n';
+                    return 2;
+                }
+                config.seed = scenario->seed;
+                config.initial_population = scenario->initial_population;
             }
         }
     } catch (const std::exception&) {
