@@ -36,8 +36,7 @@ class FakePanel extends "res://scripts/ui/ui_panel.gd":
 
 	func show_command_result(succeeded: bool, action_name: String) -> void:
 		results.append([succeeded, action_name])
-const TerrainGenerator := preload("res://scripts/terrain_generator.gd")
-const DayNight := preload("res://scripts/world/day_night.gd")
+const VillageLookTests := preload("res://scripts/tests/village_look_tests.gd")
 const NavmeshManager := preload("res://scripts/world/navmesh_manager.gd")
 
 ## Minimal headless test runner for the Godot client's pure/testable seams
@@ -89,14 +88,7 @@ func _initialize() -> void:
 	_run_test("registry sends panel actions and reports the result back", Callable(self, "_test_registry_panel_actions"))
 	_run_test("registry refreshes the selection after new world state", Callable(self, "_test_registry_refreshes_selection"))
 	_run_test("manifest registers every standard panel without main.gd", Callable(self, "_test_manifest_registers_panels"))
-	_run_test("terrain finds the nearest region center for a world point", Callable(self, "_test_terrain_nearest_region_id"))
-	_run_test("terrain samples height via bilinear interpolation matching the mesh surface", Callable(self, "_test_terrain_height_bilinear_interpolation"))
-	_run_test("terrain derives region centers from settlement positions", Callable(self, "_test_terrain_region_centers_from_settlements"))
-	_run_test("terrain/camera centering skips extinct settlements", Callable(self, "_test_terrain_first_settlement_position_skips_inactive"))
-	_run_test("terrain height/color genuinely differ between environment classes", Callable(self, "_test_terrain_sample_varies_by_class"))
-	_run_test("terrain color reflects wild-food richness within the same class", Callable(self, "_test_terrain_sample_richness_affects_color"))
-	_run_test("day_night is brightest at midday and dimmest at midnight", Callable(self, "_test_day_night_midday_vs_midnight"))
-	_run_test("day_night wraps correctly across multiple simulated days", Callable(self, "_test_day_night_wraps_across_days"))
+	VillageLookTests.new(self).run()
 
 	await _run_async_test("navmesh query before any bake returns an empty path (not stale geometry)", Callable(self, "_test_navmesh_query_before_bake"))
 	await _run_async_test("navmesh becomes ready and advances its map iteration id after baking", Callable(self, "_test_navmesh_bakes_and_advances_iteration_id"))
@@ -586,93 +578,6 @@ func _test_manifest_registers_panels() -> void:
 		slots[panel.name] = registry.slot_of(panel)
 	_assert_eq(slots, {"Hud": "top_bar", "Inspector": "inspector", "SettlementEconomy": "inspector", "EventLog": "timeline"})
 	registry.queue_free()
-
-func _test_terrain_nearest_region_id() -> void:
-	var terrain := TerrainGenerator.new()
-	var centers := {1: Vector2(0.0, 0.0), 2: Vector2(100.0, 100.0)}
-	_assert_eq(terrain._nearest_region_id(Vector2(5.0, 5.0), centers), 1)
-	_assert_eq(terrain._nearest_region_id(Vector2(90.0, 92.0), centers), 2)
-
-func _test_terrain_height_bilinear_interpolation() -> void:
-	# A real bug this guards against: nearest-vertex height sampling could
-	# disagree with the mesh's own (bilinearly interpolated) surface on
-	# bumpy terrain, visibly clipping entities into or above the ground.
-	var terrain := TerrainGenerator.new()
-	terrain.width = 1
-	terrain.depth = 1
-	terrain.cell_size = 2.0
-	terrain._grid_half_width = 1.0
-	terrain._grid_half_depth = 1.0
-	terrain._height_grid = [
-		[0.0, 10.0],
-		[20.0, 30.0],
-	]
-	_assert_eq(terrain.get_height_at_world(-1.0, -1.0), 0.0, "exact vertex (0,0) should return its own height")
-	_assert_eq(terrain.get_height_at_world(1.0, -1.0), 10.0, "exact vertex (1,0) should return its own height")
-	_assert_eq(terrain.get_height_at_world(-1.0, 1.0), 20.0, "exact vertex (0,1) should return its own height")
-	_assert_eq(terrain.get_height_at_world(1.0, 1.0), 30.0, "exact vertex (1,1) should return its own height")
-	_assert_eq(terrain.get_height_at_world(0.0, -1.0), 5.0, "midpoint between two known heights should average them")
-	_assert_eq(terrain.get_height_at_world(0.0, 0.0), 15.0, "center of the quad should average all four corners")
-
-func _test_terrain_first_settlement_position_skips_inactive() -> void:
-	# A real bug this guards against: the lowest-id settlement can go
-	# extinct/merge away (ticket #33) while keeping a lower id than every
-	# settlement still standing, which put the camera/terrain center on a
-	# long-dead, empty spot (observed directly against a long-running
-	# world). Only active settlements should ever be picked.
-	var terrain := TerrainGenerator.new()
-	var settlements := [
-		{"id": 1, "active": false, "position": {"x": 0.0, "z": 0.0}},
-		{"id": 2, "active": true, "position": {"x": 500.0, "z": 500.0}},
-	]
-	var active := terrain._active_settlements(settlements)
-	_assert_eq(active.size(), 1)
-	var center := terrain._first_settlement_position(active)
-	_assert_eq(center, Vector2(500.0, 500.0), "the extinct lowest-id settlement must not be picked over an active one")
-
-func _test_terrain_region_centers_from_settlements() -> void:
-	var terrain := TerrainGenerator.new()
-	var settlements := [
-		{"regionId": 1, "position": {"x": 0.0, "z": 0.0}},
-		{"regionId": 1, "position": {"x": 10.0, "z": 0.0}},
-		{"regionId": 2, "position": {"x": 100.0, "z": 100.0}},
-	]
-	var centers: Dictionary = terrain._region_centers_from_settlements(settlements)
-	_assert_eq(centers[1], Vector2(5.0, 0.0))
-	_assert_eq(centers[2], Vector2(100.0, 100.0))
-
-func _test_terrain_sample_varies_by_class() -> void:
-	var terrain := TerrainGenerator.new()
-	var arable: Dictionary = terrain._region_driven_sample({"environmentClass": "ProductiveArable", "wildFoodCapacity": 100, "wildFoodStock": 50}, 1.0)
-	var marginal: Dictionary = terrain._region_driven_sample({"environmentClass": "Marginal", "wildFoodCapacity": 100, "wildFoodStock": 50}, 1.0)
-	_assert_eq(arable.height != marginal.height, true, "different environment classes should produce different height")
-	_assert_eq(arable.color != marginal.color, true, "different environment classes should produce different color")
-
-func _test_terrain_sample_richness_affects_color() -> void:
-	var terrain := TerrainGenerator.new()
-	var rich: Dictionary = terrain._region_driven_sample({"environmentClass": "Woodland", "wildFoodCapacity": 100, "wildFoodStock": 100}, 1.0)
-	var poor: Dictionary = terrain._region_driven_sample({"environmentClass": "Woodland", "wildFoodCapacity": 100, "wildFoodStock": 0}, 1.0)
-	_assert_eq(rich.color != poor.color, true, "wild food richness should affect color even within the same environment class")
-	_assert_eq(rich.height, poor.height, "richness should not affect height, only color")
-
-func _test_day_night_midday_vs_midnight() -> void:
-	var midday_tick := 0
-	var midnight_tick := DayNight.DAY_TICKS / 2
-	var midday := DayNight.sample(midday_tick)
-	var midnight := DayNight.sample(midnight_tick)
-	_assert_eq(midday.sun_energy > midnight.sun_energy, true, "midday should be brighter than midnight")
-	_assert_eq(midday.ambient_energy > midnight.ambient_energy, true, "midday ambient should be brighter than midnight")
-	_assert_eq(DayNight.daylight_amount(midday_tick) > 0.99, true, "midday daylight amount should be ~1.0")
-	_assert_eq(DayNight.daylight_amount(midnight_tick) < 0.01, true, "midnight daylight amount should be ~0.0")
-
-func _test_day_night_wraps_across_days() -> void:
-	var tick_day_3_midday := DayNight.DAY_TICKS * 3 + DayNight.DAY_TICKS / 2
-	var tick_day_0_midday := DayNight.DAY_TICKS / 2
-	_assert_eq(
-		is_equal_approx(DayNight.daylight_amount(tick_day_3_midday), DayNight.daylight_amount(tick_day_0_midday)),
-		true,
-		"the same time-of-day should read the same daylight amount regardless of which day it falls on"
-	)
 
 func _test_world_view_agent_renders_at_real_position_on_spawn() -> void:
 	# A brand new agent must render at its real canonical position
