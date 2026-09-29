@@ -1,14 +1,14 @@
 {
   "project": "UniverseCore",
-  "as_of": "2026-08-29",
+  "as_of": "2026-09-29",
   "current_phase": "Milestone 4 simulation LOD (complete)",
-  "current_task": "Milestone 4 closeout complete (M4A-M4E): real aggregate execution path, cohort demography, canonization, causality/equivalence tests, monthly aggregate cadence, and scale benchmark",
-  "next_task": "Milestone 6 Unreal bridge / vertical slice (not started)",
+  "current_task": "Integrated demo panels, construction allocation, and route-based villager movement verified on feat/demo-final-integration",
+  "next_task": "Review and run the combined Bronze Age demo interactively",
   "build": {
     "canonical_workflow": "podman scripts/container-test.sh",
-    "last_verified": "2026-08-29",
+    "last_verified": "2026-09-29",
     "status": "passing",
-    "notes": "Verified in universecore-dev container with canonical fast/integration/long suites. universe_lod_benchmark proves aggregate settlements execute with zero per-person daily updates, ~1050 ns per represented person vs ~42255000 ns detailed, and completes the promote/demote/save/load/return lifecycle without rerolling identities."
+    "notes": "Combined integration branch passed the Podman Release build and all 8 CTest groups, Godot 72/72 tests, and web client 5/5 tests plus production build. Results: build/test-runs/2026-09-29-final."
   },
   "progress": {
     "simulation_foundation_percent": 100,
@@ -141,7 +141,8 @@
       "Milestone 4E scale benchmark executable and performance closeout",
       "Snapshot schema v19 and validation",
       "Canonical Podman build/test workflow",
-      "Development dashboard + deployment workflow"
+      "Development dashboard + deployment workflow",
+      "Combined Bronze Age demo integration verification"
     ],
     "active": [],
     "planned": [
@@ -158,6 +159,12 @@
     "Snapshots serialize canonical deterministic state only."
   ],
   "recent_verified_commits": [
+    {
+      "hash": "f8c0826",
+      "date": "2026-09-29",
+      "summary": "Integrate demo panels, construction allocation, and route movement",
+      "verified": true
+    },
     {
       "hash": "ffde014",
       "date": "2026-08-29",
