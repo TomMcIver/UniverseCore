@@ -11,6 +11,10 @@ const SLOT_MODAL := "modal"
 
 ## Emitted with a name from actions() and the protocol command to send.
 signal action_requested(action_name: String, command: Dictionary)
+## Asks the registry to select an entity, as if it had been clicked in the world.
+signal select_requested(entity_type: String, entity_id: int)
+## Asks the world to mark an entity (entity_id 0 clears the mark).
+signal world_highlight_requested(entity_type: String, entity_id: int)
 
 func panel_slot() -> String:
 	return SLOT_INSPECTOR

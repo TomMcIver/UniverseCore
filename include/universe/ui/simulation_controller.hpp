@@ -172,6 +172,8 @@ public:
 
     void advance_days(std::uint64_t days);
     void advance_years(std::uint64_t years);
+    // Advances at most max_days, never past the start of target_year. Returns days advanced (0 once there).
+    std::uint64_t advance_toward_year(std::uint64_t target_year, std::uint64_t max_days);
 
     [[nodiscard]] SnapshotOperationResult save_snapshot_file(const std::string& path) const;
     [[nodiscard]] SnapshotOperationResult load_snapshot_file(const std::string& path);

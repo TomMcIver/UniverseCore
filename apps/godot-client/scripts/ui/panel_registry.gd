@@ -13,6 +13,7 @@ const REFRESH_MESSAGE_TYPES := ["initial_snapshot", "world_delta"]
 var _panels: Array = []
 var _slots: Dictionary = {}
 var _command_sink := Callable()
+var _highlight_sink := Callable()
 ## panel instance id -> {"kind": String, "entity_id": int}: what each panel is showing.
 var _focus: Dictionary = {}
 
@@ -39,6 +40,10 @@ func _make_slot(preset: int, offset: Vector2, grow_h: int, grow_v: int) -> VBoxC
 func set_command_sink(sink: Callable) -> void:
 	_command_sink = sink
 
+## `sink` is (entity_type: String, entity_id: int) -> void; marks an entity in the world.
+func set_highlight_sink(sink: Callable) -> void:
+	_highlight_sink = sink
+
 func register(panel: UiPanel) -> void:
 	var slot_name := panel.panel_slot()
 	if not _slots.has(slot_name):
@@ -47,6 +52,12 @@ func register(panel: UiPanel) -> void:
 	_panels.append(panel)
 	_slots[slot_name].add_child(panel)
 	panel.action_requested.connect(_on_action_requested.bind(panel))
+	panel.select_requested.connect(select)
+	panel.world_highlight_requested.connect(_on_world_highlight_requested)
+
+func _on_world_highlight_requested(entity_type: String, entity_id: int) -> void:
+	if _highlight_sink.is_valid():
+		_highlight_sink.call(entity_type, entity_id)
 
 func panels() -> Array:
 	return _panels.duplicate()

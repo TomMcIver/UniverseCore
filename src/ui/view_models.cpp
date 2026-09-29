@@ -7,16 +7,19 @@
 #include <utility>
 
 #include "protocol_text.hpp"
+#include "universe/ui/life_history.hpp"
 #include "universe/ui/web_protocol.hpp"
 
 namespace universe::ui {
 
 namespace {
 
-constexpr std::array<std::pair<ViewModelKind, std::string_view>, 3> kKindLabels{{
+constexpr std::array<std::pair<ViewModelKind, std::string_view>, 5> kKindLabels{{
     {ViewModelKind::PersonSummary, "person_summary"},
     {ViewModelKind::BuildingSummary, "building_summary"},
     {ViewModelKind::SettlementEconomy, "settlement_economy"},
+    {ViewModelKind::PersonLifeHistory, "person_life_history"},
+    {ViewModelKind::DemoFocus, "demo_focus"},
 }};
 
 constexpr std::uint64_t kPer10k = 10'000U;
@@ -117,7 +120,41 @@ void write_settlement_economy(std::ostringstream& out, const SettlementEconomyVi
         << ",\"median\":" << view.median_household_wealth
         << ",\"max\":" << view.max_household_wealth
         << ",\"inequalityPer10k\":" << view.inequality_per_10k
+        << "}"
+        << ",\"buildings\":{"
+        << "\"complete\":" << view.buildings_complete
+        << ",\"underConstruction\":" << view.buildings_under_construction
+        << ",\"planned\":" << view.buildings_planned
         << "}";
+}
+
+void write_person_life_history(std::ostringstream& out, const PersonLifeHistoryView& view) {
+    out << "\"alive\":" << (view.alive ? "true" : "false")
+        << ",\"memoryCount\":" << view.memory_count
+        << ",\"knowledgeCount\":" << view.knowledge_count
+        << ",\"omittedEntries\":" << view.omitted_entries
+        << ",\"institutionIds\":[";
+    for (std::size_t i = 0; i < view.institution_ids.size(); ++i) {
+        out << (i == 0U ? "" : ",") << view.institution_ids[i];
+    }
+    out << "],\"entries\":[";
+    for (std::size_t i = 0; i < view.entries.size(); ++i) {
+        const auto& entry = view.entries[i];
+        out << (i == 0U ? "" : ",")
+            << "{\"atTicks\":" << detail::non_negative_ticks(entry.at)
+            << ",\"kind\":\"" << life_entry_kind_label(entry.kind) << "\""
+            << ",\"sourceId\":" << entry.source_id
+            << ",\"otherPersonId\":";
+        write_optional_id(out, entry.other_person_id);
+        out << ",\"text\":\"" << detail::json_escape(entry.text) << "\"}";
+    }
+    out << "]";
+}
+
+void write_demo_focus(std::ostringstream& out, const DemoFocusView& view) {
+    out << "\"settlementId\":" << view.settlement_id << ",\"personId\":";
+    write_optional_id(out, view.person_id);
+    out << ",\"lifeEventCount\":" << view.life_event_count;
 }
 
 }  // namespace
@@ -144,8 +181,11 @@ std::uint32_t view_model_version(const ViewModelKind kind) noexcept {
     switch (kind) {
         case ViewModelKind::PersonSummary:
         case ViewModelKind::BuildingSummary:
-        case ViewModelKind::SettlementEconomy:
+        case ViewModelKind::PersonLifeHistory:
+        case ViewModelKind::DemoFocus:
             return 1U;
+        case ViewModelKind::SettlementEconomy:
+            return 2U;
     }
     return 0U;
 }
@@ -244,6 +284,23 @@ std::optional<SettlementEconomyView> build_settlement_economy(const SimulationCo
         }
     }
 
+    for (const auto& building : controller.buildings()) {
+        if (building.settlement_id != settlement_id) {
+            continue;
+        }
+        switch (building.state) {
+            case ConstructionState::Complete:
+                ++view.buildings_complete;
+                break;
+            case ConstructionState::ActiveConstruction:
+                ++view.buildings_under_construction;
+                break;
+            case ConstructionState::Planned:
+                ++view.buildings_planned;
+                break;
+        }
+    }
+
     return view;
 }
 
@@ -281,6 +338,26 @@ std::string make_view_model_message(
             }
             write_envelope_start(out, protocol_version, controller, kind, entity_id);
             write_settlement_economy(out, *view);
+            out << "}}}";
+            return out.str();
+        }
+        case ViewModelKind::PersonLifeHistory: {
+            const auto view = build_person_life_history(controller, entity_id);
+            if (!view.has_value()) {
+                break;
+            }
+            write_envelope_start(out, protocol_version, controller, kind, entity_id);
+            write_person_life_history(out, *view);
+            out << "}}}";
+            return out.str();
+        }
+        case ViewModelKind::DemoFocus: {
+            const auto view = build_demo_focus(controller, entity_id);
+            if (!view.has_value()) {
+                break;
+            }
+            write_envelope_start(out, protocol_version, controller, kind, entity_id);
+            write_demo_focus(out, *view);
             out << "}}}";
             return out.str();
         }

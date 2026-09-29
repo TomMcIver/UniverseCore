@@ -15,6 +15,8 @@ enum class ViewModelKind : std::uint8_t {
     PersonSummary = 0,
     BuildingSummary = 1,
     SettlementEconomy = 2,
+    PersonLifeHistory = 3,
+    DemoFocus = 4,
 };
 
 [[nodiscard]] std::optional<ViewModelKind> parse_view_model_kind(std::string_view label) noexcept;
@@ -81,6 +83,9 @@ struct SettlementEconomyView {
     std::int64_t median_household_wealth{};
     std::int64_t max_household_wealth{};
     std::uint32_t inequality_per_10k{};
+    std::uint64_t buildings_complete{};
+    std::uint64_t buildings_under_construction{};
+    std::uint64_t buildings_planned{};
 };
 
 [[nodiscard]] std::optional<PersonSummaryView> build_person_summary(const SimulationController& controller, PersonId person_id);

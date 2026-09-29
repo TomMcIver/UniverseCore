@@ -52,6 +52,7 @@ func _ready() -> void:
 	_panels.name = "Panels"
 	add_child(_panels)
 	_panels.set_command_sink(Callable(_client, "send_command"))
+	_panels.set_highlight_sink(Callable(_world_view, "set_highlighted_entity"))
 	PanelManifest.register_all(_panels)
 
 	_client.connect_to_bridge()

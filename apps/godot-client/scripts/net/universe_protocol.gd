@@ -39,6 +39,16 @@ static func command_set_speed(speed: int) -> Dictionary:
 static func command_request_view_model(kind: String, entity_id: int) -> Dictionary:
 	return {"type": "request_view_model", "kind": kind, "entityId": entity_id}
 
+## Runs the simulation at jump speed and pauses at the start of `year`.
+static func command_run_until_year(year: int) -> Dictionary:
+	return {"type": "run_until_year", "year": year}
+
+## Canonical ticks are seconds; a simulated year is 365 days.
+const TICKS_PER_YEAR := 365 * 24 * 60 * 60
+
+static func year_of_tick(tick: int) -> int:
+	return int(tick / TICKS_PER_YEAR) if tick > 0 else 0
+
 static func encode(command: Dictionary) -> String:
 	return JSON.stringify(command)
 

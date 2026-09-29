@@ -22,8 +22,12 @@ const BuildingAssets := preload("res://scripts/world/building_assets.gd")
 const NEAR_PLAYER_RADIUS := 40.0
 const MOVE_SPEED_UNITS_PER_SECOND := 3.0
 const ACTIVITY_LABEL_HEIGHT := 2.4
+const HIGHLIGHT_HEIGHT := 3.3
+const HIGHLIGHT_NODE_NAME := "Highlight"
 
 var _agent_nodes: Dictionary
+## The one villager carrying the floating marker (0 = none); survives respawns.
+var _highlighted_agent_id := 0
 var _settlement_nodes: Dictionary
 var _building_nodes: Dictionary
 var _building_data: Dictionary
@@ -216,6 +220,7 @@ func _spawn_agent(agent: Dictionary) -> void:
 	_agent_targets[id] = target
 	_agent_region_ids[id] = int(agent.get("regionId", 0))
 	_agent_activity[id] = activity
+	_attach_highlight_if_marked(id)
 
 ## Ticket #40: refresh the visible activity label and canonical target for
 ## an already-spawned agent, and trigger a proof-of-wiring walk whenever
@@ -418,3 +423,44 @@ func _advance_agent_movement(id: int) -> void:
 		_agent_movement[id] = state
 	else:
 		node.position += to_dest.normalized() * step
+
+## Marks one villager, such as the demo's chosen NPC, with a floating marker.
+## Only agents can be marked; entity_id 0 clears the mark.
+func set_highlighted_entity(entity_type: String, entity_id: int) -> void:
+	if entity_type != "agent":
+		return
+	_detach_highlight()
+	_highlighted_agent_id = entity_id
+	_attach_highlight_if_marked(entity_id)
+
+func highlighted_agent_id() -> int:
+	return _highlighted_agent_id
+
+func _detach_highlight() -> void:
+	if not _agent_nodes.has(_highlighted_agent_id):
+		return
+	var marker: Node = _agent_nodes[_highlighted_agent_id].get_node_or_null(HIGHLIGHT_NODE_NAME)
+	if marker != null:
+		marker.free()
+
+func _attach_highlight_if_marked(id: int) -> void:
+	if id == 0 or id != _highlighted_agent_id or not _agent_nodes.has(id):
+		return
+	var node: Node3D = _agent_nodes[id]
+	if node.get_node_or_null(HIGHLIGHT_NODE_NAME) == null:
+		node.add_child(_make_highlight_marker())
+
+func _make_highlight_marker() -> MeshInstance3D:
+	var cone := CylinderMesh.new()
+	cone.top_radius = 0.5
+	cone.bottom_radius = 0.0
+	cone.height = 0.9
+	var material := StandardMaterial3D.new()
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.albedo_color = Color(1.0, 0.78, 0.12)
+	var marker := MeshInstance3D.new()
+	marker.name = HIGHLIGHT_NODE_NAME
+	marker.mesh = cone
+	marker.material_override = material
+	marker.position = Vector3(0.0, HIGHLIGHT_HEIGHT, 0.0)
+	return marker

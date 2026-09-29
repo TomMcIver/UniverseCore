@@ -7,6 +7,7 @@
 #include <deque>
 #include <iostream>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -20,6 +21,9 @@ using universe::ui::ClientCommandType;
 using universe::ui::SimulationController;
 
 constexpr std::uint32_t kProtocolVersion = 2U;
+// Days advanced per 100 ms loop while jumping: 20 years in about 12 s, fast
+// enough for the demo but slow enough to watch the village change.
+constexpr std::uint64_t kJumpDaysPerTick = 60U;
 
 struct RuntimeState {
     std::atomic<bool> running{true};
@@ -98,6 +102,27 @@ int main(int argc, char** argv) {
     emit_line(runtime, universe::ui::make_snapshot_message(kProtocolVersion, previous_snapshot, true));
     emit_line(runtime, universe::ui::make_status_message(kProtocolVersion, previous_snapshot.tick, true, 1U));
     std::size_t last_event_count = controller.events().size();
+    // Set while a run_until_year jump is in progress; cleared on arrival or pause.
+    std::optional<std::uint64_t> target_year{};
+
+    const auto emit_status = [&](const std::uint64_t tick) {
+        emit_line(runtime, universe::ui::make_status_message(
+            kProtocolVersion, tick, runtime.paused.load(), runtime.speed.load(), target_year));
+    };
+
+    // Streams the events, world delta and status produced by the last advance.
+    const auto publish_progress = [&]() {
+        const auto events = controller.events();
+        for (std::size_t i = last_event_count; i < events.size(); ++i) {
+            emit_line(runtime, universe::ui::make_world_event_message(kProtocolVersion, controller, events[i]));
+        }
+        last_event_count = events.size();
+        const auto snapshot = universe::ui::build_world_snapshot(controller);
+        const auto delta = universe::ui::build_world_delta(snapshot, previous_snapshot);
+        emit_line(runtime, universe::ui::make_delta_message(kProtocolVersion, delta));
+        previous_snapshot = snapshot;
+        emit_status(snapshot.tick);
+    };
 
     std::uint64_t step_counter = 0;
     while (runtime.running.load()) {
@@ -110,34 +135,34 @@ int main(int argc, char** argv) {
                 }
                 case ClientCommandType::Pause: {
                     runtime.paused.store(true);
-                    const auto snapshot = universe::ui::build_world_snapshot(controller);
-                    emit_line(runtime, universe::ui::make_status_message(kProtocolVersion, snapshot.tick, true, runtime.speed.load()));
+                    target_year.reset();
+                    emit_status(universe::ui::build_world_snapshot(controller).tick);
                     break;
                 }
                 case ClientCommandType::Resume: {
                     runtime.paused.store(false);
-                    const auto snapshot = universe::ui::build_world_snapshot(controller);
-                    emit_line(runtime, universe::ui::make_status_message(kProtocolVersion, snapshot.tick, false, runtime.speed.load()));
+                    emit_status(universe::ui::build_world_snapshot(controller).tick);
                     break;
                 }
                 case ClientCommandType::SetSpeed: {
                     runtime.speed.store(command.speed);
-                    const auto snapshot = universe::ui::build_world_snapshot(controller);
-                    emit_line(runtime, universe::ui::make_status_message(kProtocolVersion, snapshot.tick, runtime.paused.load(), runtime.speed.load()));
+                    emit_status(universe::ui::build_world_snapshot(controller).tick);
+                    break;
+                }
+                case ClientCommandType::RunUntilYear: {
+                    if (command.target_year <= controller.summary().year) {
+                        emit_line(runtime, universe::ui::make_error_message(
+                            kProtocolVersion, "invalid_command", "Target year must be after the current year"));
+                        break;
+                    }
+                    target_year = command.target_year;
+                    runtime.paused.store(false);
+                    emit_status(universe::ui::build_world_snapshot(controller).tick);
                     break;
                 }
                 case ClientCommandType::SingleStep: {
                     controller.advance_days(1);
-                    const auto events = controller.events();
-                    for (std::size_t i = last_event_count; i < events.size(); ++i) {
-                        emit_line(runtime, universe::ui::make_world_event_message(kProtocolVersion, events[i]));
-                    }
-                    last_event_count = events.size();
-                    const auto snapshot = universe::ui::build_world_snapshot(controller);
-                    const auto delta = universe::ui::build_world_delta(snapshot, previous_snapshot);
-                    emit_line(runtime, universe::ui::make_delta_message(kProtocolVersion, delta));
-                    previous_snapshot = snapshot;
-                    emit_line(runtime, universe::ui::make_status_message(kProtocolVersion, snapshot.tick, runtime.paused.load(), runtime.speed.load()));
+                    publish_progress();
                     break;
                 }
                 case ClientCommandType::RequestSnapshot: {
@@ -153,26 +178,21 @@ int main(int argc, char** argv) {
             }
         }
 
-        if (!runtime.paused.load()) {
+        if (target_year.has_value()) {
+            if (controller.advance_toward_year(*target_year, kJumpDaysPerTick) == 0U ||
+                controller.summary().year >= *target_year) {
+                target_year.reset();
+                runtime.paused.store(true);
+            }
+            publish_progress();
+        } else if (!runtime.paused.load()) {
             const auto speed = runtime.speed.load();
             for (std::uint32_t i = 0; i < speed; ++i) {
                 controller.advance_days(1);
             }
-
-            const auto events = controller.events();
-            for (std::size_t i = last_event_count; i < events.size(); ++i) {
-                emit_line(runtime, universe::ui::make_world_event_message(kProtocolVersion, events[i]));
-            }
-            last_event_count = events.size();
-
-            const auto snapshot = universe::ui::build_world_snapshot(controller);
-            const auto delta = universe::ui::build_world_delta(snapshot, previous_snapshot);
-            emit_line(runtime, universe::ui::make_delta_message(kProtocolVersion, delta));
-            previous_snapshot = snapshot;
-            emit_line(runtime, universe::ui::make_status_message(kProtocolVersion, snapshot.tick, false, speed));
+            publish_progress();
         } else if ((step_counter % 20U) == 0U) {
-            const auto snapshot = universe::ui::build_world_snapshot(controller);
-            emit_line(runtime, universe::ui::make_status_message(kProtocolVersion, snapshot.tick, true, runtime.speed.load()));
+            emit_status(universe::ui::build_world_snapshot(controller).tick);
         }
 
         std::cout.flush();

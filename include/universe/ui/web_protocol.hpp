@@ -96,23 +96,36 @@ enum class ClientCommandType : std::uint8_t {
     SingleStep = 4,
     RequestSnapshot = 5,
     RequestViewModel = 6,
+    RunUntilYear = 7,
 };
+
+// Upper bound on one run_until_year request, so a typo can't run for centuries.
+inline constexpr std::uint64_t kMaxRunUntilYear = 1000;
 
 struct ClientCommand {
     ClientCommandType type{ClientCommandType::Hello};
     std::uint32_t speed{};
     std::uint64_t entity_id{};
     ViewModelKind view_model_kind{ViewModelKind::PersonSummary};
+    std::uint64_t target_year{};
 };
 
 [[nodiscard]] WorldSnapshotView build_world_snapshot(const SimulationController& controller);
 [[nodiscard]] WorldDeltaView build_world_delta(const WorldSnapshotView& current, const WorldSnapshotView& previous);
 [[nodiscard]] std::optional<ClientCommand> parse_client_command(std::string_view json, std::string& error_message);
 [[nodiscard]] std::string make_hello_message(std::uint32_t protocol_version);
-[[nodiscard]] std::string make_status_message(std::uint32_t protocol_version, std::uint64_t tick, bool paused, std::uint32_t speed);
+[[nodiscard]] std::string make_status_message(
+    std::uint32_t protocol_version,
+    std::uint64_t tick,
+    bool paused,
+    std::uint32_t speed,
+    std::optional<std::uint64_t> target_year = std::nullopt);
 [[nodiscard]] std::string make_snapshot_message(std::uint32_t protocol_version, const WorldSnapshotView& snapshot, bool initial);
 [[nodiscard]] std::string make_delta_message(std::uint32_t protocol_version, const WorldDeltaView& delta);
-[[nodiscard]] std::string make_world_event_message(std::uint32_t protocol_version, const SimulationEvent& event);
+[[nodiscard]] std::string make_world_event_message(
+    std::uint32_t protocol_version,
+    const SimulationController& controller,
+    const SimulationEvent& event);
 [[nodiscard]] std::string make_error_message(std::uint32_t protocol_version, std::string_view code, std::string_view message);
 
 }  // namespace universe::ui

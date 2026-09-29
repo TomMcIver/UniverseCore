@@ -1,3 +1,4 @@
+#include "universe/ui/life_history.hpp"
 #include "universe/ui/simulation_controller.hpp"
 #include "universe/ui/view_models.hpp"
 #include "universe/ui/web_protocol.hpp"
@@ -5,9 +6,11 @@
 #include <algorithm>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <variant>
 
 namespace {
 
@@ -72,7 +75,9 @@ bool test_view_model_kind_labels_round_trip() {
     for (const auto kind : {
              universe::ui::ViewModelKind::PersonSummary,
              universe::ui::ViewModelKind::BuildingSummary,
-             universe::ui::ViewModelKind::SettlementEconomy}) {
+             universe::ui::ViewModelKind::SettlementEconomy,
+             universe::ui::ViewModelKind::PersonLifeHistory,
+             universe::ui::ViewModelKind::DemoFocus}) {
         const auto parsed = universe::ui::parse_view_model_kind(universe::ui::view_model_kind_label(kind));
         if (!parsed.has_value() || *parsed != kind || universe::ui::view_model_version(kind) == 0U) {
             return false;
@@ -473,6 +478,238 @@ bool test_determinism_with_observer_idle() {
     return baseline_hash == observed_hash && baseline_hash == observer_hash;
 }
 
+// A world a few years in, with births, job changes and knowledge flow to inspect.
+const universe::ui::SimulationController& aged_controller() {
+    static const universe::ui::SimulationController controller = [] {
+        universe::ui::SimulationController built{universe::SimulationConfig{.seed = 42, .initial_population = 200}};
+        built.advance_years(4);
+        return built;
+    }();
+    return controller;
+}
+
+template <typename Payload>
+const universe::SimulationEvent* first_event_with(const universe::ui::SimulationController& controller) {
+    for (const auto& event : controller.events()) {
+        if (std::holds_alternative<Payload>(event.payload)) {
+            return &event;
+        }
+    }
+    return nullptr;
+}
+
+bool has_entry(const universe::ui::PersonLifeHistoryView& view, const universe::ui::LifeEntryKind kind, const std::uint64_t source_id) {
+    return std::any_of(view.entries.begin(), view.entries.end(), [&](const universe::ui::LifeHistoryEntry& entry) {
+        return entry.kind == kind && entry.source_id == source_id && !entry.text.empty();
+    });
+}
+
+bool test_life_history_records_birth_for_child_and_parents() {
+    const auto& controller = aged_controller();
+    const auto* event = first_event_with<universe::BirthEventPayload>(controller);
+    if (event == nullptr) {
+        std::cerr << "no birth in 4 years at seed 42\n";
+        return false;
+    }
+    const auto& birth = std::get<universe::BirthEventPayload>(event->payload);
+    const auto child = universe::ui::build_person_life_history(controller, birth.child_id);
+    const auto mother = universe::ui::build_person_life_history(controller, birth.mother_id);
+    return child.has_value() && mother.has_value() &&
+        has_entry(*child, universe::ui::LifeEntryKind::Born, event->id) &&
+        has_entry(*mother, universe::ui::LifeEntryKind::HadChild, event->id);
+}
+
+bool test_life_history_records_occupation_change() {
+    const auto& controller = aged_controller();
+    const auto* event = first_event_with<universe::OccupationChangedEventPayload>(controller);
+    if (event == nullptr) {
+        std::cerr << "no occupation change in 4 years at seed 42\n";
+        return false;
+    }
+    const auto& change = std::get<universe::OccupationChangedEventPayload>(event->payload);
+    const auto view = universe::ui::build_person_life_history(controller, change.person_id);
+    return view.has_value() && has_entry(*view, universe::ui::LifeEntryKind::OccupationChanged, event->id);
+}
+
+// No fabricated history: every event-backed entry must name this person in the log.
+bool test_life_history_entries_are_backed_by_records() {
+    const auto& controller = aged_controller();
+    std::size_t checked = 0;
+    for (const auto& person : controller.people()) {
+        if (checked == 40U) {
+            break;
+        }
+        const auto view = universe::ui::build_person_life_history(controller, person.id);
+        if (!view.has_value()) {
+            return false;
+        }
+        for (std::size_t i = 1; i < view->entries.size(); ++i) {
+            if (view->entries[i].at.ticks < view->entries[i - 1].at.ticks) {
+                std::cerr << "life history out of order for person " << person.id << '\n';
+                return false;
+            }
+        }
+        for (const auto& entry : view->entries) {
+            const auto kind = entry.kind;
+            if (kind == universe::ui::LifeEntryKind::LearnedFrom || kind == universe::ui::LifeEntryKind::Taught) {
+                const auto transmissions = controller.knowledge_transmissions();
+                const bool found = std::any_of(transmissions.begin(), transmissions.end(), [&](const universe::KnowledgeTransmission& t) {
+                    return t.id == entry.source_id && (t.speaker_id == person.id || t.recipient_id == person.id);
+                });
+                if (!found) {
+                    std::cerr << "unbacked transmission entry for person " << person.id << '\n';
+                    return false;
+                }
+                continue;
+            }
+            if (kind == universe::ui::LifeEntryKind::AuthoredRecord || kind == universe::ui::LifeEntryKind::ReadRecord) {
+                const auto records = controller.knowledge_records();
+                if (std::none_of(records.begin(), records.end(), [&](const universe::KnowledgeRecord& r) { return r.id == entry.source_id; })) {
+                    std::cerr << "unbacked record entry for person " << person.id << '\n';
+                    return false;
+                }
+                continue;
+            }
+            const auto events = controller.events();
+            if (std::none_of(events.begin(), events.end(), [&](const universe::SimulationEvent& e) { return e.id == entry.source_id; })) {
+                std::cerr << "unbacked event entry for person " << person.id << '\n';
+                return false;
+            }
+        }
+        ++checked;
+    }
+    return checked > 0U;
+}
+
+// Merging into population groups and splitting back out must never read as a death.
+bool test_living_people_have_no_death_entry() {
+    const auto& controller = aged_controller();
+    for (const auto& person : controller.people()) {
+        if (!person.alive) {
+            continue;
+        }
+        const auto view = universe::ui::build_person_life_history(controller, person.id);
+        if (!view.has_value()) {
+            return false;
+        }
+        for (const auto& entry : view->entries) {
+            if (entry.kind == universe::ui::LifeEntryKind::Died) {
+                std::cerr << "living person " << person.id << " has a death entry\n";
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool test_life_history_cap_keeps_newest_entries() {
+    const auto& controller = aged_controller();
+    for (const auto& person : controller.people()) {
+        const auto full = universe::ui::build_person_life_history(controller, person.id);
+        if (!full.has_value() || full->entries.size() < 3U) {
+            continue;
+        }
+        const auto capped = universe::ui::build_person_life_history(controller, person.id, 2U);
+        return capped.has_value() && capped->entries.size() == 2U &&
+            capped->omitted_entries == full->entries.size() - 2U &&
+            capped->entries.back().source_id == full->entries.back().source_id;
+    }
+    std::cerr << "no person with 3+ life entries\n";
+    return false;
+}
+
+bool test_life_history_view_model_message_shape() {
+    const auto& controller = aged_controller();
+    const auto* event = first_event_with<universe::BirthEventPayload>(controller);
+    if (event == nullptr) {
+        return false;
+    }
+    const auto child_id = std::get<universe::BirthEventPayload>(event->payload).child_id;
+    const auto message = universe::ui::make_view_model_message(2U, controller, universe::ui::ViewModelKind::PersonLifeHistory, child_id);
+    return contains(message, "\"kind\":\"person_life_history\"") &&
+        contains(message, "\"entries\":[") &&
+        contains(message, "\"kind\":\"Born\"") &&
+        contains(message, "\"text\":\"") &&
+        contains(message, "\"omittedEntries\":");
+}
+
+std::uint64_t brute_force_life_event_count(const universe::ui::SimulationController& controller, const universe::PersonId id) {
+    const auto view = universe::ui::build_person_life_history(controller, id, std::numeric_limits<std::size_t>::max());
+    if (!view.has_value()) {
+        return 0U;
+    }
+    return static_cast<std::uint64_t>(std::count_if(view->entries.begin(), view->entries.end(), [](const universe::ui::LifeHistoryEntry& entry) {
+        return entry.kind != universe::ui::LifeEntryKind::LearnedFrom && entry.kind != universe::ui::LifeEntryKind::Taught &&
+            entry.kind != universe::ui::LifeEntryKind::AuthoredRecord && entry.kind != universe::ui::LifeEntryKind::ReadRecord;
+    }));
+}
+
+bool test_demo_focus_picks_living_person_with_most_life_events() {
+    const auto& controller = aged_controller();
+    const auto settlement_id = controller.settlements().front().id;
+    const auto focus = universe::ui::build_demo_focus(controller, settlement_id);
+    if (!focus.has_value() || !focus->person_id.has_value()) {
+        std::cerr << "no demo focus for settlement " << settlement_id << '\n';
+        return false;
+    }
+
+    std::optional<universe::PersonId> expected{};
+    std::uint64_t best = 0;
+    for (const auto& person : controller.people()) {
+        if (!person.alive) {
+            continue;
+        }
+        const auto households = controller.households();
+        const auto household = std::find_if(households.begin(), households.end(), [&](const universe::Household& candidate) {
+            return candidate.id == person.household_id;
+        });
+        if (household == households.end() || household->settlement_id != settlement_id) {
+            continue;
+        }
+        const auto count = brute_force_life_event_count(controller, person.id);
+        if (!expected.has_value() || count > best || (count == best && person.id < *expected)) {
+            expected = person.id;
+            best = count;
+        }
+    }
+    return expected.has_value() && *focus->person_id == *expected && focus->life_event_count == best;
+}
+
+bool test_world_event_message_has_readable_summary() {
+    const auto& controller = aged_controller();
+    const auto* event = first_event_with<universe::BirthEventPayload>(controller);
+    if (event == nullptr) {
+        return false;
+    }
+    const auto message = universe::ui::make_world_event_message(2U, controller, *event);
+    const auto child_id = std::get<universe::BirthEventPayload>(event->payload).child_id;
+    return contains(message, "\"summary\":\"Villager " + std::to_string(child_id) + " was born to Villager ");
+}
+
+bool test_parse_run_until_year_command() {
+    std::string error;
+    const auto command = universe::ui::parse_client_command("{\"type\":\"run_until_year\",\"year\":20}", error);
+    std::string rejected_error;
+    const auto rejected = universe::ui::parse_client_command("{\"type\":\"run_until_year\",\"year\":0}", rejected_error);
+    return command.has_value() && command->type == universe::ui::ClientCommandType::RunUntilYear &&
+        command->target_year == 20U && !rejected.has_value();
+}
+
+bool test_advance_toward_year_stops_exactly_on_year_boundary() {
+    universe::ui::SimulationController chunked{universe::SimulationConfig{.seed = 7, .initial_population = 200}};
+    std::uint64_t calls = 0;
+    while (chunked.advance_toward_year(2U, 60U) > 0U) {
+        ++calls;
+    }
+    universe::ui::SimulationController whole{universe::SimulationConfig{.seed = 7, .initial_population = 200}};
+    whole.advance_years(2);
+    return calls > 1U && chunked.summary().year == 2U &&
+        chunked.summary().time.ticks == whole.summary().time.ticks &&
+        universe::snapshot_hash64(chunked.simulation().save_snapshot()) ==
+            universe::snapshot_hash64(whole.simulation().save_snapshot()) &&
+        chunked.advance_toward_year(2U, 60U) == 0U;
+}
+
 }  // namespace
 
 int main() {
@@ -503,6 +740,16 @@ int main() {
         {"snapshot_forwards_real_canonical_positions", test_snapshot_forwards_real_canonical_positions},
         {"snapshot_message_includes_current_activity", test_snapshot_message_includes_current_activity},
         {"determinism_with_observer_idle", test_determinism_with_observer_idle},
+        {"life_history_records_birth_for_child_and_parents", test_life_history_records_birth_for_child_and_parents},
+        {"life_history_records_occupation_change", test_life_history_records_occupation_change},
+        {"life_history_entries_are_backed_by_records", test_life_history_entries_are_backed_by_records},
+        {"living_people_have_no_death_entry", test_living_people_have_no_death_entry},
+        {"life_history_cap_keeps_newest_entries", test_life_history_cap_keeps_newest_entries},
+        {"life_history_view_model_message_shape", test_life_history_view_model_message_shape},
+        {"demo_focus_picks_living_person_with_most_life_events", test_demo_focus_picks_living_person_with_most_life_events},
+        {"world_event_message_has_readable_summary", test_world_event_message_has_readable_summary},
+        {"parse_run_until_year_command", test_parse_run_until_year_command},
+        {"advance_toward_year_stops_exactly_on_year_boundary", test_advance_toward_year_stops_exactly_on_year_boundary},
     };
 
     bool ok = true;

@@ -37,6 +37,7 @@ add_executable(universe_ui_bridge src/ui_bridge_main.cpp)
 target_link_libraries(universe_ui_bridge PRIVATE universe_ui_support)
 
 add_library(universe_ui_support
+    src/ui/life_history.cpp
     src/ui/simulation_controller.cpp
     src/ui/view_models.cpp
     src/ui/web_protocol.cpp

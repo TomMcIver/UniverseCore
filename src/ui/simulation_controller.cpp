@@ -512,6 +512,26 @@ void SimulationController::advance_years(const std::uint64_t years_count) {
     simulation_.run_years(years_count);
 }
 
+std::uint64_t SimulationController::advance_toward_year(const std::uint64_t target_year, const std::uint64_t max_days) {
+    const auto day_ticks = days(1).ticks;
+    const auto year_ticks = days(DemographicCalendarAdapter::kDaysPerYear).ticks;
+    if (day_ticks <= 0 || max_days == 0U ||
+        target_year > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() / year_ticks)) {
+        return 0U;
+    }
+
+    const auto target_ticks = static_cast<std::int64_t>(target_year) * year_ticks;
+    const auto now_ticks = simulation_.state().time.ticks;
+    if (now_ticks >= target_ticks) {
+        return 0U;
+    }
+
+    const auto remaining_days = static_cast<std::uint64_t>((target_ticks - now_ticks + day_ticks - 1) / day_ticks);
+    const auto step_days = std::min(remaining_days, max_days);
+    advance_days(step_days);
+    return step_days;
+}
+
 SnapshotOperationResult SimulationController::save_snapshot_file(const std::string& path) const {
     SnapshotOperationResult result{};
     result.path = path;

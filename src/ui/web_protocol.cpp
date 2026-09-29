@@ -15,6 +15,7 @@
 #include <unordered_set>
 
 #include "protocol_text.hpp"
+#include "universe/ui/life_history.hpp"
 
 namespace universe::ui {
 
@@ -423,6 +424,17 @@ std::optional<ClientCommand> parse_client_command(std::string_view json, std::st
             .view_model_kind = *kind,
         };
     }
+    if (*type == "run_until_year") {
+        const auto year = extract_u64_field(json, "year");
+        if (!year.has_value() || *year == 0U || *year > kMaxRunUntilYear) {
+            error_message = "Invalid year";
+            return std::nullopt;
+        }
+        return ClientCommand{
+            .type = ClientCommandType::RunUntilYear,
+            .target_year = *year,
+        };
+    }
 
     error_message = "Unknown command type";
     return std::nullopt;
@@ -437,11 +449,13 @@ std::string make_status_message(
     const std::uint32_t protocol_version,
     const std::uint64_t tick,
     const bool paused,
-    const std::uint32_t speed) {
+    const std::uint32_t speed,
+    const std::optional<std::uint64_t> target_year) {
     return "{\"protocolVersion\":" + std::to_string(protocol_version) +
         ",\"type\":\"simulation_status\",\"tick\":" + std::to_string(tick) +
         ",\"payload\":{\"paused\":" + std::string{paused ? "true" : "false"} +
-        ",\"speed\":" + std::to_string(speed) + "}}";
+        ",\"speed\":" + std::to_string(speed) +
+        ",\"targetYear\":" + (target_year.has_value() ? std::to_string(*target_year) : std::string{"null"}) + "}}";
 }
 
 namespace {
@@ -583,7 +597,10 @@ std::string make_delta_message(const std::uint32_t protocol_version, const World
     return out.str();
 }
 
-std::string make_world_event_message(const std::uint32_t protocol_version, const SimulationEvent& event) {
+std::string make_world_event_message(
+    const std::uint32_t protocol_version,
+    const SimulationController& controller,
+    const SimulationEvent& event) {
     std::ostringstream out;
     out << "{\"protocolVersion\":" << protocol_version
         << ",\"type\":\"world_event\""
@@ -591,6 +608,7 @@ std::string make_world_event_message(const std::uint32_t protocol_version, const
         << ",\"payload\":{"
         << "\"eventId\":" << event.id
         << ",\"eventType\":\"" << event_type_label(event.type) << "\""
+        << ",\"summary\":\"" << json_escape(describe_event(controller, event)) << "\""
         << ",\"timestampTicks\":" << static_cast<std::uint64_t>(event.timestamp.ticks < 0 ? 0 : event.timestamp.ticks);
 
     if (event.type == EventType::Birth) {
