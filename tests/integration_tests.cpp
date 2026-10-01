@@ -537,9 +537,11 @@ int main() {
             auto no_omniscience_config = config;
             no_omniscience_config.initial_population = 300;
             no_omniscience_config.initial_region_count = 1;
-            no_omniscience_config.base_region_area_units = 60;
-            no_omniscience_config.initial_household_food_units = 10;
-            no_omniscience_config.food_production_scale_percent = 90;
+            // Founding is pressure-driven (ADR 0002), so this needs one settlement that
+            // starts over the population threshold, on land that survives its first
+            // split; the old starved-out world (60 land units) founds nothing now.
+            no_omniscience_config.initial_settlements_per_region = 1;
+            no_omniscience_config.base_region_area_units = 480;
 
             universe::Simulation no_omniscience_run{no_omniscience_config};
             no_omniscience_run.run_years(220);
@@ -1194,6 +1196,9 @@ int main() {
         m3_success.seed = 93;
         m3_success.initial_population = 260;
         m3_success.initial_region_count = 2;
+        // Founding is pressure-driven (ADR 0002): each region starts as one settlement
+        // of about 130 people, over the split threshold, instead of about four of 30.
+        m3_success.initial_settlements_per_region = 1;
         m3_success.base_region_area_units = 130;
         m3_success.initial_household_food_units = 90;
         m3_success.food_production_scale_percent = 105;
