@@ -122,6 +122,11 @@ if(UNIVERSECORE_BUILD_TESTS)
     add_test(NAME universe_life_events_placement_tests COMMAND universe_life_events_placement_tests)
     set_tests_properties(universe_life_events_placement_tests PROPERTIES LABELS "fast")
 
+    add_executable(universe_lod_roundtrip_tests tests/lod_roundtrip_tests.cpp)
+    target_link_libraries(universe_lod_roundtrip_tests PRIVATE universe_core)
+    add_test(NAME universe_lod_roundtrip_tests COMMAND universe_lod_roundtrip_tests)
+    set_tests_properties(universe_lod_roundtrip_tests PROPERTIES LABELS "fast")
+
     add_executable(universe_construction_tests tests/construction_tests.cpp)
     target_link_libraries(universe_construction_tests PRIVATE universe_core)
     add_test(NAME universe_construction_tests COMMAND universe_construction_tests)

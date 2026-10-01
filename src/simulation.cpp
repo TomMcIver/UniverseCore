@@ -511,6 +511,21 @@ std::int64_t clamp_i64(const std::int64_t value, const std::int64_t lo, const st
     return CohortOccupationGroup::Unspecified;
 }
 
+// Resolves a population group's coarse occupation back to a concrete one. The
+// roll is scoped by the caller so the choice is stable across runs.
+[[nodiscard]] Occupation occupation_from_cohort_group(const CohortOccupationGroup group, const SimulationSeed roll_seed) noexcept {
+    switch (group) {
+        case CohortOccupationGroup::Food:
+            return seed_random_bounded(roll_seed, 2U) == 0U ? Occupation::SubsistenceCultivator : Occupation::WildFoodGatherer;
+        case CohortOccupationGroup::Materials:
+            return seed_random_bounded(roll_seed, 2U) == 0U ? Occupation::WoodGatherer : Occupation::StoneExtractor;
+        case CohortOccupationGroup::Craft:
+            return Occupation::CraftWorker;
+        default:
+            return Occupation::None;
+    }
+}
+
 [[nodiscard]] CohortHealthBand health_band_from_points(const std::int32_t points) noexcept {
     if (points < 400) {
         return CohortHealthBand::Low;
@@ -2902,6 +2917,12 @@ void Simulation::promote_region_to_detailed(const RegionId region_id) {
                 break;
             }
             person->alive = true;
+            // Demotion drops the exact occupation and keeps only the group, so
+            // a restored person must be resolved from it again; left at None
+            // they produce nothing until the next annual reassignment.
+            person->occupation = occupation_from_cohort_group(
+                cohort.occupation_group,
+                derive_seed(settlement_seed(cohort.settlement_id), SeedDomain::InitialPopulation, cohort.id ^ restored));
             person->occupation_history_resync_pending = true;
             auto* household = [&]() -> Household* {
                 for (auto& entry : state_.households) {
@@ -2942,18 +2963,7 @@ void Simulation::promote_region_to_detailed(const RegionId region_id) {
                 age_years = 60U + static_cast<std::uint32_t>(seed_random_bounded(roll_seed, 25U));
             }
 
-            Occupation occupation = Occupation::None;
-            if (cohort.occupation_group == CohortOccupationGroup::Food) {
-                occupation = (seed_random_bounded(roll_seed, 2U) == 0U)
-                    ? Occupation::SubsistenceCultivator
-                    : Occupation::WildFoodGatherer;
-            } else if (cohort.occupation_group == CohortOccupationGroup::Materials) {
-                occupation = (seed_random_bounded(roll_seed, 2U) == 0U)
-                    ? Occupation::WoodGatherer
-                    : Occupation::StoneExtractor;
-            } else if (cohort.occupation_group == CohortOccupationGroup::Craft) {
-                occupation = Occupation::CraftWorker;
-            }
+            const Occupation occupation = occupation_from_cohort_group(cohort.occupation_group, roll_seed);
 
             state_.people.push_back(Person{
                 .id = person_id,
@@ -2973,6 +2983,14 @@ void Simulation::promote_region_to_detailed(const RegionId region_id) {
     }
 
     state_.population_cohorts = std::move(remaining);
+
+    // Restored members were appended out of id order. Snapshots store members
+    // sorted by id, so unsorted live state would diverge from a reloaded run.
+    for (auto& household : state_.households) {
+        if (household.region_id == region_id) {
+            std::sort(household.member_ids.begin(), household.member_ids.end());
+        }
+    }
 
     const auto recompute_household_wealth = [](Household& household) {
         const auto wealth_food = std::max<std::int64_t>(0, household.resources.food_inventory.value);
