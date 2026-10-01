@@ -38,6 +38,18 @@ universe::SimulationConfig demo_config(const std::uint64_t seed) {
     };
 }
 
+// Founding is pressure-driven (ADR 0002): a settlement splits once it is over
+// the population threshold. The default layout starts below it, so tests that
+// need a founding start from one settlement holding the whole population, with
+// the land of the default four regions.
+universe::SimulationConfig overgrown_start_config(const std::uint64_t seed) {
+    auto config = demo_config(seed);
+    config.initial_region_count = 1;
+    config.initial_settlements_per_region = 1;
+    config.base_region_area_units = 480;
+    return config;
+}
+
 const universe::Settlement* find_settlement(const universe::WorldState& state, const universe::SettlementId id) {
     for (const auto& settlement : state.settlements) {
         if (settlement.id == id) {
@@ -158,7 +170,7 @@ void test_household_relocations_accompany_settlement_founding() {
     bool saw_founding = false;
 
     for (const auto seed : seeds) {
-        universe::Simulation sim{demo_config(seed)};
+        universe::Simulation sim{overgrown_start_config(seed)};
         sim.run_years(30);
         const auto& state = sim.state();
 

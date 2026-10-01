@@ -265,11 +265,18 @@ constexpr std::uint32_t kInitialAllocatedSettlementShare = 8'500;
 constexpr std::uint32_t kHighPressureThresholdPer10k = 8'500;
 constexpr std::uint32_t kFoundingMinimumUnallocatedShare = 1'500;
 constexpr std::uint32_t kFoundingDefaultShare = 900;
-constexpr std::uint64_t kFoundingMinimumSourceHouseholds = 4;
-constexpr std::uint64_t kFoundingMinimumNewHouseholds = 2;
-constexpr std::uint64_t kFoundingMinimumRemainingHouseholds = 1;
+// Pressure-driven fission (ADR 0002). A settlement splits when it is simply
+// too big, or when it is big enough to split and has been short of food for
+// two years running. A split must leave the daughter and the source at least
+// these sizes, so some strain-driven candidates cannot split at all.
+constexpr std::uint64_t kFissionPopulationThreshold = 120;
+constexpr std::uint64_t kFissionStrainMinimumPopulation = 40;
+constexpr std::uint32_t kFissionStrainDays = 2U * 365U;
+constexpr std::uint64_t kFissionMinimumDaughterPopulation = kViableSettlementSize;
+constexpr std::uint64_t kFissionMinimumSourcePopulation = 40;
+// A daughter aims for this fraction of the source (1 in N), never below the minimum.
+constexpr std::uint64_t kFissionDaughterTargetDivisor = 4;
 constexpr std::uint64_t kFoundingMinimumEligibleWorkers = 4;
-constexpr std::uint32_t kFoundingMinimumEconomicViabilityStreak = 2;
 constexpr std::uint32_t kFoundingMinimumSourceShareAfterSplit = 1'500;
 constexpr std::uint64_t kTargetHouseholdsPerSettlement = 8;
 constexpr std::uint64_t kMaxInitialSettlementsPerRegion = 4;
@@ -5566,7 +5573,7 @@ void Simulation::process_settlement_founding(const std::uint64_t demographic_yea
         std::uint32_t best_pressure = 0;
 
         for (auto* candidate : active_settlements) {
-            std::uint64_t alive_households = 0;
+            std::uint64_t alive_population = 0;
             std::uint64_t eligible_workers = 0;
             std::int64_t required_food = 0;
             std::int64_t stored_food = std::max<std::int64_t>(0, candidate->commons_food.value);
@@ -5579,11 +5586,10 @@ void Simulation::process_settlement_founding(const std::uint64_t demographic_yea
                     throw std::overflow_error("Settlement founding stored food aggregation overflow");
                 }
 
-                bool has_alive = false;
                 for (const auto member_id : household.member_ids) {
                     for (const auto& person : state_.people) {
                         if (person.id == member_id && person.alive) {
-                            has_alive = true;
+                            ++alive_population;
                             if (!checked_add_i64(required_food, food_requirement_for_person(person), required_food)) {
                                 throw std::overflow_error("Settlement founding required food aggregation overflow");
                             }
@@ -5593,21 +5599,16 @@ void Simulation::process_settlement_founding(const std::uint64_t demographic_yea
                         }
                     }
                 }
-
-                if (has_alive) {
-                    ++alive_households;
-                }
             }
 
-            if (alive_households < kFoundingMinimumSourceHouseholds) {
+            const bool is_overgrown = alive_population >= kFissionPopulationThreshold;
+            const bool is_strained = alive_population >= kFissionStrainMinimumPopulation &&
+                candidate->days_under_food_strain >= kFissionStrainDays;
+            if (!is_overgrown && !is_strained) {
                 continue;
             }
 
             if (required_food <= 0 || eligible_workers < kFoundingMinimumEligibleWorkers) {
-                continue;
-            }
-
-            if (candidate->economic_viability_streak < kFoundingMinimumEconomicViabilityStreak) {
                 continue;
             }
 
@@ -5660,19 +5661,61 @@ void Simulation::process_settlement_founding(const std::uint64_t demographic_yea
             }
         }
 
-        if (source_alive_households.size() < kFoundingMinimumSourceHouseholds) {
+        // Choose which households move before changing any state, so a split
+        // that cannot meet the minimum sizes leaves the world untouched. Order
+        // is scoped by the source and the year, never by consumption order.
+        std::sort(source_alive_households.begin(), source_alive_households.end(), [&](const Household* lhs, const Household* rhs) {
+            const auto lhs_seed = derive_seed(household_seed(lhs->id), SeedDomain::SettlementHouseholdSelection, demographic_year ^ source->id);
+            const auto rhs_seed = derive_seed(household_seed(rhs->id), SeedDomain::SettlementHouseholdSelection, demographic_year ^ source->id);
+            if (lhs_seed.value != rhs_seed.value) {
+                return lhs_seed.value < rhs_seed.value;
+            }
+            return lhs->id < rhs->id;
+        });
+
+        std::vector<std::uint64_t> household_sizes;
+        household_sizes.reserve(source_alive_households.size());
+        std::uint64_t source_population = 0;
+        for (const auto* household : source_alive_households) {
+            std::uint64_t alive_members = 0;
+            for (const auto member_id : household->member_ids) {
+                alive_members += alive_person_ids.contains(member_id) ? 1U : 0U;
+            }
+            household_sizes.push_back(alive_members);
+            source_population += alive_members;
+        }
+
+        if (source_population < kFissionMinimumSourcePopulation + kFissionMinimumDaughterPopulation) {
+            continue;
+        }
+        const auto max_moved_population = source_population - kFissionMinimumSourcePopulation;
+        const auto target_moved_population =
+            std::max<std::uint64_t>(kFissionMinimumDaughterPopulation, source_population / kFissionDaughterTargetDivisor);
+
+        std::vector<Household*> moving_households;
+        std::vector<Household*> staying_households;
+        std::uint64_t moved_population = 0;
+        for (std::size_t i = 0; i < source_alive_households.size(); ++i) {
+            const bool fits = moved_population + household_sizes[i] <= max_moved_population;
+            if (fits && moved_population < target_moved_population) {
+                moving_households.push_back(source_alive_households[i]);
+                moved_population += household_sizes[i];
+            } else {
+                staying_households.push_back(source_alive_households[i]);
+            }
+        }
+        if (moved_population < kFissionMinimumDaughterPopulation) {
             continue;
         }
 
-        auto move_count = std::max<std::uint64_t>(kFoundingMinimumNewHouseholds, source_alive_households.size() / 4U);
-        const auto max_movable = source_alive_households.size() - kFoundingMinimumRemainingHouseholds;
-        if (max_movable < kFoundingMinimumNewHouseholds) {
-            continue;
-        }
-        move_count = std::min<std::uint64_t>(move_count, max_movable);
+        const auto move_count = static_cast<std::uint64_t>(moving_households.size());
+        source_alive_households = moving_households;
+        source_alive_households.insert(source_alive_households.end(), staying_households.begin(), staying_households.end());
 
         const auto new_settlement_id = next_settlement_id();
         const auto source_settlement_id = source->id;
+        // The split is the response to strain, so the source starts counting again.
+        source->days_under_food_strain = 0U;
         std::uint32_t assigned_share = 0U;
         if (unallocated_share >= kFoundingMinimumUnallocatedShare) {
             assigned_share = std::min<std::uint32_t>(unallocated_share, kFoundingDefaultShare);
@@ -5699,15 +5742,6 @@ void Simulation::process_settlement_founding(const std::uint64_t demographic_yea
         });
         std::sort(state_.settlement_aggregates.begin(), state_.settlement_aggregates.end(), [](const SettlementAggregateState& lhs, const SettlementAggregateState& rhs) {
             return lhs.settlement_id < rhs.settlement_id;
-        });
-
-        std::sort(source_alive_households.begin(), source_alive_households.end(), [&](const Household* lhs, const Household* rhs) {
-            const auto lhs_seed = derive_seed(household_seed(lhs->id), SeedDomain::SettlementHouseholdSelection, demographic_year ^ new_settlement_id);
-            const auto rhs_seed = derive_seed(household_seed(rhs->id), SeedDomain::SettlementHouseholdSelection, demographic_year ^ new_settlement_id);
-            if (lhs_seed.value != rhs_seed.value) {
-                return lhs_seed.value < rhs_seed.value;
-            }
-            return lhs->id < rhs->id;
         });
 
         for (std::uint64_t i = 0; i < move_count; ++i) {
@@ -5774,6 +5808,15 @@ void Simulation::merge_settlements(const SettlementId survivor_id, const Settlem
             record.settlement_id = survivor_id;
         }
     }
+    // An access must stay within its record's settlement, so readers of the
+    // moved records now read in the survivor. The semantic key indexes are
+    // keyed by settlement, so they are rebuilt to match what a reload produces.
+    for (auto& access : state_.knowledge_record_accesses) {
+        if (access.reader_settlement_id == absorbed_id) {
+            access.reader_settlement_id = survivor_id;
+        }
+    }
+    rebuild_record_indexes();
 
     survivor->materials.wood.value += absorbed->materials.wood.value;
     survivor->materials.stone.value += absorbed->materials.stone.value;
@@ -5789,6 +5832,10 @@ void Simulation::merge_settlements(const SettlementId survivor_id, const Settlem
     absorbed->materials.stone.value = 0;
     absorbed->materials.timber.value = 0;
     absorbed->materials.basic_tool.value = 0;
+
+    // Commons food is finite regional stock, so it moves with the households.
+    survivor->commons_food.value += absorbed->commons_food.value;
+    absorbed->commons_food.value = 0;
 
     const auto combined_share =
         static_cast<std::uint64_t>(survivor->access_share_points) + static_cast<std::uint64_t>(absorbed->access_share_points);
@@ -5814,62 +5861,60 @@ void Simulation::merge_settlements(const SettlementId survivor_id, const Settlem
     }
 }
 
+// ADR 0002: a settlement that has stayed below the viable size for five years
+// is absorbed by the nearest viable neighbour in its region. Only the survivor
+// must show sustained viability; the absorbed side needs no streak or minimum
+// population of its own, which is what lets the small settlements fission
+// leaves behind actually be resolved.
 void Simulation::process_settlement_merging() {
     constexpr std::int64_t kMergeDistanceThreshold = 2'000;
-    constexpr std::uint32_t kMergeViabilityStreakDays = 365U;
-    constexpr std::uint64_t kMergeMinimumPopulation = 50U;
+    constexpr std::uint32_t kSurvivorViabilityStreakDays = 365U;
+    constexpr std::uint32_t kAbsorptionBelowViableDays = 5U * 365U;
 
-    std::vector<SettlementId> candidate_ids;
+    std::vector<SettlementId> absorbed_candidate_ids;
     for (const auto& settlement : state_.settlements) {
-        if (settlement.active && settlement.economic_viability_streak >= kMergeViabilityStreakDays &&
-            settlement.population >= kMergeMinimumPopulation) {
-            candidate_ids.push_back(settlement.id);
+        if (settlement.active && settlement.days_below_viable_size >= kAbsorptionBelowViableDays) {
+            absorbed_candidate_ids.push_back(settlement.id);
         }
     }
-    std::sort(candidate_ids.begin(), candidate_ids.end());
+    std::sort(absorbed_candidate_ids.begin(), absorbed_candidate_ids.end());
 
-    std::unordered_set<SettlementId> merged_away;
-    for (std::size_t i = 0; i < candidate_ids.size(); ++i) {
-        const auto a_id = candidate_ids[i];
-        if (merged_away.contains(a_id)) {
+    for (const auto absorbed_id : absorbed_candidate_ids) {
+        const auto* absorbed = find_settlement(absorbed_id);
+        if (absorbed == nullptr || !absorbed->active) {
             continue;
         }
 
-        for (std::size_t j = i + 1; j < candidate_ids.size(); ++j) {
-            const auto b_id = candidate_ids[j];
-            if (merged_away.contains(b_id)) {
+        const Settlement* survivor = nullptr;
+        std::int64_t survivor_distance_squared = 0;
+        for (const auto& candidate : state_.settlements) {
+            if (!candidate.active || candidate.id == absorbed_id || candidate.region_id != absorbed->region_id) {
+                continue;
+            }
+            if (candidate.population < kViableSettlementSize ||
+                candidate.economic_viability_streak < kSurvivorViabilityStreakDays) {
                 continue;
             }
 
-            const auto* a = find_settlement(a_id);
-            const auto* b = find_settlement(b_id);
-            if (a == nullptr || b == nullptr || !a->active || !b->active) {
-                continue;
-            }
-            if (a->region_id != b->region_id) {
-                continue;
-            }
-
-            const auto dx = a->position_x - b->position_x;
-            const auto dz = a->position_z - b->position_z;
+            const auto dx = candidate.position_x - absorbed->position_x;
+            const auto dz = candidate.position_z - absorbed->position_z;
             const auto distance_squared = (dx * dx) + (dz * dz);
             if (distance_squared > kMergeDistanceThreshold * kMergeDistanceThreshold) {
                 continue;
             }
 
-            auto survivor_id = a_id;
-            auto absorbed_id = b_id;
-            if (b->population > a->population || (b->population == a->population && b_id < a_id)) {
-                survivor_id = b_id;
-                absorbed_id = a_id;
+            const bool is_better = survivor == nullptr || distance_squared < survivor_distance_squared ||
+                (distance_squared == survivor_distance_squared &&
+                 (candidate.population > survivor->population ||
+                  (candidate.population == survivor->population && candidate.id < survivor->id)));
+            if (is_better) {
+                survivor = &candidate;
+                survivor_distance_squared = distance_squared;
             }
+        }
 
-            merge_settlements(survivor_id, absorbed_id);
-            merged_away.insert(absorbed_id);
-
-            if (absorbed_id == a_id) {
-                break;
-            }
+        if (survivor != nullptr) {
+            merge_settlements(survivor->id, absorbed_id);
         }
     }
 }
