@@ -260,6 +260,9 @@ struct Settlement {
     // settlement keeps its last value until the next daily update zeroes it,
     // because merges and extinctions happen between daily updates.
     std::uint32_t days_below_viable_size{};
+    // Consecutive days on which at least a third of this settlement's
+    // households went short of food. Resets on the first day below that share.
+    std::uint32_t days_under_food_strain{};
 };
 
 enum class BuildingType : std::uint8_t {
@@ -875,7 +878,7 @@ private:
     void rebuild_communication_indexes();
     void rebuild_record_indexes();
     void refresh_economic_aggregates() noexcept;
-    void advance_settlement_viability_days() noexcept;
+    void advance_settlement_daily_counters();
     void refresh_population_count() noexcept;
 
     struct KnowledgeSemanticKey {

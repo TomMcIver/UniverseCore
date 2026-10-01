@@ -73,7 +73,7 @@ void write_u64_le(std::vector<std::byte>& bytes, const std::size_t offset, const
     }
 }
 
-constexpr std::size_t kViabilityRecordSize = 12U;
+constexpr std::size_t kViabilityRecordSize = 16U;
 
 // Rewrites a v26 snapshot as v25 by removing the v26-only section (settlement
 // viability counters) that sits immediately before the 16-byte aggregate
@@ -481,6 +481,32 @@ void test_v26_viability_counters_survive_save_load_continuation() {
     require(uninterrupted.save_snapshot() == restored.save_snapshot(), "save/load continuation must match the uninterrupted run");
 }
 
+void test_food_strain_days_survive_save_load_and_migrate_to_zero() {
+    universe::Simulation source{demo_config(42)};
+    source.advance(universe::days(60));
+    bool saw_strain_days = false;
+    for (const auto& settlement : source.state().settlements) {
+        saw_strain_days = saw_strain_days || settlement.days_under_food_strain > 0U;
+    }
+    require(saw_strain_days, "the source world must hold a non-zero strain counter for these checks to prove anything");
+
+    universe::Simulation restored{universe::SimulationConfig{.seed = 999U, .initial_population = 10U}};
+    require(universe::Simulation::load_snapshot(source.save_snapshot(), restored).ok, "v26 snapshot with strain days must load");
+    require(restored.state().settlements.size() == source.state().settlements.size(), "settlement count must round-trip");
+    for (std::size_t i = 0; i < source.state().settlements.size(); ++i) {
+        require(
+            restored.state().settlements[i].days_under_food_strain == source.state().settlements[i].days_under_food_strain,
+            "strain days must survive a snapshot round trip");
+    }
+
+    const auto v25 = downgrade_to_v25(source.save_snapshot(), source.state());
+    universe::Simulation migrated{universe::SimulationConfig{.seed = 999U, .initial_population = 10U}};
+    require(universe::Simulation::load_snapshot(v25, migrated).ok, "a v25 snapshot must load under schema v26");
+    for (const auto& settlement : migrated.state().settlements) {
+        require(settlement.days_under_food_strain == 0U, "migration must start every settlement's strain days at zero");
+    }
+}
+
 void test_snapshot_taken_at_a_year_boundary_round_trips_with_inactive_settlements() {
     // Merges and extinctions happen in the annual step, after the last daily
     // viability update, so a snapshot taken right there can hold an inactive
@@ -537,6 +563,7 @@ int main() {
     test_days_below_viable_size_counts_one_per_day();
     test_viable_settlements_keep_a_zero_counter();
     test_v26_viability_counters_survive_save_load_continuation();
+    test_food_strain_days_survive_save_load_and_migrate_to_zero();
     test_snapshot_taken_at_a_year_boundary_round_trips_with_inactive_settlements();
     test_v25_snapshots_migrate_with_zeroed_viability_counters();
     std::cout << "life event and building placement tests passed\n";

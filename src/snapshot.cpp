@@ -272,7 +272,8 @@ constexpr std::uint16_t kMaxFacingDegreesExclusive = 360U;
 constexpr std::uint16_t kViabilitySectionSchemaVersion = 26U;
 
 // Reads the schema v26 section: one record per settlement in ascending id
-// order, carrying the days it has spent below the viable size.
+// order, carrying the days it has spent below the viable size and under food
+// strain.
 [[nodiscard]] SnapshotLoadResult read_v26_viability_section(SnapshotReader& reader, WorldState& state) {
     std::uint64_t record_count = 0;
     if (!reader.read_u64(record_count)) {
@@ -292,7 +293,9 @@ constexpr std::uint16_t kViabilitySectionSchemaVersion = 26U;
     for (std::uint64_t i = 0; i < record_count; ++i) {
         SettlementId settlement_id = 0;
         std::uint32_t days_below_viable_size = 0;
-        if (!reader.read_u64(settlement_id) || !reader.read_u32(days_below_viable_size)) {
+        std::uint32_t days_under_food_strain = 0;
+        if (!reader.read_u64(settlement_id) || !reader.read_u32(days_below_viable_size) ||
+            !reader.read_u32(days_under_food_strain)) {
             return load_error(SnapshotErrorCode::TruncatedData, "Snapshot settlement viability record is truncated");
         }
         if (settlement_id <= previous_id) {
@@ -304,6 +307,7 @@ constexpr std::uint16_t kViabilitySectionSchemaVersion = 26U;
             return load_error(SnapshotErrorCode::InvalidReference, "Snapshot settlement viability references unknown settlement");
         }
         settlement_it->second->days_below_viable_size = days_below_viable_size;
+        settlement_it->second->days_under_food_strain = days_under_food_strain;
     }
 
     return SnapshotLoadResult{.ok = true, .code = SnapshotErrorCode::None, .message = {}};
@@ -1138,6 +1142,7 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
     for (const auto* settlement : settlement_order) {
         payload.write_u64(settlement->id);
         payload.write_u32(settlement->days_below_viable_size);
+        payload.write_u32(settlement->days_under_food_strain);
     }
 
     payload.write_u64(simulation.state_.aggregate_births_total);

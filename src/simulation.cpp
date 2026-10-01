@@ -258,6 +258,9 @@ constexpr std::uint32_t kWorkDayChancePer10k = 7'000U;
 }
 
 constexpr std::uint32_t kSettlementShareScale = 10'000;
+// A day is strained for a settlement when at least 1 in this many of its
+// households went short of food.
+constexpr std::uint64_t kFoodStrainShortageDenominator = 3;
 constexpr std::uint32_t kInitialAllocatedSettlementShare = 8'500;
 constexpr std::uint32_t kHighPressureThresholdPer10k = 8'500;
 constexpr std::uint32_t kFoundingMinimumUnallocatedShare = 1'500;
@@ -1827,7 +1830,7 @@ void Simulation::process_food_period(const std::uint64_t food_period) {
     refresh_environment_aggregates();
     refresh_material_aggregates();
     refresh_economic_aggregates();
-    advance_settlement_viability_days();
+    advance_settlement_daily_counters();
 }
 
 // Ticket #37: re-derives every detailed-resolution alive person's
@@ -8190,12 +8193,44 @@ void Simulation::process_construction(const std::uint64_t demographic_year) {
 // It must not run from refresh_economic_aggregates itself: that is also called
 // by demotion, promotion and population injection, which would add days that
 // never elapsed.
-void Simulation::advance_settlement_viability_days() noexcept {
+void Simulation::advance_settlement_daily_counters() {
+    struct HouseholdShortage {
+        std::uint64_t households{0};
+        std::uint64_t short_households{0};
+    };
+    std::unordered_map<SettlementId, HouseholdShortage> shortage_by_settlement;
+    shortage_by_settlement.reserve(state_.settlements.size());
+    for (const auto& household : state_.households) {
+        if (household.member_ids.empty()) {
+            continue;
+        }
+        auto& shortage = shortage_by_settlement[household.settlement_id];
+        ++shortage.households;
+        if (household.resources.consecutive_shortage_days > 0U) {
+            ++shortage.short_households;
+        }
+    }
+
+    const auto saturating_increment = [](std::uint32_t& counter) noexcept {
+        if (counter < std::numeric_limits<std::uint32_t>::max()) {
+            ++counter;
+        }
+    };
+
     for (auto& settlement : state_.settlements) {
         if (!settlement.active || settlement.population >= kViableSettlementSize) {
             settlement.days_below_viable_size = 0U;
-        } else if (settlement.days_below_viable_size < std::numeric_limits<std::uint32_t>::max()) {
-            ++settlement.days_below_viable_size;
+        } else {
+            saturating_increment(settlement.days_below_viable_size);
+        }
+
+        const auto shortage_it = shortage_by_settlement.find(settlement.id);
+        const bool is_strained = settlement.active && shortage_it != shortage_by_settlement.end() &&
+            shortage_it->second.short_households * kFoodStrainShortageDenominator >= shortage_it->second.households;
+        if (is_strained) {
+            saturating_increment(settlement.days_under_food_strain);
+        } else {
+            settlement.days_under_food_strain = 0U;
         }
     }
 }

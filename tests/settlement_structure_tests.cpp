@@ -119,9 +119,56 @@ void test_single_settlement_world_continues_identically_after_reload() {
         "a reloaded single-settlement world must continue identically");
 }
 
+struct HouseholdShortage {
+    std::uint64_t households{0};
+    std::uint64_t short_households{0};
+};
+
+HouseholdShortage shortage_in(const universe::WorldState& state, const universe::Settlement& settlement) {
+    HouseholdShortage shortage;
+    for (const auto& household : state.households) {
+        if (household.settlement_id != settlement.id || household.region_id != settlement.region_id || household.member_ids.empty()) {
+            continue;
+        }
+        ++shortage.households;
+        if (household.resources.consecutive_shortage_days > 0U) {
+            ++shortage.short_households;
+        }
+    }
+    return shortage;
+}
+
+// A day is strained for a settlement when at least a third of its households
+// went short of food that day; the counter holds the current unbroken run.
+void test_food_strain_days_follow_household_shortage() {
+    constexpr int kDaysChecked = 120;
+    universe::Simulation sim{default_layout_config(42)};
+    std::vector<std::uint32_t> previous(sim.state().settlements.size(), 0U);
+    bool saw_strained_day = false;
+    bool saw_unstrained_day = false;
+    for (int day = 0; day < kDaysChecked; ++day) {
+        sim.advance(universe::days(1));
+        for (std::size_t i = 0; i < sim.state().settlements.size(); ++i) {
+            const auto& settlement = sim.state().settlements[i];
+            if (!settlement.active) {
+                continue;
+            }
+            const auto shortage = shortage_in(sim.state(), settlement);
+            const bool strained = shortage.households > 0U && (shortage.short_households * 3U) >= shortage.households;
+            const auto expected = strained ? previous[i] + 1U : 0U;
+            require(settlement.days_under_food_strain == expected, "strain days must count unbroken days with a third of households short");
+            previous[i] = settlement.days_under_food_strain;
+            saw_strained_day = saw_strained_day || strained;
+            saw_unstrained_day = saw_unstrained_day || !strained;
+        }
+    }
+    require(saw_strained_day && saw_unstrained_day, "the world must exercise both a strained and an unstrained day");
+}
+
 }  // namespace
 
 int main() {
+    test_food_strain_days_follow_household_shortage();
     test_default_layout_is_unchanged();
     test_single_settlement_start_holds_every_household();
     test_requested_settlement_count_is_honoured_and_capped();
