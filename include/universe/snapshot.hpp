@@ -31,7 +31,7 @@ struct SnapshotLoadResult {
 
 class SnapshotCodec {
 public:
-    static constexpr std::uint16_t kSchemaVersion = 25;
+    static constexpr std::uint16_t kSchemaVersion = 26;
     static constexpr std::uint16_t kMinimumMigratableSchemaVersion = 24;
 
     [[nodiscard]] static std::vector<std::byte> serialize(const Simulation& simulation);

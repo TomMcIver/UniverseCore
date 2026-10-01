@@ -73,6 +73,29 @@ void write_u64_le(std::vector<std::byte>& bytes, const std::size_t offset, const
     }
 }
 
+constexpr std::size_t kViabilityRecordSize = 12U;
+
+// Rewrites a v26 snapshot as v25 by removing the v26-only section (settlement
+// viability counters) that sits immediately before the 16-byte aggregate
+// demography tail.
+std::vector<std::byte> downgrade_to_v25(const std::vector<std::byte>& v26_bytes, const universe::WorldState& state) {
+    const auto section_size = 8U + (state.settlements.size() * kViabilityRecordSize);
+    const auto tail_start = v26_bytes.size() - kAggregateTotalsTailSize;
+    const auto section_start = tail_start - section_size;
+
+    std::vector<std::byte> v25_bytes;
+    v25_bytes.reserve(v26_bytes.size() - section_size);
+    v25_bytes.insert(v25_bytes.end(), v26_bytes.begin(), v26_bytes.begin() + static_cast<std::ptrdiff_t>(section_start));
+    v25_bytes.insert(v25_bytes.end(), v26_bytes.begin() + static_cast<std::ptrdiff_t>(tail_start), v26_bytes.end());
+
+    write_u16_le(v25_bytes, 4U, 25U);
+    const auto payload_size = v25_bytes.size() - kSnapshotHeaderSize;
+    write_u64_le(v25_bytes, 8U, static_cast<std::uint64_t>(payload_size));
+    const std::span<const std::byte> payload{v25_bytes.data() + kSnapshotHeaderSize, payload_size};
+    write_u64_le(v25_bytes, 16U, universe::snapshot_hash64(payload));
+    return v25_bytes;
+}
+
 // Rewrites a v25 snapshot as v24 by removing the v25-only section that sits
 // immediately before the 16-byte aggregate demography tail.
 std::vector<std::byte> downgrade_to_v24(const std::vector<std::byte>& v25_bytes, const universe::WorldState& state) {
@@ -362,7 +385,7 @@ void test_equivalent_time_advance_schedules_match() {
 void test_v24_snapshots_migrate() {
     universe::Simulation fresh{demo_config(42)};
     require(fresh.state().buildings.empty() && fresh.state().event_log.empty(), "a fresh world has no buildings or events");
-    const auto v24_fresh = downgrade_to_v24(fresh.save_snapshot(), fresh.state());
+    const auto v24_fresh = downgrade_to_v24(downgrade_to_v25(fresh.save_snapshot(), fresh.state()), fresh.state());
 
     universe::Simulation restored{universe::SimulationConfig{.seed = 999U, .initial_population = 10U}};
     const auto fresh_result = universe::Simulation::load_snapshot(v24_fresh, restored);
@@ -382,11 +405,123 @@ void test_v24_snapshots_migrate() {
 
     universe::Simulation aged{demo_config(42)};
     aged.run_years(10);
-    const auto v24_with_life_events = downgrade_to_v24(aged.save_snapshot(), aged.state());
+    const auto v24_with_life_events = downgrade_to_v24(downgrade_to_v25(aged.save_snapshot(), aged.state()), aged.state());
     universe::Simulation rejected{universe::SimulationConfig{.seed = 999U, .initial_population = 10U}};
     const auto aged_result = universe::Simulation::load_snapshot(v24_with_life_events, rejected);
     require(!aged_result.ok, "v24 snapshots cannot contain v25 life event types");
     require(aged_result.code == universe::SnapshotErrorCode::InvalidEnum, "v25 event types in a v24 snapshot are an invalid enum");
+}
+
+constexpr std::int64_t kCounterCheckDays = 10;
+
+// Fewer people than the viable size, so the whole world is below it.
+universe::SimulationConfig tiny_config(const std::uint64_t seed) {
+    auto config = demo_config(seed);
+    config.initial_population = 12;
+    return config;
+}
+
+void require_counters_match_population(const universe::Simulation& sim, const std::uint32_t expected_days, const char* message) {
+    bool saw_below = false;
+    bool saw_viable = false;
+    for (const auto& settlement : sim.state().settlements) {
+        if (!settlement.active) {
+            require(settlement.days_below_viable_size == 0U, "an inactive settlement never accrues viability days");
+            continue;
+        }
+        if (settlement.population < universe::kViableSettlementSize) {
+            saw_below = true;
+            require(settlement.days_below_viable_size == expected_days, message);
+        } else {
+            saw_viable = true;
+            require(settlement.days_below_viable_size == 0U, "a viable settlement must have no days below viable size");
+        }
+    }
+    require(saw_below || saw_viable, "world must have an active settlement to check");
+}
+
+void test_days_below_viable_size_counts_one_per_day() {
+    universe::Simulation sim{tiny_config(42)};
+    for (const auto& settlement : sim.state().settlements) {
+        require(settlement.days_below_viable_size == 0U, "a fresh world has not accrued any days below viable size");
+    }
+
+    sim.advance(universe::days(kCounterCheckDays));
+
+    bool saw_below_viable = false;
+    for (const auto& settlement : sim.state().settlements) {
+        saw_below_viable = saw_below_viable || (settlement.active && settlement.population < universe::kViableSettlementSize);
+    }
+    require(saw_below_viable, "a 12-person world must hold a settlement below viable size");
+    require_counters_match_population(sim, static_cast<std::uint32_t>(kCounterCheckDays), "one day below viable size must add exactly one to the counter");
+}
+
+void test_viable_settlements_keep_a_zero_counter() {
+    universe::Simulation sim{demo_config(42)};
+    sim.advance(universe::days(kCounterCheckDays));
+    bool saw_viable = false;
+    for (const auto& settlement : sim.state().settlements) {
+        saw_viable = saw_viable || (settlement.active && settlement.population >= universe::kViableSettlementSize);
+    }
+    require(saw_viable, "the default 200-person world must hold a viable settlement");
+    require_counters_match_population(sim, static_cast<std::uint32_t>(kCounterCheckDays), "below-viable days must match elapsed days");
+}
+
+void test_v26_viability_counters_survive_save_load_continuation() {
+    universe::Simulation uninterrupted{tiny_config(42)};
+    uninterrupted.advance(universe::days(kCounterCheckDays));
+
+    universe::Simulation restored{universe::SimulationConfig{.seed = 999U, .initial_population = 10U}};
+    require(universe::Simulation::load_snapshot(uninterrupted.save_snapshot(), restored).ok, "v26 snapshot must load");
+    require_counters_match_population(restored, static_cast<std::uint32_t>(kCounterCheckDays), "counters must survive a snapshot round trip");
+
+    uninterrupted.advance(universe::days(5));
+    restored.advance(universe::days(5));
+    require_counters_match_population(restored, static_cast<std::uint32_t>(kCounterCheckDays + 5), "counters keep counting after a reload");
+    require(uninterrupted.save_snapshot() == restored.save_snapshot(), "save/load continuation must match the uninterrupted run");
+}
+
+void test_snapshot_taken_at_a_year_boundary_round_trips_with_inactive_settlements() {
+    // Merges and extinctions happen in the annual step, after the last daily
+    // viability update, so a snapshot taken right there can hold an inactive
+    // settlement that still carries a count.
+    universe::Simulation sim{demo_config(42)};
+    sim.run_years(5);
+    bool saw_inactive_with_count = false;
+    for (const auto& settlement : sim.state().settlements) {
+        saw_inactive_with_count = saw_inactive_with_count || (!settlement.active && settlement.days_below_viable_size > 0U);
+    }
+    require(saw_inactive_with_count, "the year-boundary world must hold an inactive settlement with a stale count");
+
+    universe::Simulation restored{universe::SimulationConfig{.seed = 999U, .initial_population = 10U}};
+    const auto result = universe::Simulation::load_snapshot(sim.save_snapshot(), restored);
+    require(result.ok, "a year-boundary snapshot with an inactive settlement count must load");
+    require(restored.save_snapshot() == sim.save_snapshot(), "a year-boundary snapshot must round-trip byte for byte");
+}
+
+void test_v25_snapshots_migrate_with_zeroed_viability_counters() {
+    universe::Simulation aged{tiny_config(42)};
+    aged.advance(universe::days(kCounterCheckDays));
+    bool had_nonzero = false;
+    for (const auto& settlement : aged.state().settlements) {
+        had_nonzero = had_nonzero || settlement.days_below_viable_size > 0U;
+    }
+    require(had_nonzero, "the source world must hold a non-zero counter for the migration to prove anything");
+
+    const auto v25 = downgrade_to_v25(aged.save_snapshot(), aged.state());
+    universe::Simulation restored{universe::SimulationConfig{.seed = 999U, .initial_population = 10U}};
+    const auto result = universe::Simulation::load_snapshot(v25, restored);
+    if (!result.ok) {
+        std::cerr << "v25 load failed: " << result.message << '\n';
+    }
+    require(result.ok, "a v25 snapshot must load under schema v26");
+    for (const auto& settlement : restored.state().settlements) {
+        require(settlement.days_below_viable_size == 0U, "migration must start every settlement's counter at zero");
+    }
+
+    universe::Simulation resaved{universe::SimulationConfig{.seed = 999U, .initial_population = 10U}};
+    require(universe::Simulation::load_snapshot(restored.save_snapshot(), resaved).ok, "a migrated snapshot must re-save as valid v26");
+    require(resaved.save_snapshot() == restored.save_snapshot(), "a migrated snapshot must round-trip byte for byte");
 }
 
 }  // namespace
@@ -399,6 +534,11 @@ int main() {
     test_v25_snapshot_continuation_preserves_life_events_and_placement();
     test_equivalent_time_advance_schedules_match();
     test_v24_snapshots_migrate();
+    test_days_below_viable_size_counts_one_per_day();
+    test_viable_settlements_keep_a_zero_counter();
+    test_v26_viability_counters_survive_save_load_continuation();
+    test_snapshot_taken_at_a_year_boundary_round_trips_with_inactive_settlements();
+    test_v25_snapshots_migrate_with_zeroed_viability_counters();
     std::cout << "life event and building placement tests passed\n";
     return 0;
 }

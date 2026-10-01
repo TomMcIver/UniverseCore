@@ -218,6 +218,11 @@ enum class SettlementTier : std::uint8_t {
     City = 2,
 };
 
+// The smallest population a settlement can hold and still be treated as
+// sustainable on its own. Fission and absorption share it so neither rule can
+// leave a settlement the other can never resolve (ADR 0002).
+inline constexpr std::uint64_t kViableSettlementSize = 20U;
+
 struct Settlement {
     SettlementId id{};
     RegionId region_id{};
@@ -250,6 +255,11 @@ struct Settlement {
     SettlementTier tier{SettlementTier::Village};
     SettlementTier pending_tier{SettlementTier::Village};
     std::uint32_t tier_transition_streak{};
+    // Consecutive days this settlement's population has been below
+    // kViableSettlementSize. Resets as soon as it is viable again. An inactive
+    // settlement keeps its last value until the next daily update zeroes it,
+    // because merges and extinctions happen between daily updates.
+    std::uint32_t days_below_viable_size{};
 };
 
 enum class BuildingType : std::uint8_t {
@@ -860,6 +870,7 @@ private:
     void rebuild_communication_indexes();
     void rebuild_record_indexes();
     void refresh_economic_aggregates() noexcept;
+    void advance_settlement_viability_days() noexcept;
     void refresh_population_count() noexcept;
 
     struct KnowledgeSemanticKey {

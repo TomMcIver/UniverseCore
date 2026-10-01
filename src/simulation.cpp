@@ -1827,6 +1827,7 @@ void Simulation::process_food_period(const std::uint64_t food_period) {
     refresh_environment_aggregates();
     refresh_material_aggregates();
     refresh_economic_aggregates();
+    advance_settlement_viability_days();
 }
 
 // Ticket #37: re-derives every detailed-resolution alive person's
@@ -8175,6 +8176,20 @@ void Simulation::process_construction(const std::uint64_t demographic_year) {
         settlement.dwelling_capacity_bonus = static_cast<std::int64_t>(completed_dwellings) * kDwellingCapacityBonusPerBuilding;
         settlement.food_store_capacity_bonus = static_cast<std::int64_t>(completed_food_stores) * kFoodStoreCapacityBonusPerBuilding;
         settlement.workshop_capacity_bonus = static_cast<std::int64_t>(completed_workshops) * kWorkshopCapacityBonusPerBuilding;
+    }
+}
+
+// Runs once per simulated day, after settlement populations are refreshed.
+// It must not run from refresh_economic_aggregates itself: that is also called
+// by demotion, promotion and population injection, which would add days that
+// never elapsed.
+void Simulation::advance_settlement_viability_days() noexcept {
+    for (auto& settlement : state_.settlements) {
+        if (!settlement.active || settlement.population >= kViableSettlementSize) {
+            settlement.days_below_viable_size = 0U;
+        } else if (settlement.days_below_viable_size < std::numeric_limits<std::uint32_t>::max()) {
+            ++settlement.days_below_viable_size;
+        }
     }
 }
 

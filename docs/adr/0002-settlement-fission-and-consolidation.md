@@ -5,7 +5,7 @@ Starting from about 200 people the simulation produced 13-27 settlements of 8-15
 - **Fission** fires when a settlement reaches 120 people, or reaches 40 people and has been under food or land strain for 2 consecutive years. The daughter takes at least 20 people and the source keeps at least 40.
 - **Absorption** is asymmetric: the survivor must be viable, keep its 365-day viability streak, and be within the existing distance limit; the absorbed settlement qualifies once it has stayed below the viable size for 5 consecutive years, with no streak or 50-person floor on its side. The larger settlement survives. This amends the symmetric merge trigger decided in the settlement merging design.
 - **Tier is unchanged** (Village/Town/City). "Hamlet" is a descriptive term for a settlement below the viable size, not a new tier.
-- **New saved state:** two per-settlement counters (years under strain, years below viable size) that persist across years, so snapshot schema v26 migrates v25 snapshots with both at 0.
+- **New saved state:** one new per-settlement counter, consecutive days below the viable size, so snapshot schema v26 migrates v25 snapshots with it at 0. Strain needs no new counter: it reuses the existing economic pressure streak (food demand at or above 85% of accessible capacity, counted in days), so "2 consecutive years of strain" means that streak reaching 730 days.
 
 ## Considered Options
 
