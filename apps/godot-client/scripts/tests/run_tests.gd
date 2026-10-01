@@ -61,6 +61,7 @@ class FakePanel extends "res://scripts/ui/ui_panel.gd":
 	func show_command_result(succeeded: bool, action_name: String) -> void:
 		results.append([succeeded, action_name])
 const VillageLookTests := preload("res://scripts/tests/village_look_tests.gd")
+const GroundViewTests := preload("res://scripts/tests/ground_view_tests.gd")
 const NavmeshManager := preload("res://scripts/world/navmesh_manager.gd")
 
 ## Minimal headless test runner for the Godot client's pure/testable seams
@@ -123,6 +124,9 @@ func _initialize() -> void:
 	_run_test("registry refreshes the selection after new world state", Callable(self, "_test_registry_refreshes_selection"))
 	_run_test("manifest registers every standard panel without main.gd", Callable(self, "_test_manifest_registers_panels"))
 	VillageLookTests.new(self).run()
+	var ground_view_tests := GroundViewTests.new(self)
+	ground_view_tests.run()
+	await ground_view_tests.run_async()
 
 	await _run_async_test("navmesh query before any bake returns an empty path (not stale geometry)", Callable(self, "_test_navmesh_query_before_bake"))
 	await _run_async_test("navmesh becomes ready and advances its map iteration id after baking", Callable(self, "_test_navmesh_bakes_and_advances_iteration_id"))
