@@ -586,6 +586,11 @@ struct SimulationConfig {
     std::uint32_t food_production_scale_percent{100};
     bool food_system_enabled{true};
     std::uint64_t initial_region_count{4};
+    // Starting settlements per region. 0 keeps the automatic layout (about one
+    // per 8 households, at most 4); a positive value is used as given, capped at
+    // the region's household count. It only shapes world creation, which the
+    // snapshot records through the settlements themselves, so it is not saved.
+    std::uint64_t initial_settlements_per_region{0};
     std::int64_t base_region_area_units{120};
     std::uint32_t productive_effort_scale_percent{100};
     bool materials_system_enabled{true};

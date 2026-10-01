@@ -5029,6 +5029,13 @@ void Simulation::initialize_settlements() {
         auto settlement_count = (static_cast<std::uint64_t>(region_households.size()) + (kTargetHouseholdsPerSettlement - 1U)) /
             kTargetHouseholdsPerSettlement;
         settlement_count = std::max<std::uint64_t>(1U, std::min<std::uint64_t>(settlement_count, kMaxInitialSettlementsPerRegion));
+        if (config_.initial_settlements_per_region > 0U) {
+            // An explicit request replaces the automatic layout, but every
+            // settlement still needs at least one household.
+            settlement_count = std::max<std::uint64_t>(
+                1U,
+                std::min<std::uint64_t>(config_.initial_settlements_per_region, region_households.size()));
+        }
 
         const auto share_seed = derive_seed(region_seed(region_id), SeedDomain::SettlementAssignment, 1U);
         const auto share_jitter = static_cast<std::int32_t>(seed_random_bounded(share_seed, 1'001U)) - 500;
