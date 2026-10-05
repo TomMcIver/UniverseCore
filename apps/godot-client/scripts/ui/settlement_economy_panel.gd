@@ -46,10 +46,10 @@ func show_view_model(_kind: String, entity_id: int, data: Dictionary) -> void:
 
 	var lines := PackedStringArray([
 		"People: %d in %d households" % [int(data.get("alivePopulation", 0)), int(data.get("households", 0))],
-		"Food produced: %d  eaten: %d" % [int(food.get("producedTotal", 0)), int(food.get("consumedTotal", 0))],
-		"Food short: %d" % int(food.get("unmetTotal", 0)),
-		"Stored: %d households + %d commons" % [int(food.get("householdStored", 0)), int(food.get("commonsStored", 0))],
-		"Land yields up to %d/day" % int(food.get("accessibleCapacityPerDay", 0)),
+		"Food produced: %s  eaten: %s (since the start)" % [_grouped(int(food.get("producedTotal", 0))), _grouped(int(food.get("consumedTotal", 0)))],
+		"Food short: %s (since the start)" % _grouped(int(food.get("unmetTotal", 0))),
+		"Stored: %s in households, %s in commons" % [_grouped(int(food.get("householdStored", 0))), _grouped(int(food.get("commonsStored", 0)))],
+		"Land yields up to %s/day" % _grouped(int(food.get("accessibleCapacityPerDay", 0))),
 		"Jobs:",
 	])
 	for job in JOB_LABELS.keys():
@@ -60,3 +60,13 @@ func show_view_model(_kind: String, entity_id: int, data: Dictionary) -> void:
 	lines.append("Buildings: %d complete, %d building, %d planned" % [
 		int(buildings.get("complete", 0)), int(buildings.get("underConstruction", 0)), int(buildings.get("planned", 0))])
 	_content.text = "\n".join(lines)
+
+## 5659018 -> "5,659,018": totals run into the millions, which is unreadable raw.
+static func _grouped(value: int) -> String:
+	var digits := str(absi(value))
+	var out := ""
+	for i in digits.length():
+		if i > 0 and (digits.length() - i) % 3 == 0:
+			out += ","
+		out += digits[i]
+	return ("-" if value < 0 else "") + out

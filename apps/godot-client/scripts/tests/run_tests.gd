@@ -12,6 +12,7 @@ const PanelManifest := preload("res://scripts/ui/panel_manifest.gd")
 const HudPanel := preload("res://scripts/ui/hud.gd")
 const LifeHistoryPanel := preload("res://scripts/ui/life_history_panel.gd")
 const DemoFocusMarker := preload("res://scripts/ui/demo_focus_marker.gd")
+const OrbitCameraScript := preload("res://scripts/orbit_camera.gd")
 
 ## GDScript runtime errors can abort a test's Callable without changing the
 ## process exit code. Count them so an interrupted test cannot report a pass.
@@ -136,8 +137,13 @@ func _initialize() -> void:
 
 	_run_test("world_view renders a newly spawned agent at its real canonical position", Callable(self, "_test_world_view_agent_renders_at_real_position_on_spawn"))
 	_run_test("world_view walks an agent to the server-given target on schedule", Callable(self, "_test_world_view_agent_walks_to_server_given_target_on_schedule"))
+	_run_test("orbit camera frames a wide area", Callable(self, "_test_orbit_camera_frames_a_wide_area"))
+	_run_test("world_view lists only inhabited settlements", Callable(self, "_test_world_view_lists_only_inhabited_settlements"))
+	_run_test("event log entries have a readable width", Callable(self, "_test_event_log_entries_have_a_readable_width"))
+	_run_test("world_view gatherers spread out instead of piling up", Callable(self, "_test_world_view_gatherers_spread_out_instead_of_piling_up"))
 	_run_test("world_view villagers walk at a natural pace", Callable(self, "_test_world_view_villagers_walk_at_a_natural_pace"))
 	_run_test("world_view walking pace scales with playback speed", Callable(self, "_test_world_view_walking_pace_scales_with_playback_speed"))
+	_run_test("world_view villagers play walk and idle animations", Callable(self, "_test_world_view_villagers_play_walk_and_idle_animations"))
 	_run_test("world_view paused world holds villagers and clock", Callable(self, "_test_world_view_paused_world_holds_villagers_and_clock"))
 	_run_test("world_view clock runs a day per two minutes at 1x", Callable(self, "_test_world_view_clock_runs_a_day_per_two_minutes_at_1x"))
 	_run_test("world_view never walks a Home-kind agent", Callable(self, "_test_world_view_home_kind_agent_never_walks"))
@@ -499,11 +505,53 @@ func _test_economy_panel_renders() -> void:
 	})
 	var text: String = panel._content.text
 	_assert_eq(panel._title.text, "Town 3")
-	_assert_eq(text.find("Food produced: 9000  eaten: 8000") >= 0, true, "expected food line")
+	_assert_eq(text.find("Food produced: 9,000  eaten: 8,000 (since the start)") >= 0, true, "expected food line with thousands separators")
+	_assert_eq(SettlementEconomyPanel._grouped(5659018), "5,659,018", "totals in the millions are grouped")
+	_assert_eq(SettlementEconomyPanel._grouped(-1200) + SettlementEconomyPanel._grouped(0), "-1,2000", "negative and zero values group correctly")
 	_assert_eq(text.find("Farmers: 40") >= 0, true, "expected job line")
 	_assert_eq(text.find("Quarriers: 0") >= 0, true, "missing job reads zero")
 	_assert_eq(text.find("Inequality: 0.35") >= 0, true, "expected inequality")
 	panel.queue_free()
+
+func _test_orbit_camera_frames_a_wide_area() -> void:
+	# After a long jump the camera backs off to fit settlements spread across
+	# hundreds of units, centred on them, and never zooms in on a small area.
+	var camera := OrbitCameraScript.new()
+	root.add_child(camera)
+	var start_height := camera.position.y
+	camera.frame_area(100.0, -50.0, 150.0)
+	_assert_eq(camera.position.y > start_height * 4.0, true, "framing a wide area must back the camera well off")
+	_assert_eq(is_equal_approx(camera.position.x, 100.0), true, "framing must centre on the area")
+	var framed_height := camera.position.y
+	camera.frame_area(0.0, 0.0, 5.0)
+	_assert_eq(camera.position.y, framed_height, "framing a small area must not zoom back in")
+	camera.queue_free()
+
+func _test_world_view_lists_only_inhabited_settlements() -> void:
+	var view := WorldView.new()
+	root.add_child(view)
+	view.apply_snapshot({
+		"agents": [], "buildings": [],
+		"settlements": [
+			{"id": 7, "active": true, "position": {"x": 10.0, "y": 0.0, "z": 20.0}},
+			{"id": 3, "active": false, "position": {"x": 99.0, "y": 0.0, "z": 99.0}},
+			{"id": 5, "active": true, "position": {"x": -4.0, "y": 0.0, "z": 8.0}},
+		],
+	})
+	_assert_eq(view.active_settlement_ids(), [5, 7], "inhabited settlements, lowest id first, abandoned ones left out")
+	var points: Array = view.active_settlement_points()
+	_assert_eq(points.size(), 2, "one point per inhabited settlement")
+	_assert_eq(points[0], Vector2(-4.0, 8.0), "points follow id order")
+	view.queue_free()
+
+func _test_event_log_entries_have_a_readable_width() -> void:
+	# Regression: with no width every entry wrapped one word per line.
+	var log := EventLog.new()
+	root.add_child(log)
+	log.on_message("world_event", {"type": "world_event", "payload": {"summary": "Villager 221 became a farmer"}})
+	var label: Label = log._list.get_child(0)
+	_assert_eq(label.custom_minimum_size.x >= 200.0, true, "an event entry must be wide enough to read, not one word per line")
+	log.queue_free()
 
 func _test_event_log_append() -> void:
 	var log := EventLog.new()
@@ -742,7 +790,7 @@ func _test_world_view_agent_walks_to_server_given_target_on_schedule() -> void:
 	view.set_tick(500)
 	for _frame in range(30):
 		view._process(1.0)
-	_assert_eq(node.position.x > 15.0, true, "once at work, the agent must be at the server-given target, not a client-invented point")
+	_assert_eq(Vector2(node.position.x, node.position.z).distance_to(Vector2(20.0, 0.0)) < 12.0, true, "once at work, the agent must be on the server-given target (within the gathering spread), not a client-invented point")
 
 	view.set_tick(2000000)
 	for _frame in range(30):
@@ -775,6 +823,24 @@ func _distance_walked_in_one_second(speed: int) -> float:
 	view.queue_free()
 	return walked
 
+func _test_world_view_gatherers_spread_out_instead_of_piling_up() -> void:
+	# A hundred villagers heading for the same common must not stand on top of
+	# each other: neighbouring slots stay at least half a metre apart and the
+	# crowd stays within a plausible village green.
+	var view := WorldView.new()
+	var offsets: Array = []
+	for id in range(1, 151):
+		offsets.append(view._gathering_offset_for_person(id))
+	var closest := INF
+	var farthest := 0.0
+	for i in offsets.size():
+		farthest = maxf(farthest, (offsets[i] as Vector2).length())
+		for j in range(i + 1, offsets.size()):
+			closest = minf(closest, (offsets[i] as Vector2).distance_to(offsets[j]))
+	_assert_eq(closest >= 0.5, true, "two gatherers must never share a spot, closest pair was %s m apart" % closest)
+	_assert_eq(farthest <= 11.0, true, "the gathering crowd must stay on the green, reached %s m" % farthest)
+	view.free()
+
 func _test_world_view_villagers_walk_at_a_natural_pace() -> void:
 	# At 1x a villager covers about WALK_SPEED_UNITS_PER_SECOND per real second
 	# -- a walk, not a teleport -- so it matches the pace of the avatar.
@@ -786,6 +852,23 @@ func _test_world_view_walking_pace_scales_with_playback_speed() -> void:
 	var pace: float = WorldView.WALK_SPEED_UNITS_PER_SECOND
 	var walked := _distance_walked_in_one_second(4)
 	_assert_eq(walked > pace * 4.0 * 0.9 and walked < pace * 4.0 * 1.1, true, "at 4x a villager must walk about four times as far, walked %s" % walked)
+
+func _test_world_view_villagers_play_walk_and_idle_animations() -> void:
+	# A villager walking to work plays the model's looping walk clip, and goes
+	# back to idle once it has arrived.
+	var view := _far_worker_view()
+	view.set_simulation_playback(false, 1)
+	var animator: AnimationPlayer = view._agent_animators.get(11)
+	_assert_eq(animator != null, true, "a spawned villager must have its model's AnimationPlayer")
+	_assert_eq(animator.current_animation, "idle", "a villager at home must start idle")
+	view.set_tick(500)  # inside the work window, so the villager sets off
+	view._process(1.0)
+	_assert_eq(animator.current_animation, "walk", "a villager on the move must play the walk clip")
+	_assert_eq(animator.get_animation("walk").loop_mode, Animation.LOOP_LINEAR, "the walk clip must loop")
+	for _frame in range(120):  # 120 s at 1.3 units/s covers the 100 units
+		view._process(1.0)
+	_assert_eq(animator.current_animation, "idle", "a villager that has arrived must go back to idle")
+	view.queue_free()
 
 func _test_world_view_paused_world_holds_villagers_and_clock() -> void:
 	var view := _far_worker_view()
@@ -842,7 +925,7 @@ func _test_world_view_high_speed_snaps_instead_of_walking() -> void:
 
 	view.set_tick(300)  # Between depart and return: mid-walk under normal speed.
 	view._process(0.0)
-	var at_work := node.position.x > 35.0
+	var at_work := Vector2(node.position.x, node.position.z).distance_to(Vector2(40.0, 0.0)) < 12.0
 	var at_home := absf(node.position.x) < 5.0
 	_assert_eq(at_work or at_home, true, "at a speed above the walking-visible threshold, an agent must snap to home or the target, never a mid-walk point")
 	view.queue_free()

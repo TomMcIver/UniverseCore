@@ -61,6 +61,10 @@ func _add_button(parent: Control, label: String, action_name: String, command: D
 func request_jump() -> void:
 	action_requested.emit("run_until_year", UniverseProtocol.command_run_until_year(_current_year + JUMP_YEARS))
 
+## The year the world last reported.
+func current_year() -> int:
+	return _current_year
+
 func panel_slot() -> String:
 	return SLOT_TOP_BAR
 

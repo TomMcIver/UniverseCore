@@ -40,6 +40,9 @@ const WALK_SPEED_UNITS_PER_SECOND := 1.3
 ## Above this playback speed, walking is not drawn at all -- villagers snap
 ## straight to their current activity spot (decision M4).
 const WALKING_VISIBLE_MAX_SPEED := 8
+## Clip names in the Kenney character models.
+const WALK_ANIMATION := "walk"
+const IDLE_ANIMATION := "idle"
 const ACTIVITY_LABEL_HEIGHT := 2.4
 const HIGHLIGHT_HEIGHT := 3.3
 const HIGHLIGHT_NODE_NAME := "Highlight"
@@ -59,6 +62,9 @@ var _village_dressing: Node3D
 ## kind/target point/schedule, plus the activity Label3D.
 var _agent_facts: Dictionary
 var _agent_labels: Dictionary
+## Each villager model's own AnimationPlayer (id -> player), driven by whether the
+## villager is walking or standing.
+var _agent_animators: Dictionary
 
 ## Ticket #40/#56: movement must track canonical simulation time, not raw
 ## frame time -- pausing halts it, the speed multiplier scales it.
@@ -77,6 +83,7 @@ func _init() -> void:
 	_building_data = {}
 	_agent_facts = {}
 	_agent_labels = {}
+	_agent_animators = {}
 
 func set_navmesh_manager(_manager: Node3D) -> void:
 	pass  # Villagers no longer path via the navmesh; kept only so main.gd's existing wiring is harmless.
@@ -156,6 +163,23 @@ func building_data(id: int) -> Dictionary:
 func agent_ids() -> Array:
 	return _agent_nodes.keys()
 
+## Where every inhabited settlement stands, as flat (x, z) points.
+func active_settlement_points() -> Array:
+	var points: Array = []
+	for id in active_settlement_ids():
+		var node: Node3D = _settlement_nodes[id]
+		points.append(Vector2(node.position.x, node.position.z))
+	return points
+
+## Ids of the settlements that are still inhabited, lowest first.
+func active_settlement_ids() -> Array:
+	var ids: Array = []
+	for id in _settlement_nodes.keys():
+		if bool(_settlement_nodes[id].get_meta("active", true)):
+			ids.append(id)
+	ids.sort()
+	return ids
+
 func agent_node(id: int) -> Node3D:
 	return _agent_nodes.get(id)
 
@@ -180,6 +204,7 @@ func _clear_all() -> void:
 	_building_data.clear()
 	_agent_facts.clear()
 	_agent_labels.clear()
+	_agent_animators.clear()
 
 ## An existing agent is updated in place, not destroyed and respawned -- a
 ## destroy+respawn on every delta tick (which upserts nearly every alive
@@ -199,6 +224,7 @@ func _remove_agent(id: int) -> void:
 		_agent_nodes.erase(id)
 	_agent_facts.erase(id)
 	_agent_labels.erase(id)
+	_agent_animators.erase(id)
 
 ## Same churn fix as buildings (E1): settlements arrive as "updated" in
 ## every delta, so only respawn when the firepit would look different.
@@ -271,6 +297,10 @@ func _spawn_agent(agent: Dictionary) -> void:
 	label.text = activity
 	area.add_child(label)
 	_agent_labels[id] = label
+	var animator = visual.find_child("AnimationPlayer", true, false)
+	if animator != null:
+		_agent_animators[id] = animator
+		_set_agent_animation(id, IDLE_ANIMATION)
 
 	_agent_facts[id] = _agent_facts_from(agent)
 	area.position = _resolve_agent_position(id)
@@ -390,6 +420,19 @@ func _crowd_offset_for_person(id: int) -> Vector2:
 	var radius := 0.8 + (float(radius_hash) / 100.0) * 1.4
 	return Vector2(cos(angle) * radius, sin(angle) * radius)
 
+## Where on a shared gathering spot (the common, a workshop) a person stands:
+## a sunflower spiral keyed on the person id, so a crowd of a hundred spreads
+## across the green about a metre apart instead of piling onto one point.
+## Deterministic per id, never re-rolled and never dodging (decision M3).
+const GATHER_SLOTS := 300
+const GATHER_SPACING := 0.6
+const GOLDEN_ANGLE := 2.39996323
+func _gathering_offset_for_person(id: int) -> Vector2:
+	var slot := (id * 7919 + 1) % GATHER_SLOTS
+	var radius := GATHER_SPACING * sqrt(float(slot))
+	var angle := float(slot) * GOLDEN_ANGLE
+	return Vector2(cos(angle), sin(angle)) * radius
+
 ## A cultivator's field is laid out by VillageDressing per household (it owns
 ## that geometry -- see the class comment); look it up rather than
 ## recomputing it, so a walked-to field can never disagree with a drawn one.
@@ -426,7 +469,8 @@ func _resolve_agent_position(id: int) -> Vector3:
 		var away_ticks: int = facts["depart_tick"]
 		var back_ticks: int = facts["return_depart_tick"]
 		if _estimated_tick >= float(away_ticks) and _estimated_tick < float(back_ticks):
-			flat = _work_point_for(id, facts) + _crowd_offset_for_person(id * 7919 + 1)
+			var offset := _crowd_offset_for_person(id * 7919 + 1) if facts["target_kind"] == "Field" else _gathering_offset_for_person(id)
+			flat = _work_point_for(id, facts) + offset
 	return Vector3(flat.x, _height_sampler.call(flat.x, flat.y) if _height_sampler.is_valid() else 0.0, flat.y)
 
 ## Moves every agent toward its goal at a natural walking pace in real time:
@@ -447,8 +491,24 @@ func _advance_agents(delta: float) -> void:
 		var height: float = _height_sampler.call(next.x, next.y) if _height_sampler.is_valid() else 0.0
 		node.position = Vector3(next.x, height, next.y)
 		var heading := goal_flat - current
-		if next != current and heading.length() > 0.05:
+		var is_walking := next != current and heading.length() > 0.05
+		if is_walking:
 			node.rotation.y = atan2(heading.x, heading.y)
+		_set_agent_animation(id, WALK_ANIMATION if is_walking else IDLE_ANIMATION)
+
+## Plays the villager's walk or idle animation from the model's own clips. The
+## walk plays faster with playback speed, up to the speed at which walking stops
+## being drawn.
+func _set_agent_animation(id: int, animation: String) -> void:
+	var animator: AnimationPlayer = _agent_animators.get(id)
+	if animator == null or not animator.has_animation(animation):
+		return
+	animator.speed_scale = float(mini(_playback_speed, WALKING_VISIBLE_MAX_SPEED))
+	if animator.current_animation != animation:
+		# glTF clips import as one-shots; a villager walks or stands for as long
+		# as it takes, so both clips must loop.
+		animator.get_animation(animation).loop_mode = Animation.LOOP_LINEAR
+		animator.play(animation)
 
 ## Marks one villager, such as the demo's chosen NPC, with a floating marker.
 ## Only agents can be marked; entity_id 0 clears the mark.

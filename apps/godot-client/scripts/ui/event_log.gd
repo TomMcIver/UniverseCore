@@ -5,6 +5,7 @@ extends "res://scripts/ui/ui_panel.gd"
 
 const UniverseProtocol := preload("res://scripts/net/universe_protocol.gd")
 const MAX_ENTRIES := 40
+const LIST_WIDTH := 270
 
 var _list: VBoxContainer
 
@@ -13,8 +14,12 @@ func _init() -> void:
 	custom_minimum_size = Vector2(280, 160)
 	var scroll := ScrollContainer.new()
 	scroll.custom_minimum_size = Vector2(280, 160)
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	add_child(scroll)
 	_list = VBoxContainer.new()
+	# Without a width the list collapses and every label wraps one word per line.
+	_list.custom_minimum_size = Vector2(LIST_WIDTH, 0)
+	_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	scroll.add_child(_list)
 
 func panel_slot() -> String:
@@ -32,6 +37,7 @@ func on_message(_message_type: String, message: Dictionary) -> void:
 	var label := Label.new()
 	label.text = summary
 	label.autowrap_mode = TextServer.AUTOWRAP_WORD
+	label.custom_minimum_size = Vector2(LIST_WIDTH, 0)
 	_list.add_child(label)
 	_list.move_child(label, 0)
 
