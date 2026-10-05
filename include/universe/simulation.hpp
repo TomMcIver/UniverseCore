@@ -223,6 +223,14 @@ enum class SettlementTier : std::uint8_t {
 // leave a settlement the other can never resolve (ADR 0002).
 inline constexpr std::uint64_t kViableSettlementSize = 20U;
 
+// Absorption (ADR 0002): a settlement below the viable size for this many
+// consecutive days is absorbed by a neighbour in its region that is viable, has
+// kept a viability streak of at least kSurvivorViabilityStreakDays and lies
+// within kSettlementMergeDistanceUnits. With no such neighbour it stays.
+inline constexpr std::uint32_t kAbsorptionBelowViableDays = 5U * 365U;
+inline constexpr std::uint32_t kSurvivorViabilityStreakDays = 365U;
+inline constexpr std::int64_t kSettlementMergeDistanceUnits = 2'000;
+
 struct Settlement {
     SettlementId id{};
     RegionId region_id{};

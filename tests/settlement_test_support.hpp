@@ -15,8 +15,6 @@ inline constexpr std::uint64_t kStartingPopulation = 200U;
 // One region holding as much land as the default four regions together, so a
 // single-settlement start is not starved of land.
 inline constexpr std::int64_t kSingleRegionLandUnits = 480;
-// A settlement below the viable size for this many days is absorbed (ADR 0002).
-inline constexpr std::uint32_t kAbsorptionDays = 5U * 365U;
 // Access share is a fraction of a region's land, in points out of this many.
 inline constexpr std::uint32_t kAccessShareScale = 10'000;
 
@@ -54,6 +52,26 @@ inline std::vector<const universe::Settlement*> active_settlements(const univers
         }
     }
     return active;
+}
+
+// Whether another settlement could absorb this one under ADR 0002: same region,
+// viable, holding its viability streak, and within the merge distance.
+inline bool has_absorbing_neighbour(const universe::WorldState& state, const universe::Settlement& settlement) {
+    for (const auto& candidate : state.settlements) {
+        if (!candidate.active || candidate.id == settlement.id || candidate.region_id != settlement.region_id) {
+            continue;
+        }
+        if (candidate.population < universe::kViableSettlementSize ||
+            candidate.economic_viability_streak < universe::kSurvivorViabilityStreakDays) {
+            continue;
+        }
+        const auto dx = candidate.position_x - settlement.position_x;
+        const auto dz = candidate.position_z - settlement.position_z;
+        if ((dx * dx) + (dz * dz) <= universe::kSettlementMergeDistanceUnits * universe::kSettlementMergeDistanceUnits) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // An active household (one with living members) belongs to exactly one active

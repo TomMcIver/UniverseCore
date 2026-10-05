@@ -5785,6 +5785,51 @@ void Simulation::process_settlement_founding(const std::uint64_t demographic_yea
     });
 }
 
+// The aggregate ledger of a settlement in a demoted region moves with it, so
+// the stock and household bands its population groups carry are not stranded.
+static void merge_aggregate_ledgers(
+    std::vector<SettlementAggregateState>& ledgers, const SettlementId survivor_id, const SettlementId absorbed_id) {
+    SettlementAggregateState* survivor_ledger = nullptr;
+    SettlementAggregateState* absorbed_ledger = nullptr;
+    for (auto& ledger : ledgers) {
+        if (ledger.settlement_id == survivor_id) {
+            survivor_ledger = &ledger;
+        } else if (ledger.settlement_id == absorbed_id) {
+            absorbed_ledger = &ledger;
+        }
+    }
+    if (survivor_ledger != nullptr && absorbed_ledger != nullptr) {
+        survivor_ledger->household_count += absorbed_ledger->household_count;
+        survivor_ledger->small_household_count += absorbed_ledger->small_household_count;
+        survivor_ledger->medium_household_count += absorbed_ledger->medium_household_count;
+        survivor_ledger->large_household_count += absorbed_ledger->large_household_count;
+        survivor_ledger->food_inventory += absorbed_ledger->food_inventory;
+        survivor_ledger->food_produced_total += absorbed_ledger->food_produced_total;
+        survivor_ledger->food_consumed_total += absorbed_ledger->food_consumed_total;
+        survivor_ledger->unmet_food_total += absorbed_ledger->unmet_food_total;
+        survivor_ledger->labour_capacity += absorbed_ledger->labour_capacity;
+        survivor_ledger->labour_demand += absorbed_ledger->labour_demand;
+        survivor_ledger->labour_allocated += absorbed_ledger->labour_allocated;
+        survivor_ledger->labour_low_household_count += absorbed_ledger->labour_low_household_count;
+        survivor_ledger->labour_medium_household_count += absorbed_ledger->labour_medium_household_count;
+        survivor_ledger->labour_high_household_count += absorbed_ledger->labour_high_household_count;
+        survivor_ledger->wealth_low_household_count += absorbed_ledger->wealth_low_household_count;
+        survivor_ledger->wealth_medium_household_count += absorbed_ledger->wealth_medium_household_count;
+        survivor_ledger->wealth_high_household_count += absorbed_ledger->wealth_high_household_count;
+        survivor_ledger->food_buffer_low_household_count += absorbed_ledger->food_buffer_low_household_count;
+        survivor_ledger->food_buffer_medium_household_count += absorbed_ledger->food_buffer_medium_household_count;
+        survivor_ledger->food_buffer_high_household_count += absorbed_ledger->food_buffer_high_household_count;
+        survivor_ledger->wealth_points_total += absorbed_ledger->wealth_points_total;
+        survivor_ledger->productive_access_points += absorbed_ledger->productive_access_points;
+        survivor_ledger->required_food_year += absorbed_ledger->required_food_year;
+        survivor_ledger->unmet_food_year += absorbed_ledger->unmet_food_year;
+        *absorbed_ledger = SettlementAggregateState{
+            .settlement_id = absorbed_ledger->settlement_id,
+            .region_id = absorbed_ledger->region_id,
+        };
+    }
+}
+
 void Simulation::merge_settlements(const SettlementId survivor_id, const SettlementId absorbed_id) {
     auto* survivor = find_settlement_mutable(survivor_id);
     auto* absorbed = find_settlement_mutable(absorbed_id);
@@ -5845,47 +5890,7 @@ void Simulation::merge_settlements(const SettlementId survivor_id, const Settlem
     survivor->commons_food.value += absorbed->commons_food.value;
     absorbed->commons_food.value = 0;
 
-    // The aggregate ledger of a settlement in a demoted region moves with it, so
-    // the stock and household bands its population groups carry are not stranded.
-    SettlementAggregateState* survivor_ledger = nullptr;
-    SettlementAggregateState* absorbed_ledger = nullptr;
-    for (auto& ledger : state_.settlement_aggregates) {
-        if (ledger.settlement_id == survivor_id) {
-            survivor_ledger = &ledger;
-        } else if (ledger.settlement_id == absorbed_id) {
-            absorbed_ledger = &ledger;
-        }
-    }
-    if (survivor_ledger != nullptr && absorbed_ledger != nullptr) {
-        survivor_ledger->household_count += absorbed_ledger->household_count;
-        survivor_ledger->small_household_count += absorbed_ledger->small_household_count;
-        survivor_ledger->medium_household_count += absorbed_ledger->medium_household_count;
-        survivor_ledger->large_household_count += absorbed_ledger->large_household_count;
-        survivor_ledger->food_inventory += absorbed_ledger->food_inventory;
-        survivor_ledger->food_produced_total += absorbed_ledger->food_produced_total;
-        survivor_ledger->food_consumed_total += absorbed_ledger->food_consumed_total;
-        survivor_ledger->unmet_food_total += absorbed_ledger->unmet_food_total;
-        survivor_ledger->labour_capacity += absorbed_ledger->labour_capacity;
-        survivor_ledger->labour_demand += absorbed_ledger->labour_demand;
-        survivor_ledger->labour_allocated += absorbed_ledger->labour_allocated;
-        survivor_ledger->labour_low_household_count += absorbed_ledger->labour_low_household_count;
-        survivor_ledger->labour_medium_household_count += absorbed_ledger->labour_medium_household_count;
-        survivor_ledger->labour_high_household_count += absorbed_ledger->labour_high_household_count;
-        survivor_ledger->wealth_low_household_count += absorbed_ledger->wealth_low_household_count;
-        survivor_ledger->wealth_medium_household_count += absorbed_ledger->wealth_medium_household_count;
-        survivor_ledger->wealth_high_household_count += absorbed_ledger->wealth_high_household_count;
-        survivor_ledger->food_buffer_low_household_count += absorbed_ledger->food_buffer_low_household_count;
-        survivor_ledger->food_buffer_medium_household_count += absorbed_ledger->food_buffer_medium_household_count;
-        survivor_ledger->food_buffer_high_household_count += absorbed_ledger->food_buffer_high_household_count;
-        survivor_ledger->wealth_points_total += absorbed_ledger->wealth_points_total;
-        survivor_ledger->productive_access_points += absorbed_ledger->productive_access_points;
-        survivor_ledger->required_food_year += absorbed_ledger->required_food_year;
-        survivor_ledger->unmet_food_year += absorbed_ledger->unmet_food_year;
-        *absorbed_ledger = SettlementAggregateState{
-            .settlement_id = absorbed_ledger->settlement_id,
-            .region_id = absorbed_ledger->region_id,
-        };
-    }
+    merge_aggregate_ledgers(state_.settlement_aggregates, survivor_id, absorbed_id);
 
     const auto combined_share =
         static_cast<std::uint64_t>(survivor->access_share_points) + static_cast<std::uint64_t>(absorbed->access_share_points);
@@ -5911,16 +5916,40 @@ void Simulation::merge_settlements(const SettlementId survivor_id, const Settlem
     }
 }
 
+// People alive in each settlement right now, from households and aggregate
+// cohorts. Settlement::population is refreshed daily, so inside the annual
+// restructuring it still lacks that year's births.
+static std::unordered_map<SettlementId, std::uint64_t> live_population_by_settlement(const WorldState& state) {
+    std::unordered_set<PersonId> alive_person_ids;
+    alive_person_ids.reserve(state.people.size());
+    for (const auto& person : state.people) {
+        if (person.alive) {
+            alive_person_ids.insert(person.id);
+        }
+    }
+
+    std::unordered_map<SettlementId, std::uint64_t> population;
+    for (const auto& household : state.households) {
+        for (const auto member_id : household.member_ids) {
+            if (alive_person_ids.contains(member_id)) {
+                ++population[household.settlement_id];
+            }
+        }
+    }
+    for (const auto& cohort : state.population_cohorts) {
+        population[cohort.settlement_id] += cohort.population;
+    }
+    return population;
+}
+
 // ADR 0002: a settlement that has stayed below the viable size for five years
 // is absorbed by the nearest viable neighbour in its region. Only the survivor
 // must show sustained viability; the absorbed side needs no streak or minimum
 // population of its own, which is what lets the small settlements fission
-// leaves behind actually be resolved.
+// leaves behind actually be resolved. The survivor is judged on its live
+// population, so one that has just grown past the viable size can absorb now.
 void Simulation::process_settlement_merging() {
-    constexpr std::int64_t kMergeDistanceThreshold = 2'000;
-    constexpr std::uint32_t kSurvivorViabilityStreakDays = 365U;
-    constexpr std::uint32_t kAbsorptionBelowViableDays = 5U * 365U;
-
+    auto live_population = live_population_by_settlement(state_);
     std::vector<SettlementId> absorbed_candidate_ids;
     for (const auto& settlement : state_.settlements) {
         if (settlement.active && settlement.days_below_viable_size >= kAbsorptionBelowViableDays) {
@@ -5941,7 +5970,7 @@ void Simulation::process_settlement_merging() {
             if (!candidate.active || candidate.id == absorbed_id || candidate.region_id != absorbed->region_id) {
                 continue;
             }
-            if (candidate.population < kViableSettlementSize ||
+            if (live_population[candidate.id] < kViableSettlementSize ||
                 candidate.economic_viability_streak < kSurvivorViabilityStreakDays) {
                 continue;
             }
@@ -5949,14 +5978,14 @@ void Simulation::process_settlement_merging() {
             const auto dx = candidate.position_x - absorbed->position_x;
             const auto dz = candidate.position_z - absorbed->position_z;
             const auto distance_squared = (dx * dx) + (dz * dz);
-            if (distance_squared > kMergeDistanceThreshold * kMergeDistanceThreshold) {
+            if (distance_squared > kSettlementMergeDistanceUnits * kSettlementMergeDistanceUnits) {
                 continue;
             }
 
             const bool is_better = survivor == nullptr || distance_squared < survivor_distance_squared ||
                 (distance_squared == survivor_distance_squared &&
-                 (candidate.population > survivor->population ||
-                  (candidate.population == survivor->population && candidate.id < survivor->id)));
+                 (live_population[candidate.id] > live_population[survivor->id] ||
+                  (live_population[candidate.id] == live_population[survivor->id] && candidate.id < survivor->id)));
             if (is_better) {
                 survivor = &candidate;
                 survivor_distance_squared = distance_squared;
@@ -5964,6 +5993,8 @@ void Simulation::process_settlement_merging() {
         }
 
         if (survivor != nullptr) {
+            live_population[survivor->id] += live_population[absorbed_id];
+            live_population[absorbed_id] = 0U;
             merge_settlements(survivor->id, absorbed_id);
         }
     }

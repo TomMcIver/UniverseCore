@@ -326,7 +326,7 @@ void test_settlements_below_viable_size_for_five_years_are_absorbed_into_a_viabl
                 const auto& survivor = settlement_by_id(sim.state(), absorption.survivor_id);
 
                 require(
-                    before.at(absorption.absorbed_id).days_below_viable_size + kDaysPerYear >= kAbsorptionDays,
+                    before.at(absorption.absorbed_id).days_below_viable_size + kDaysPerYear >= universe::kAbsorptionBelowViableDays,
                     "an absorbed settlement must have stayed below the viable size for five years");
                 require(!absorbed.active && survivor.active, "the absorbed settlement is inactive and the survivor stays active");
                 require(survivor.population >= universe::kViableSettlementSize, "the survivor must be viable");
@@ -379,6 +379,19 @@ void test_settlements_below_viable_size_for_five_years_are_absorbed_into_a_viabl
     require(people_followed > 0U, "an absorption must move at least one living person with their household");
 }
 
+void require_absorbed_ledger_empty(const universe::WorldState& state, const universe::SettlementId absorbed_id) {
+    for (const auto& ledger : state.settlement_aggregates) {
+        if (ledger.settlement_id != absorbed_id) {
+            continue;
+        }
+        require(
+            ledger.household_count == 0U && ledger.food_inventory == 0 && ledger.labour_capacity == 0 &&
+                ledger.wealth_points_total == 0 && ledger.productive_access_points == 0 &&
+                ledger.required_food_year == 0 && ledger.unmet_food_year == 0,
+            "an absorbed settlement must keep no aggregate ledger");
+    }
+}
+
 // A settlement in a demoted region holds its people as population groups and its
 // stock in an aggregate ledger. Absorbing it must carry that ledger over too,
 // leaving nothing stranded, and the world must still reload and continue.
@@ -400,16 +413,7 @@ void test_absorption_in_a_demoted_region_moves_the_aggregate_ledger() {
             sim.run_years(1);
             const auto absorptions = absorptions_since(sim.state(), events_before);
             for (const auto& absorption : absorptions) {
-                for (const auto& ledger : sim.state().settlement_aggregates) {
-                    if (ledger.settlement_id != absorption.absorbed_id) {
-                        continue;
-                    }
-                    require(
-                        ledger.household_count == 0U && ledger.food_inventory == 0 && ledger.labour_capacity == 0 &&
-                            ledger.wealth_points_total == 0 && ledger.productive_access_points == 0 &&
-                            ledger.required_food_year == 0 && ledger.unmet_food_year == 0,
-                        "an absorbed settlement must keep no aggregate ledger");
-                }
+                require_absorbed_ledger_empty(sim.state(), absorption.absorbed_id);
                 ++absorptions_checked;
             }
             require_population_accounted_for(sim);
