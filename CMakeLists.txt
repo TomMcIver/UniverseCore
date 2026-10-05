@@ -132,6 +132,11 @@ if(UNIVERSECORE_BUILD_TESTS)
     add_test(NAME universe_settlement_structure_tests COMMAND universe_settlement_structure_tests)
     set_tests_properties(universe_settlement_structure_tests PROPERTIES LABELS "fast")
 
+    add_executable(universe_settlement_distribution_tests tests/settlement_distribution_tests.cpp)
+    target_link_libraries(universe_settlement_distribution_tests PRIVATE universe_core)
+    add_test(NAME universe_settlement_distribution_tests COMMAND universe_settlement_distribution_tests)
+    set_tests_properties(universe_settlement_distribution_tests PROPERTIES LABELS "integration")
+
     add_executable(universe_construction_tests tests/construction_tests.cpp)
     target_link_libraries(universe_construction_tests PRIVATE universe_core)
     add_test(NAME universe_construction_tests COMMAND universe_construction_tests)

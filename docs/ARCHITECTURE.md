@@ -235,6 +235,14 @@ Current implementation status (Milestone 1E):
 - deterministic yearly settlement restructuring (founding/splitting + extinction)
 - extinct settlements retain identity but no active share allocation
 
+Settlement restructuring follows [ADR 0002](adr/0002-settlement-fission-and-consolidation.md):
+fission requires population or sustained food strain and preserves minimum source
+and daughter sizes; a settlement below the viable size for five consecutive years
+can be absorbed by a nearby viable settlement. Absorption transfers household,
+material, commons-food and aggregate ledgers and preserves recorded identities.
+The optional `initial_settlements_per_region` configuration supports a single
+starting settlement without changing the default layout.
+
 Finite resource-allocation hierarchy:
 
 ```text
@@ -371,7 +379,12 @@ Current implementation status:
     - Every other building takes the first free plot along three tracks, whose directions come from the settlement's seed.
     - Placement uses integer geometry only and depends only on settlement geography and lower-id buildings, so v24 saves are migrated by replaying it in id order.
     - Buildings of extinct or absorbed settlements keep their placement and remain obstacles.
-  - The v25 section (placements, then resync ids) sits just before the aggregate demography totals, which stay the final 16 bytes.
+  - The v25 section contains placements followed by resync ids.
+- snapshot schema v26 adds the initial-settlement-count option and per-settlement
+  daily counters for time below viable size and time under food strain:
+  - The counters are written in settlement-id order and cannot exceed elapsed whole days.
+  - v24 and v25 snapshots migrate with both counters zeroed.
+  - The v26 counter section follows the v25 section, before the aggregate demography totals, which remain the final 16 bytes.
 
 Snapshot invariants:
 

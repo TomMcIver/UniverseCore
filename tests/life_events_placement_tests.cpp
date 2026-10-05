@@ -493,6 +493,52 @@ void test_v26_viability_counters_survive_save_load_continuation() {
     require(uninterrupted.save_snapshot() == restored.save_snapshot(), "save/load continuation must match the uninterrupted run");
 }
 
+// Overwrites one settlement's v26 daily counters and refreshes the hash.
+std::vector<std::byte> with_viability_counters(
+    std::vector<std::byte> bytes,
+    const std::size_t settlement_count,
+    const std::size_t settlement_index,
+    const std::uint32_t days_below_viable_size,
+    const std::uint32_t days_under_food_strain) {
+    const auto section_size = 8U + (settlement_count * kViabilityRecordSize);
+    const auto section_start = bytes.size() - kAggregateTotalsTailSize - section_size;
+    const auto offset = section_start + 8U + (settlement_index * kViabilityRecordSize) + 8U;
+    for (std::size_t i = 0; i < 4U; ++i) {
+        bytes[offset + i] = static_cast<std::byte>((days_below_viable_size >> (8U * i)) & 0xFFU);
+        bytes[offset + 4U + i] = static_cast<std::byte>((days_under_food_strain >> (8U * i)) & 0xFFU);
+    }
+    const auto payload_size = bytes.size() - kSnapshotHeaderSize;
+    const std::span<const std::byte> payload{bytes.data() + kSnapshotHeaderSize, payload_size};
+    write_u64_le(bytes, 16U, universe::snapshot_hash64(payload));
+    return bytes;
+}
+
+void test_snapshot_rejects_viability_counters_beyond_elapsed_time() {
+    for (const std::uint32_t elapsed_days : {0U, 37U}) {
+        universe::Simulation source{demo_config(42)};
+        source.advance(universe::days(elapsed_days));
+        const auto settlement_count = source.state().settlements.size();
+        const auto bytes = source.save_snapshot();
+
+        universe::Simulation destination{universe::SimulationConfig{.seed = 999U, .initial_population = 10U}};
+        require(
+            universe::Simulation::load_snapshot(
+                with_viability_counters(bytes, settlement_count, 0U, elapsed_days, elapsed_days), destination).ok,
+            "both counters may equal the number of complete elapsed days");
+        const auto before_rejection = destination.save_snapshot();
+
+        for (const bool invalid_strain : {false, true}) {
+            const auto below_days = elapsed_days + (invalid_strain ? 0U : 1U);
+            const auto strain_days = elapsed_days + (invalid_strain ? 1U : 0U);
+            const auto result = universe::Simulation::load_snapshot(
+                with_viability_counters(bytes, settlement_count, 0U, below_days, strain_days), destination);
+            require(!result.ok, "neither daily counter may exceed elapsed days");
+            require(result.code == universe::SnapshotErrorCode::InvalidState, "an impossible viability counter is an invalid state");
+            require(destination.save_snapshot() == before_rejection, "rejecting an impossible counter must leave the destination intact");
+        }
+    }
+}
+
 void test_food_strain_days_survive_save_load_and_migrate_to_zero() {
     universe::Simulation source{demo_config(42)};
     source.advance(universe::days(60));
@@ -575,6 +621,7 @@ int main() {
     test_days_below_viable_size_counts_one_per_day();
     test_viable_settlements_keep_a_zero_counter();
     test_v26_viability_counters_survive_save_load_continuation();
+    test_snapshot_rejects_viability_counters_beyond_elapsed_time();
     test_food_strain_days_survive_save_load_and_migrate_to_zero();
     test_snapshot_taken_at_a_year_boundary_round_trips_with_inactive_settlements();
     test_v25_snapshots_migrate_with_zeroed_viability_counters();

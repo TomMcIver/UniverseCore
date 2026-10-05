@@ -289,6 +289,10 @@ constexpr std::uint16_t kViabilitySectionSchemaVersion = 26U;
         settlement_by_id.emplace(settlement.id, &settlement);
     }
 
+    const auto ticks_per_day = days(1).ticks;
+    const auto elapsed_days = state.time.ticks > 0 ? state.time.ticks / ticks_per_day : 0;
+    const auto max_elapsed_days = static_cast<std::uint64_t>(elapsed_days);
+
     SettlementId previous_id = 0;
     for (std::uint64_t i = 0; i < record_count; ++i) {
         SettlementId settlement_id = 0;
@@ -305,6 +309,10 @@ constexpr std::uint16_t kViabilitySectionSchemaVersion = 26U;
         const auto settlement_it = settlement_by_id.find(settlement_id);
         if (settlement_it == settlement_by_id.end()) {
             return load_error(SnapshotErrorCode::InvalidReference, "Snapshot settlement viability references unknown settlement");
+        }
+        // A count of daily updates cannot exceed the days that have elapsed.
+        if (days_below_viable_size > max_elapsed_days || days_under_food_strain > max_elapsed_days) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot settlement viability counter exceeds elapsed days");
         }
         settlement_it->second->days_below_viable_size = days_below_viable_size;
         settlement_it->second->days_under_food_strain = days_under_food_strain;

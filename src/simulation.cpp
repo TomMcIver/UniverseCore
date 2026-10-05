@@ -5529,6 +5529,76 @@ void Simulation::process_settlement_extinction() {
     }
 }
 
+// Chooses which of a source settlement's households move to a new settlement,
+// without changing any state, so a split that cannot meet the minimum sizes
+// leaves the world untouched. The order is scoped by the source and the year,
+// never by consumption order. The returned households list the movers first.
+std::optional<Simulation::FissionPlan> Simulation::plan_fission_households(
+    const Settlement& source,
+    const std::uint64_t demographic_year,
+    const std::unordered_set<PersonId>& alive_person_ids) {
+    struct Candidate {
+        Household* household{};
+        std::uint64_t alive_members{};
+    };
+
+    std::vector<Candidate> candidates;
+    std::uint64_t source_population = 0;
+    for (auto& household : state_.households) {
+        if (household.settlement_id != source.id) {
+            continue;
+        }
+        std::uint64_t alive_members = 0;
+        for (const auto member_id : household.member_ids) {
+            alive_members += alive_person_ids.contains(member_id) ? 1U : 0U;
+        }
+        if (alive_members == 0U) {
+            continue;
+        }
+        candidates.push_back(Candidate{.household = &household, .alive_members = alive_members});
+        source_population += alive_members;
+    }
+
+    if (source_population < kFissionMinimumSourcePopulation + kFissionMinimumDaughterPopulation) {
+        return std::nullopt;
+    }
+
+    std::sort(candidates.begin(), candidates.end(), [&](const Candidate& lhs, const Candidate& rhs) {
+        const auto lhs_seed = derive_seed(household_seed(lhs.household->id), SeedDomain::SettlementHouseholdSelection, demographic_year ^ source.id);
+        const auto rhs_seed = derive_seed(household_seed(rhs.household->id), SeedDomain::SettlementHouseholdSelection, demographic_year ^ source.id);
+        if (lhs_seed.value != rhs_seed.value) {
+            return lhs_seed.value < rhs_seed.value;
+        }
+        return lhs.household->id < rhs.household->id;
+    });
+
+    const auto max_moved_population = source_population - kFissionMinimumSourcePopulation;
+    const auto target_moved_population =
+        std::max<std::uint64_t>(kFissionMinimumDaughterPopulation, source_population / kFissionDaughterTargetDivisor);
+
+    std::vector<Household*> moving_households;
+    std::vector<Household*> staying_households;
+    std::uint64_t moved_population = 0;
+    for (const auto& candidate : candidates) {
+        const bool fits = moved_population + candidate.alive_members <= max_moved_population;
+        if (fits && moved_population < target_moved_population) {
+            moving_households.push_back(candidate.household);
+            moved_population += candidate.alive_members;
+        } else {
+            staying_households.push_back(candidate.household);
+        }
+    }
+    if (moved_population < kFissionMinimumDaughterPopulation) {
+        return std::nullopt;
+    }
+
+    FissionPlan plan;
+    plan.move_count = static_cast<std::uint64_t>(moving_households.size());
+    plan.households = std::move(moving_households);
+    plan.households.insert(plan.households.end(), staying_households.begin(), staying_households.end());
+    return plan;
+}
+
 void Simulation::process_settlement_founding(const std::uint64_t demographic_year) {
     std::unordered_set<PersonId> alive_person_ids;
     alive_person_ids.reserve(state_.people.size());
@@ -5636,98 +5706,36 @@ void Simulation::process_settlement_founding(const std::uint64_t demographic_yea
             continue;
         }
 
-        std::vector<Household*> source_alive_households;
-        source_alive_households.reserve(state_.households.size());
-        for (auto& household : state_.households) {
-            if (household.region_id != region_id || household.settlement_id != source->id) {
-                continue;
-            }
-
-            bool has_alive = false;
-            for (const auto member_id : household.member_ids) {
-                for (const auto& person : state_.people) {
-                    if (person.id == member_id && person.alive) {
-                        has_alive = true;
-                        break;
-                    }
-                }
-                if (has_alive) {
-                    break;
-                }
-            }
-
-            if (has_alive) {
-                source_alive_households.push_back(&household);
-            }
-        }
-
-        // Choose which households move before changing any state, so a split
-        // that cannot meet the minimum sizes leaves the world untouched. Order
-        // is scoped by the source and the year, never by consumption order.
-        std::sort(source_alive_households.begin(), source_alive_households.end(), [&](const Household* lhs, const Household* rhs) {
-            const auto lhs_seed = derive_seed(household_seed(lhs->id), SeedDomain::SettlementHouseholdSelection, demographic_year ^ source->id);
-            const auto rhs_seed = derive_seed(household_seed(rhs->id), SeedDomain::SettlementHouseholdSelection, demographic_year ^ source->id);
-            if (lhs_seed.value != rhs_seed.value) {
-                return lhs_seed.value < rhs_seed.value;
-            }
-            return lhs->id < rhs->id;
-        });
-
-        std::vector<std::uint64_t> household_sizes;
-        household_sizes.reserve(source_alive_households.size());
-        std::uint64_t source_population = 0;
-        for (const auto* household : source_alive_households) {
-            std::uint64_t alive_members = 0;
-            for (const auto member_id : household->member_ids) {
-                alive_members += alive_person_ids.contains(member_id) ? 1U : 0U;
-            }
-            household_sizes.push_back(alive_members);
-            source_population += alive_members;
-        }
-
-        if (source_population < kFissionMinimumSourcePopulation + kFissionMinimumDaughterPopulation) {
+        auto plan = plan_fission_households(*source, demographic_year, alive_person_ids);
+        if (!plan.has_value()) {
             continue;
         }
-        const auto max_moved_population = source_population - kFissionMinimumSourcePopulation;
-        const auto target_moved_population =
-            std::max<std::uint64_t>(kFissionMinimumDaughterPopulation, source_population / kFissionDaughterTargetDivisor);
+        auto& source_alive_households = plan->households;
+        const auto move_count = plan->move_count;
 
-        std::vector<Household*> moving_households;
-        std::vector<Household*> staying_households;
-        std::uint64_t moved_population = 0;
-        for (std::size_t i = 0; i < source_alive_households.size(); ++i) {
-            const bool fits = moved_population + household_sizes[i] <= max_moved_population;
-            if (fits && moved_population < target_moved_population) {
-                moving_households.push_back(source_alive_households[i]);
-                moved_population += household_sizes[i];
-            } else {
-                staying_households.push_back(source_alive_households[i]);
-            }
-        }
-        if (moved_population < kFissionMinimumDaughterPopulation) {
-            continue;
-        }
-
-        const auto move_count = static_cast<std::uint64_t>(moving_households.size());
-        source_alive_households = moving_households;
-        source_alive_households.insert(source_alive_households.end(), staying_households.begin(), staying_households.end());
-
-        const auto new_settlement_id = next_settlement_id();
-        const auto source_settlement_id = source->id;
-        // The split is the response to strain, so the source starts counting again.
-        source->days_under_food_strain = 0U;
+        // Decide the land share before changing anything, so a split that cannot
+        // get one consumes no settlement id and resets no strain count.
         std::uint32_t assigned_share = 0U;
+        bool share_comes_from_source = false;
         if (unallocated_share >= kFoundingMinimumUnallocatedShare) {
             assigned_share = std::min<std::uint32_t>(unallocated_share, kFoundingDefaultShare);
         } else if (source->access_share_points > kFoundingMinimumSourceShareAfterSplit) {
             const auto transferable = source->access_share_points - kFoundingMinimumSourceShareAfterSplit;
             assigned_share = std::min<std::uint32_t>(transferable, kFoundingDefaultShare);
-            source->access_share_points -= assigned_share;
+            share_comes_from_source = true;
         }
 
         if (assigned_share == 0U) {
             continue;
         }
+
+        const auto new_settlement_id = next_settlement_id();
+        const auto source_settlement_id = source->id;
+        if (share_comes_from_source) {
+            source->access_share_points -= assigned_share;
+        }
+        // The split is the response to strain, so the source starts counting again.
+        source->days_under_food_strain = 0U;
 
         state_.settlements.push_back(Settlement{
             .id = new_settlement_id,
@@ -5836,6 +5844,48 @@ void Simulation::merge_settlements(const SettlementId survivor_id, const Settlem
     // Commons food is finite regional stock, so it moves with the households.
     survivor->commons_food.value += absorbed->commons_food.value;
     absorbed->commons_food.value = 0;
+
+    // The aggregate ledger of a settlement in a demoted region moves with it, so
+    // the stock and household bands its population groups carry are not stranded.
+    SettlementAggregateState* survivor_ledger = nullptr;
+    SettlementAggregateState* absorbed_ledger = nullptr;
+    for (auto& ledger : state_.settlement_aggregates) {
+        if (ledger.settlement_id == survivor_id) {
+            survivor_ledger = &ledger;
+        } else if (ledger.settlement_id == absorbed_id) {
+            absorbed_ledger = &ledger;
+        }
+    }
+    if (survivor_ledger != nullptr && absorbed_ledger != nullptr) {
+        survivor_ledger->household_count += absorbed_ledger->household_count;
+        survivor_ledger->small_household_count += absorbed_ledger->small_household_count;
+        survivor_ledger->medium_household_count += absorbed_ledger->medium_household_count;
+        survivor_ledger->large_household_count += absorbed_ledger->large_household_count;
+        survivor_ledger->food_inventory += absorbed_ledger->food_inventory;
+        survivor_ledger->food_produced_total += absorbed_ledger->food_produced_total;
+        survivor_ledger->food_consumed_total += absorbed_ledger->food_consumed_total;
+        survivor_ledger->unmet_food_total += absorbed_ledger->unmet_food_total;
+        survivor_ledger->labour_capacity += absorbed_ledger->labour_capacity;
+        survivor_ledger->labour_demand += absorbed_ledger->labour_demand;
+        survivor_ledger->labour_allocated += absorbed_ledger->labour_allocated;
+        survivor_ledger->labour_low_household_count += absorbed_ledger->labour_low_household_count;
+        survivor_ledger->labour_medium_household_count += absorbed_ledger->labour_medium_household_count;
+        survivor_ledger->labour_high_household_count += absorbed_ledger->labour_high_household_count;
+        survivor_ledger->wealth_low_household_count += absorbed_ledger->wealth_low_household_count;
+        survivor_ledger->wealth_medium_household_count += absorbed_ledger->wealth_medium_household_count;
+        survivor_ledger->wealth_high_household_count += absorbed_ledger->wealth_high_household_count;
+        survivor_ledger->food_buffer_low_household_count += absorbed_ledger->food_buffer_low_household_count;
+        survivor_ledger->food_buffer_medium_household_count += absorbed_ledger->food_buffer_medium_household_count;
+        survivor_ledger->food_buffer_high_household_count += absorbed_ledger->food_buffer_high_household_count;
+        survivor_ledger->wealth_points_total += absorbed_ledger->wealth_points_total;
+        survivor_ledger->productive_access_points += absorbed_ledger->productive_access_points;
+        survivor_ledger->required_food_year += absorbed_ledger->required_food_year;
+        survivor_ledger->unmet_food_year += absorbed_ledger->unmet_food_year;
+        *absorbed_ledger = SettlementAggregateState{
+            .settlement_id = absorbed_ledger->settlement_id,
+            .region_id = absorbed_ledger->region_id,
+        };
+    }
 
     const auto combined_share =
         static_cast<std::uint64_t>(survivor->access_share_points) + static_cast<std::uint64_t>(absorbed->access_share_points);

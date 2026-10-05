@@ -2,6 +2,8 @@
 // pressure-driven fission and absorption of settlements that stay too small.
 // They run at the headless Simulation seam: configure a world, advance time,
 // read the resulting state.
+#include "settlement_test_support.hpp"
+
 #include "universe/simulation.hpp"
 
 #include <algorithm>
@@ -9,69 +11,13 @@
 #include <cstdlib>
 #include <iostream>
 #include <unordered_map>
+#include <unordered_set>
 #include <variant>
 #include <vector>
 
 namespace {
 
-constexpr std::uint64_t kStartingPopulation = 200U;
-
-void require(const bool condition, const char* message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        std::exit(1);
-    }
-}
-
-universe::SimulationConfig default_layout_config(const std::uint64_t seed) {
-    return universe::SimulationConfig{
-        .seed = seed,
-        .initial_population = kStartingPopulation,
-        .enable_unrelated_random_probe = false,
-        .initial_household_food_units = 80,
-        .food_production_scale_percent = 100,
-        .food_system_enabled = true,
-    };
-}
-
-// One region holding as much land as the default four regions together, so a
-// single-settlement start is not starved of land.
-constexpr std::int64_t kSingleRegionLandUnits = 480;
-
-universe::SimulationConfig single_settlement_config(const std::uint64_t seed) {
-    auto config = default_layout_config(seed);
-    config.initial_region_count = 1;
-    config.initial_settlements_per_region = 1;
-    config.base_region_area_units = kSingleRegionLandUnits;
-    return config;
-}
-
-std::vector<const universe::Settlement*> active_settlements(const universe::WorldState& state) {
-    std::vector<const universe::Settlement*> active;
-    for (const auto& settlement : state.settlements) {
-        if (settlement.active) {
-            active.push_back(&settlement);
-        }
-    }
-    return active;
-}
-
-// An active household (one with living members) belongs to exactly one active
-// settlement in its region. Households emptied by extinction are not active.
-void require_every_household_in_one_valid_settlement(const universe::WorldState& state) {
-    for (const auto& household : state.households) {
-        if (household.member_ids.empty()) {
-            continue;
-        }
-        std::uint64_t matches = 0;
-        for (const auto& settlement : state.settlements) {
-            if (settlement.id == household.settlement_id && settlement.active && settlement.region_id == household.region_id) {
-                ++matches;
-            }
-        }
-        require(matches == 1U, "every household must belong to exactly one active settlement in its region");
-    }
-}
+using namespace settlement_test;
 
 // Today's automatic layout, recorded before the option existed: the same seed
 // must keep producing the same number of starting settlements.
@@ -253,6 +199,9 @@ void test_no_split_leaves_a_side_below_its_minimum() {
                 require(source.population >= kMinimumSourcePopulationAfterSplit, "a source settlement must keep at least the minimum population");
                 ++splits_checked;
             }
+            // A split loses and duplicates nobody, and creates no land.
+            require_population_accounted_for(sim);
+            require_region_access_within_capacity(sim.state());
         }
     }
     require(splits_checked > 0U, "the scenario must exercise at least one split");
@@ -260,7 +209,6 @@ void test_no_split_leaves_a_side_below_its_minimum() {
 
 // ADR 0002: the absorbed side is below the viable size for this many years, the
 // survivor sits within this distance of it.
-constexpr std::uint32_t kAbsorptionDays = 5U * 365U;
 constexpr std::int64_t kAbsorptionDistanceLimitUnits = 2'000;
 constexpr std::uint32_t kDaysPerYear = 365U;
 
@@ -298,6 +246,37 @@ std::unordered_map<universe::SettlementId, SettlementBefore> snapshot_before(con
     return before;
 }
 
+std::unordered_map<universe::PersonId, universe::HouseholdId> household_of_living_people(const universe::WorldState& state) {
+    std::unordered_map<universe::PersonId, universe::HouseholdId> households;
+    for (const auto& person : state.people) {
+        if (person.alive) {
+            households[person.id] = person.household_id;
+        }
+    }
+    return households;
+}
+
+// A reload taken right now must succeed and then continue exactly as the live
+// world does. A failed load means something was stranded; a drifting
+// continuation means hidden state (such as lookup indexes keyed by settlement)
+// differs from what a reload rebuilds.
+void require_reload_continues_identically(const universe::Simulation& sim) {
+    constexpr std::uint64_t kContinuationYears = 3;
+    universe::Simulation restored{universe::SimulationConfig{.seed = 999U, .initial_population = 10U}};
+    const auto load_result = universe::Simulation::load_snapshot(sim.save_snapshot(), restored);
+    if (!load_result.ok) {
+        std::cerr << "load failed: " << load_result.message << '\n';
+    }
+    require(load_result.ok, "a snapshot taken right after an absorption must load");
+
+    auto continuing = sim;
+    continuing.run_years(kContinuationYears);
+    restored.run_years(kContinuationYears);
+    require(
+        continuing.save_snapshot() == restored.save_snapshot(),
+        "a reload right after an absorption must continue identically");
+}
+
 const universe::Household& household_by_id(const universe::WorldState& state, const universe::HouseholdId id) {
     for (const auto& household : state.households) {
         if (household.id == id) {
@@ -332,11 +311,13 @@ void test_nothing_is_absorbed_before_five_years_below_viable_size() {
 void test_settlements_below_viable_size_for_five_years_are_absorbed_into_a_viable_neighbour() {
     constexpr int kYears = 8;
     std::uint64_t absorptions_checked = 0;
+    std::uint64_t people_followed = 0;
     for (const std::uint64_t seed : {1U, 7U, 42U}) {
         universe::Simulation sim{default_layout_config(seed)};
         for (int year = 0; year < kYears; ++year) {
             const auto events_before = sim.state().event_log.size();
             const auto before = snapshot_before(sim.state());
+            const auto household_before = household_of_living_people(sim.state());
             sim.run_years(1);
 
             const auto absorptions = absorptions_since(sim.state(), events_before);
@@ -366,33 +347,79 @@ void test_settlements_below_viable_size_for_five_years_are_absorbed_into_a_viabl
                         household_by_id(sim.state(), household_id).settlement_id == survivor.id,
                         "every household of an absorbed settlement moves to the survivor");
                 }
+
+                // The people move with their households and keep who they are: anyone
+                // alive before and after is still in the household they were in.
+                std::unordered_set<universe::HouseholdId> absorbed_households(
+                    before.at(absorption.absorbed_id).household_ids.begin(),
+                    before.at(absorption.absorbed_id).household_ids.end());
+                for (const auto& person : sim.state().people) {
+                    const auto earlier = household_before.find(person.id);
+                    if (!person.alive || earlier == household_before.end() || !absorbed_households.contains(earlier->second)) {
+                        continue;
+                    }
+                    require(person.household_id == earlier->second, "a person must keep their household across an absorption");
+                    ++people_followed;
+                }
                 ++absorptions_checked;
             }
             require_every_household_in_one_valid_settlement(sim.state());
+            require_population_accounted_for(sim);
+            require_region_access_within_capacity(sim.state());
 
             // A merge that strands stock in an inactive settlement makes the world
-            // unloadable, so the state right after an absorption must round-trip.
+            // unloadable, and stale hidden state makes a reloaded run drift, so the
+            // state right after an absorption must reload and continue identically.
             if (!absorptions.empty()) {
-                universe::Simulation restored{universe::SimulationConfig{.seed = 999U, .initial_population = 10U}};
-                const auto load_result = universe::Simulation::load_snapshot(sim.save_snapshot(), restored);
-                if (!load_result.ok) {
-                    std::cerr << "load failed: " << load_result.message << '\n';
-                }
-                require(load_result.ok, "a snapshot taken right after an absorption must load");
-
-                // Hidden state (such as lookup indexes keyed by settlement) must
-                // match what a reload rebuilds, or the two runs drift apart.
-                constexpr std::uint64_t kContinuationYears = 3;
-                auto continuing = sim;
-                continuing.run_years(kContinuationYears);
-                restored.run_years(kContinuationYears);
-                require(
-                    continuing.save_snapshot() == restored.save_snapshot(),
-                    "a reload right after an absorption must continue identically");
+                require_reload_continues_identically(sim);
             }
         }
     }
     require(absorptions_checked > 0U, "the scenario must exercise at least one absorption");
+    require(people_followed > 0U, "an absorption must move at least one living person with their household");
+}
+
+// A settlement in a demoted region holds its people as population groups and its
+// stock in an aggregate ledger. Absorbing it must carry that ledger over too,
+// leaving nothing stranded, and the world must still reload and continue.
+void test_absorption_in_a_demoted_region_moves_the_aggregate_ledger() {
+    constexpr int kYears = 8;
+    std::uint64_t absorptions_checked = 0;
+    for (const std::uint64_t seed : {1U, 7U, 42U}) {
+        universe::Simulation sim{default_layout_config(seed)};
+        std::vector<universe::RegionId> region_ids;
+        for (const auto& region : sim.state().regions) {
+            region_ids.push_back(region.id);
+        }
+        for (const auto region_id : region_ids) {
+            sim.demote_region_to_settlement_aggregate(region_id);
+        }
+
+        for (int year = 0; year < kYears; ++year) {
+            const auto events_before = sim.state().event_log.size();
+            sim.run_years(1);
+            const auto absorptions = absorptions_since(sim.state(), events_before);
+            for (const auto& absorption : absorptions) {
+                for (const auto& ledger : sim.state().settlement_aggregates) {
+                    if (ledger.settlement_id != absorption.absorbed_id) {
+                        continue;
+                    }
+                    require(
+                        ledger.household_count == 0U && ledger.food_inventory == 0 && ledger.labour_capacity == 0 &&
+                            ledger.wealth_points_total == 0 && ledger.productive_access_points == 0 &&
+                            ledger.required_food_year == 0 && ledger.unmet_food_year == 0,
+                        "an absorbed settlement must keep no aggregate ledger");
+                }
+                ++absorptions_checked;
+            }
+            require_population_accounted_for(sim);
+            require_region_access_within_capacity(sim.state());
+            if (!absorptions.empty()) {
+                require_reload_continues_identically(sim);
+            }
+        }
+    }
+    require(absorptions_checked > 0U, "the demoted scenario must exercise at least one absorption");
 }
 
 void test_absorption_history_is_deterministic() {
@@ -403,69 +430,12 @@ void test_absorption_history_is_deterministic() {
     require(first.save_snapshot() == second.save_snapshot(), "the same seed must produce the same settlement history");
 }
 
-// Measured for ADR 0002 (single-settlement start, 200 people, 20 years, seeds
-// 1-64): 52 seeds end with 2-5 settlements and a largest of 70 or more. Ten
-// seeds die out entirely and two fall to about 75 people. That is a property of
-// the one-region start, not of fission: with fission switched off the same
-// start loses 13 seeds. So the target is asserted for worlds that did not
-// collapse, and the number that did not is held above a floor.
-constexpr std::uint64_t kDistributionSeedCount = 64;
-constexpr int kDistributionYears = 20;
-constexpr std::uint64_t kCollapsedBelowPopulation = kStartingPopulation / 2U;
-constexpr std::size_t kTargetMinSettlements = 2;
-constexpr std::size_t kTargetMaxSettlements = 5;
-constexpr std::uint64_t kTargetMinLargestSettlement = 70;
-constexpr std::size_t kMinSurvivingSeeds = 40;
-
-void test_single_settlement_start_grows_into_a_village_and_hamlets() {
-    std::size_t surviving_seeds = 0;
-    for (std::uint64_t seed = 1; seed <= kDistributionSeedCount; ++seed) {
-        universe::Simulation sim{single_settlement_config(seed)};
-        sim.run_years(kDistributionYears);
-
-        const auto active = active_settlements(sim.state());
-        std::uint64_t largest = 0;
-        for (const auto* settlement : active) {
-            largest = std::max(largest, settlement->population);
-            require(
-                settlement->days_below_viable_size <= kAbsorptionDays,
-                "no settlement may stay below the viable size for more than five years");
-        }
-        require_every_household_in_one_valid_settlement(sim.state());
-
-        if (sim.detailed_population() < kCollapsedBelowPopulation) {
-            continue;
-        }
-        ++surviving_seeds;
-        require(
-            active.size() >= kTargetMinSettlements && active.size() <= kTargetMaxSettlements,
-            "a surviving world must end with two to five settlements");
-        require(largest >= kTargetMinLargestSettlement, "a surviving world must hold a village of at least seventy people");
-    }
-    require(surviving_seeds >= kMinSurvivingSeeds, "most seeds must survive the single-settlement start");
-}
-
-// The default layout starts with several settlements and must not splinter
-// further: nothing in it is large enough to split within twenty years.
-void test_default_layout_does_not_splinter_further() {
-    constexpr std::uint64_t kSeedsChecked = 16;
-    for (std::uint64_t seed = 1; seed <= kSeedsChecked; ++seed) {
-        universe::Simulation sim{default_layout_config(seed)};
-        const auto starting = active_settlements(sim.state()).size();
-        sim.run_years(kDistributionYears);
-        require(
-            active_settlements(sim.state()).size() <= starting,
-            "the default layout must not end with more settlements than it started with");
-    }
-}
-
 }  // namespace
 
 int main() {
-    test_single_settlement_start_grows_into_a_village_and_hamlets();
-    test_default_layout_does_not_splinter_further();
     test_nothing_is_absorbed_before_five_years_below_viable_size();
     test_settlements_below_viable_size_for_five_years_are_absorbed_into_a_viable_neighbour();
+    test_absorption_in_a_demoted_region_moves_the_aggregate_ledger();
     test_absorption_history_is_deterministic();
     test_overgrown_settlement_splits();
     test_healthy_settlement_below_the_threshold_does_not_split();

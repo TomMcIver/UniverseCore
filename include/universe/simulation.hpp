@@ -834,6 +834,15 @@ private:
     void process_settlement_restructuring(std::uint64_t demographic_year);
     void process_settlement_extinction();
     void process_settlement_founding(std::uint64_t demographic_year);
+    // The households a fission would move, movers first. See the definition.
+    struct FissionPlan {
+        std::vector<Household*> households{};
+        std::uint64_t move_count{};
+    };
+    [[nodiscard]] std::optional<FissionPlan> plan_fission_households(
+        const Settlement& source,
+        std::uint64_t demographic_year,
+        const std::unordered_set<PersonId>& alive_person_ids);
     void process_settlement_merging();
     void merge_settlements(SettlementId survivor_id, SettlementId absorbed_id);
     [[nodiscard]] std::uint32_t settlement_pressure_per_10k(const Settlement& settlement) const noexcept;
