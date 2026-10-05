@@ -136,6 +136,10 @@ func _initialize() -> void:
 
 	_run_test("world_view renders a newly spawned agent at its real canonical position", Callable(self, "_test_world_view_agent_renders_at_real_position_on_spawn"))
 	_run_test("world_view walks an agent to the server-given target on schedule", Callable(self, "_test_world_view_agent_walks_to_server_given_target_on_schedule"))
+	_run_test("world_view villagers walk at a natural pace", Callable(self, "_test_world_view_villagers_walk_at_a_natural_pace"))
+	_run_test("world_view walking pace scales with playback speed", Callable(self, "_test_world_view_walking_pace_scales_with_playback_speed"))
+	_run_test("world_view paused world holds villagers and clock", Callable(self, "_test_world_view_paused_world_holds_villagers_and_clock"))
+	_run_test("world_view clock runs a day per two minutes at 1x", Callable(self, "_test_world_view_clock_runs_a_day_per_two_minutes_at_1x"))
 	_run_test("world_view never walks a Home-kind agent", Callable(self, "_test_world_view_home_kind_agent_never_walks"))
 	_run_test("world_view snaps instead of walking above the high-speed threshold", Callable(self, "_test_world_view_high_speed_snaps_instead_of_walking"))
 	_run_test("world_view resolves a Field target from VillageDressing", Callable(self, "_test_world_view_field_target_resolved_from_village_dressing"))
@@ -721,7 +725,7 @@ func _test_world_view_agent_walks_to_server_given_target_on_schedule() -> void:
 		"agents": [{
 			"id": 42, "sex": "Female", "position": {"x": 0.0, "y": 0.0, "z": 0.0},
 			"currentActivity": "Work", "targetKind": "Common",
-			"target": {"x": 20.0, "z": 0.0}, "departTick": 100, "returnDepartTick": 500,
+			"target": {"x": 20.0, "z": 0.0}, "departTick": 100, "returnDepartTick": 1000000,
 		}],
 		"settlements": [],
 		"buildings": [],
@@ -734,13 +738,74 @@ func _test_world_view_agent_walks_to_server_given_target_on_schedule() -> void:
 	var home_x := node.position.x
 	_assert_eq(absf(home_x) < 2.0, true, "before the depart tick, the agent must still be at home")
 
+	# The walk takes real time: 30 real seconds at 1.3 units/s covers the 20 units.
 	view.set_tick(500)
-	view._process(0.0)
+	for _frame in range(30):
+		view._process(1.0)
 	_assert_eq(node.position.x > 15.0, true, "once at work, the agent must be at the server-given target, not a client-invented point")
 
-	view.set_tick(100000)
-	view._process(0.0)
+	view.set_tick(2000000)
+	for _frame in range(30):
+		view._process(1.0)
 	_assert_eq(absf(node.position.x - home_x) < 2.0, true, "long after the return tick plus travel time, the agent must be home again")
+	view.queue_free()
+
+func _far_worker_view() -> WorldView:
+	# One agent at home with a workplace 100 units away and a long work window.
+	var view := WorldView.new()
+	root.add_child(view)
+	view.apply_snapshot({
+		"agents": [{
+			"id": 11, "sex": "Male", "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+			"currentActivity": "Work", "targetKind": "Common",
+			"target": {"x": 100.0, "z": 0.0}, "departTick": 100, "returnDepartTick": 1000000,
+		}],
+		"settlements": [], "buildings": [],
+	})
+	return view
+
+func _distance_walked_in_one_second(speed: int) -> float:
+	var view := _far_worker_view()
+	view.set_simulation_playback(false, speed)
+	var node: Node3D = view.get_child(0)
+	var start := node.position
+	view.set_tick(500)  # inside the work window, so the goal is the far workplace
+	view._process(1.0)
+	var walked := start.distance_to(node.position)
+	view.queue_free()
+	return walked
+
+func _test_world_view_villagers_walk_at_a_natural_pace() -> void:
+	# At 1x a villager covers about WALK_SPEED_UNITS_PER_SECOND per real second
+	# -- a walk, not a teleport -- so it matches the pace of the avatar.
+	var pace: float = WorldView.WALK_SPEED_UNITS_PER_SECOND
+	var walked := _distance_walked_in_one_second(1)
+	_assert_eq(walked > pace * 0.9 and walked < pace * 1.1, true, "at 1x a villager must walk about %s units in one real second, walked %s" % [pace, walked])
+
+func _test_world_view_walking_pace_scales_with_playback_speed() -> void:
+	var pace: float = WorldView.WALK_SPEED_UNITS_PER_SECOND
+	var walked := _distance_walked_in_one_second(4)
+	_assert_eq(walked > pace * 4.0 * 0.9 and walked < pace * 4.0 * 1.1, true, "at 4x a villager must walk about four times as far, walked %s" % walked)
+
+func _test_world_view_paused_world_holds_villagers_and_clock() -> void:
+	var view := _far_worker_view()
+	view.set_simulation_playback(true, 1)
+	var node: Node3D = view.get_child(0)
+	var start := node.position
+	view.set_tick(500)
+	view._process(5.0)
+	_assert_eq(node.position, start, "a paused world must not move villagers")
+	_assert_eq(view._estimated_tick, 500.0, "a paused world must not advance its clock")
+	view.queue_free()
+
+func _test_world_view_clock_runs_a_day_per_two_minutes_at_1x() -> void:
+	# Matches the bridge: one simulated day per 120 real seconds at 1x.
+	var view := WorldView.new()
+	root.add_child(view)
+	view.set_simulation_playback(false, 1)
+	view.set_tick(0)
+	view._process(120.0)
+	_assert_eq(is_equal_approx(view._estimated_tick, 86400.0), true, "120 real seconds at 1x must advance one simulated day, got %s ticks" % view._estimated_tick)
 	view.queue_free()
 
 func _test_world_view_home_kind_agent_never_walks() -> void:
@@ -796,14 +861,15 @@ func _test_world_view_field_target_resolved_from_village_dressing() -> void:
 			"id": 9, "sex": "Female", "position": {"x": 0.0, "y": 0.0, "z": 0.0},
 			"householdId": 17, "regionId": 1,
 			"currentActivity": "Work", "targetKind": "Field",
-			"target": null, "departTick": 100, "returnDepartTick": 500,
+			"target": null, "departTick": 100, "returnDepartTick": 1000000,
 		}],
 		"settlements": [], "buildings": [],
 	})
 	view.set_simulation_playback(false, 1)
 	var node: Node3D = view.get_child(0)
 	view.set_tick(500)
-	view._process(0.0)
+	for _frame in range(60):
+		view._process(1.0)
 	_assert_eq(node.position.x > 45.0, true, "a Field-kind agent must walk to the household's actual field, as looked up from VillageDressing")
 	view.queue_free()
 	dressing.queue_free()

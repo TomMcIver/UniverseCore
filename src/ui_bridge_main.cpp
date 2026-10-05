@@ -27,6 +27,14 @@ constexpr std::uint32_t kProtocolVersion = 2U;
 // Days advanced per 100 ms loop while jumping: 20 years in about 12 s, fast
 // enough for the demo but slow enough to watch the village change.
 constexpr std::uint64_t kJumpDaysPerTick = 60U;
+// The bridge loops every kLoopMilliseconds. At 1x one simulated day passes in
+// kRealSecondsPerSimulatedDayAtOneX real seconds, a pace at which villagers can
+// walk to work at a natural speed; Nx is N times faster. The Godot client
+// advances its own clock at the matching rate, UniverseProtocol.
+// SIMULATION_SECONDS_PER_REAL_SECOND_AT_1X (86400 / this value).
+constexpr std::uint32_t kLoopMilliseconds = 100U;
+constexpr std::uint32_t kRealSecondsPerSimulatedDayAtOneX = 120U;
+constexpr std::uint32_t kSpeedUnitsPerSimulatedDay = kRealSecondsPerSimulatedDayAtOneX * (1000U / kLoopMilliseconds);
 
 struct RuntimeState {
     std::atomic<bool> running{true};
@@ -148,6 +156,8 @@ int main(int argc, char** argv) {
     };
 
     std::uint64_t step_counter = 0;
+    // Speed accumulates each loop until it adds up to a whole simulated day.
+    std::uint32_t speed_budget = 0;
     while (runtime.running.load()) {
         const auto commands = drain_commands(runtime);
         for (const auto& command : commands) {
@@ -209,18 +219,24 @@ int main(int argc, char** argv) {
             }
             publish_progress();
         } else if (!runtime.paused.load()) {
-            const auto speed = runtime.speed.load();
-            for (std::uint32_t i = 0; i < speed; ++i) {
+            speed_budget += runtime.speed.load();
+            const auto days = speed_budget / kSpeedUnitsPerSimulatedDay;
+            speed_budget %= kSpeedUnitsPerSimulatedDay;
+            for (std::uint32_t i = 0; i < days; ++i) {
                 controller.advance_days(1);
             }
-            publish_progress();
+            if (days > 0U) {
+                publish_progress();
+            } else if ((step_counter % 20U) == 0U) {
+                emit_status(universe::ui::build_world_snapshot(controller).tick);
+            }
         } else if ((step_counter % 20U) == 0U) {
             emit_status(universe::ui::build_world_snapshot(controller).tick);
         }
 
         std::cout.flush();
         ++step_counter;
-        std::this_thread::sleep_for(std::chrono::milliseconds{100});
+        std::this_thread::sleep_for(std::chrono::milliseconds{kLoopMilliseconds});
     }
 
     if (reader.joinable()) {

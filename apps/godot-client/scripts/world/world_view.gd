@@ -34,6 +34,8 @@ const BuildingAssets := preload("res://scripts/world/building_assets.gd")
 ## every snapshot/delta so drift never accumulates. This is a client-local
 ## approximation only: the server has no sub-day ticking, so this is the only
 ## way a walk is visible before the next multi-day jump.
+## A villager's walking pace in world units per REAL second at 1x (a natural
+## walk, close to the player avatar's pace); playback speed scales it.
 const WALK_SPEED_UNITS_PER_SECOND := 1.3
 ## Above this playback speed, walking is not drawn at all -- villagers snap
 ## straight to their current activity spot (decision M4).
@@ -409,49 +411,44 @@ func _work_point_for(id: int, facts: Dictionary) -> Vector2:
 	var target = facts["target"]
 	return target if target != null else facts["home"]
 
-## Resolves where an agent should be drawn right now, from schedule facts
-## plus the locally-estimated tick. Called every frame for every visible
-## agent (cheap arithmetic; the field lookup above is the only per-frame walk
-## over other data, bounded by one settlement's field count).
+## Resolves where an agent is heading right now -- its home or its activity
+## spot -- from schedule facts plus the locally-estimated tick. This is only the
+## goal: _advance_agents draws the walk there at a real-time pace. Called every
+## frame for every visible agent (cheap arithmetic; the field lookup above is
+## the only per-frame walk over other data, bounded by one settlement's field
+## count).
 func _resolve_agent_position(id: int) -> Vector3:
 	var facts: Dictionary = _agent_facts.get(id, {})
 	if facts.is_empty():
 		return Vector3.ZERO
-	var home: Vector2 = facts["home"] + _crowd_offset_for_person(id)
-	var kind: String = facts["target_kind"]
-	var flat: Vector2
-	if kind == "Home":
-		flat = home
-	else:
-		var work: Vector2 = _work_point_for(id, facts) + _crowd_offset_for_person(id * 7919 + 1)
-		if _playback_speed > WALKING_VISIBLE_MAX_SPEED:
-			# Decision M4: above this speed, snap to the activity spot instead
-			# of drawing the walk.
-			var away_ticks: int = facts["depart_tick"]
-			var back_ticks: int = facts["return_depart_tick"]
-			flat = work if (_estimated_tick >= float(away_ticks) and _estimated_tick < float(back_ticks)) else home
-		else:
-			flat = _walking_position(home, work, facts)
+	var flat: Vector2 = facts["home"] + _crowd_offset_for_person(id)
+	if facts["target_kind"] != "Home":
+		var away_ticks: int = facts["depart_tick"]
+		var back_ticks: int = facts["return_depart_tick"]
+		if _estimated_tick >= float(away_ticks) and _estimated_tick < float(back_ticks):
+			flat = _work_point_for(id, facts) + _crowd_offset_for_person(id * 7919 + 1)
 	return Vector3(flat.x, _height_sampler.call(flat.x, flat.y) if _height_sampler.is_valid() else 0.0, flat.y)
 
-func _walking_position(home: Vector2, work: Vector2, facts: Dictionary) -> Vector2:
-	var distance := home.distance_to(work)
-	var travel_seconds := maxf(0.5, distance / WALK_SPEED_UNITS_PER_SECOND)
-	var depart: float = float(facts["depart_tick"])
-	var arrive := depart + travel_seconds
-	var back_depart: float = float(facts["return_depart_tick"])
-	var back_arrive := back_depart + travel_seconds
-	var tick := _estimated_tick
-
-	if tick < depart:
-		return home
-	if tick < arrive:
-		return home.lerp(work, (tick - depart) / travel_seconds)
-	if tick < back_depart:
-		return work
-	if tick < back_arrive:
-		return work.lerp(home, (tick - back_depart) / travel_seconds)
-	return home
+## Moves every agent toward its goal at a natural walking pace in real time:
+## WALK_SPEED_UNITS_PER_SECOND at 1x, scaled by the playback speed so faster
+## playback looks faster. A walk is a real-time movement, not a function of the
+## simulation clock -- a day passes in minutes, so a clock-driven walk would be
+## over in a blink. Above WALKING_VISIBLE_MAX_SPEED walking is not drawn and
+## agents snap to their goal (decision M4).
+func _advance_agents(delta: float) -> void:
+	var snap := _playback_speed > WALKING_VISIBLE_MAX_SPEED
+	var step := WALK_SPEED_UNITS_PER_SECOND * float(_playback_speed) * delta
+	for id in _agent_nodes.keys():
+		var node: Node3D = _agent_nodes[id]
+		var goal := _resolve_agent_position(id)
+		var current := Vector2(node.position.x, node.position.z)
+		var goal_flat := Vector2(goal.x, goal.z)
+		var next := goal_flat if snap else current.move_toward(goal_flat, step)
+		var height: float = _height_sampler.call(next.x, next.y) if _height_sampler.is_valid() else 0.0
+		node.position = Vector3(next.x, height, next.y)
+		var heading := goal_flat - current
+		if next != current and heading.length() > 0.05:
+			node.rotation.y = atan2(heading.x, heading.y)
 
 ## Marks one villager, such as the demo's chosen NPC, with a floating marker.
 ## Only agents can be marked; entity_id 0 clears the mark.
@@ -495,19 +492,13 @@ func _make_highlight_marker() -> MeshInstance3D:
 	return marker
 
 func _process(delta: float) -> void:
-	if not _paused:
-		# The server has no sub-day ticking, so this is a client-local
-		# approximation of elapsed simulation seconds between messages,
-		# corrected to the server's real tick via set_tick() on every
-		# message. Good enough to animate a walk; never trusted for anything
-		# canonical.
-		_estimated_tick += delta * float(_playback_speed) * 86400.0
-
-	for id in _agent_nodes.keys():
-		var node: Node3D = _agent_nodes[id]
-		var previous := node.position
-		var resolved := _resolve_agent_position(id)
-		node.position = resolved
-		var moved := Vector2(resolved.x - previous.x, resolved.z - previous.z)
-		if moved.length() > 0.01:
-			node.rotation.y = atan2(moved.x, moved.y)
+	# Paused means frozen: nobody walks and the clock holds.
+	if _paused:
+		return
+	# The server has no sub-day ticking, so this is a client-local
+	# approximation of elapsed simulation seconds between messages, advanced at
+	# the same rate as the bridge (a simulated day per 120 real seconds at 1x)
+	# and corrected to the server's real tick via set_tick() on every message.
+	# Never trusted for anything canonical.
+	_estimated_tick += delta * float(_playback_speed) * UniverseProtocol.SIMULATION_SECONDS_PER_REAL_SECOND_AT_1X
+	_advance_agents(delta)
