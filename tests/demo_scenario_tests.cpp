@@ -1,5 +1,9 @@
 #include "universe/demo_scenario.hpp"
 
+#include <cstddef>
+#include <fstream>
+#include <sstream>
+
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -143,6 +147,83 @@ void test_scenario_round_trips_and_rejects_bad_input() {
             "excessive years is rejected");
 }
 
+std::size_t active_settlement_count(const universe::Simulation& simulation) {
+    std::size_t count = 0;
+    for (const auto& settlement : simulation.state().settlements) {
+        if (settlement.active) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+void test_single_settlement_layout_starts_one_settlement() {
+    universe::DemoScenario scenario{.seed = 3U, .initial_population = 200U, .years = 20U};
+    universe::Simulation default_start{universe::make_demo_simulation_config(scenario)};
+    require(active_settlement_count(default_start) > 1U, "the default layout starts several settlements");
+
+    scenario.layout = universe::DemoStartLayout::SingleSettlement;
+    universe::Simulation single_start{universe::make_demo_simulation_config(scenario)};
+    require(active_settlement_count(single_start) == 1U, "the single-settlement layout starts exactly one settlement");
+    require(single_start.state().regions.size() == 1U, "the single-settlement layout uses one region");
+    require(single_start.state().population == 200U, "the single-settlement layout keeps the requested population");
+}
+
+void test_single_settlement_candidate_run_is_deterministic() {
+    const auto first = universe::run_demo_candidate(5U, 200U, 3U, universe::DemoStartLayout::SingleSettlement);
+    const auto second = universe::run_demo_candidate(5U, 200U, 3U, universe::DemoStartLayout::SingleSettlement);
+    require(first.score == second.score && first.outcome.final_population == second.outcome.final_population,
+            "a single-settlement candidate run is deterministic");
+    const auto default_layout = universe::run_demo_candidate(5U, 200U, 3U);
+    require(default_layout.outcome.final_population != first.outcome.final_population ||
+                default_layout.score != first.score,
+            "the layout changes the world the candidate runs in");
+}
+
+void test_scenario_layout_round_trips_and_legacy_files_use_the_default_layout() {
+    const universe::DemoScenario single{
+        .seed = 9U, .initial_population = 200U, .years = 20U, .layout = universe::DemoStartLayout::SingleSettlement};
+    const auto json = universe::format_demo_scenario_json(single, universe::score_demo_outcome(9U, outcome(200U, 230U, 4U)));
+    std::string error;
+    const auto parsed = universe::parse_demo_scenario(json, error);
+    require(parsed.has_value() && parsed->layout == universe::DemoStartLayout::SingleSettlement,
+            "the single-settlement layout round-trips");
+
+    const auto legacy = universe::parse_demo_scenario(R"({"seed": 4, "initial_population": 200, "years": 20})", error);
+    require(legacy.has_value() && legacy->layout == universe::DemoStartLayout::DefaultLayout,
+            "a scenario file without a layout uses the default layout");
+
+    require(!universe::parse_demo_scenario(
+                 R"({"seed": 4, "initial_population": 200, "years": 20, "layout": "ring"})", error)
+                 .has_value(),
+            "an unknown layout is rejected");
+    require(!universe::parse_demo_scenario(
+                 R"({"seed": 4, "initial_population": 200, "years": 20, "layout": 1})", error)
+                 .has_value(),
+            "a non-string layout is rejected");
+}
+
+// The committed demo scenario must still deliver what ticket #44 requires. If a
+// change to the world rules breaks this, rerun universe_demo_seed_search with
+// --write-scenario scenarios/demo.json and record the new scores.
+void test_committed_demo_scenario_still_delivers_visible_change() {
+    std::ifstream file{std::string{UNIVERSE_SOURCE_DIR} + "/scenarios/demo.json", std::ios::binary};
+    require(static_cast<bool>(file), "scenarios/demo.json must be committed");
+    std::ostringstream contents;
+    contents << file.rdbuf();
+    std::string error;
+    const auto scenario = universe::parse_demo_scenario(contents.str(), error);
+    require(scenario.has_value(), "scenarios/demo.json must parse");
+    require(scenario->layout == universe::DemoStartLayout::SingleSettlement, "the demo starts as a single settlement");
+
+    const auto result = universe::run_demo_candidate(scenario->seed, scenario->initial_population, scenario->years, scenario->layout);
+    require(result.eligible, "the demo scenario must complete a building and keep its population");
+    require(result.outcome.final_population >= result.outcome.initial_population,
+            "the demo village must not shrink over the demo window");
+    require(result.outcome.discoveries_made > 0U || result.outcome.settlements_founded > 0U,
+            "the demo scenario must show a new settlement or a discovery");
+}
+
 }  // namespace
 
 int main() {
@@ -153,6 +234,10 @@ int main() {
     test_measure_ignores_state_at_or_before_window_start();
     test_measure_counts_tier_promotions_and_merges();
     test_scenario_round_trips_and_rejects_bad_input();
+    test_single_settlement_layout_starts_one_settlement();
+    test_single_settlement_candidate_run_is_deterministic();
+    test_scenario_layout_round_trips_and_legacy_files_use_the_default_layout();
+    test_committed_demo_scenario_still_delivers_visible_change();
     std::cout << "demo scenario tests passed\n";
     return 0;
 }

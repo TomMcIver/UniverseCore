@@ -1,0 +1,16 @@
+{
+  "seed": 39,
+  "initial_population": 200,
+  "years": 20,
+  "layout": "single_settlement",
+  "picked_by": {
+    "score": 496,
+    "final_population": 332,
+    "buildings_completed": 28,
+    "settlements_founded": 4,
+    "discoveries_made": 3,
+    "institutions_founded": 2,
+    "tier_promotions": 0,
+    "settlements_merged": 0
+  }
+}

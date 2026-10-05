@@ -82,6 +82,55 @@ std::optional<std::uint64_t> read_unsigned_field(const std::string_view json, co
     return value;
 }
 
+// A string field that may be absent. Present but malformed is an error.
+std::optional<std::string> read_optional_string_field(const std::string_view json, const std::string_view key, bool& failed, std::string& error) {
+    const auto quoted = std::string{"\""} + std::string{key} + "\"";
+    const auto occurrences = count_occurrences(json, quoted);
+    if (occurrences == 0U) {
+        return std::nullopt;
+    }
+    if (occurrences != 1U) {
+        error = "scenario must contain at most one \"" + std::string{key} + "\" field";
+        failed = true;
+        return std::nullopt;
+    }
+
+    auto pos = json.find(quoted) + quoted.size();
+    const auto skip_space = [&] {
+        while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\n' || json[pos] == '\r')) {
+            ++pos;
+        }
+    };
+    skip_space();
+    if (pos >= json.size() || json[pos] != ':') {
+        error = "expected ':' after \"" + std::string{key} + "\"";
+        failed = true;
+        return std::nullopt;
+    }
+    ++pos;
+    skip_space();
+    if (pos >= json.size() || json[pos] != '"') {
+        error = "\"" + std::string{key} + "\" must be a string";
+        failed = true;
+        return std::nullopt;
+    }
+    ++pos;
+    const auto close = json.find('"', pos);
+    if (close == std::string_view::npos) {
+        error = "\"" + std::string{key} + "\" string is not terminated";
+        failed = true;
+        return std::nullopt;
+    }
+    return std::string{json.substr(pos, close - pos)};
+}
+
+constexpr std::string_view kDefaultLayoutName = "default";
+constexpr std::string_view kSingleSettlementLayoutName = "single_settlement";
+
+std::string_view layout_name(const DemoStartLayout layout) {
+    return layout == DemoStartLayout::SingleSettlement ? kSingleSettlementLayoutName : kDefaultLayoutName;
+}
+
 }  // namespace
 
 DemoOutcome measure_demo_outcome(const WorldState& initial_state, const WorldState& final_state) {
@@ -156,10 +205,22 @@ DemoCandidateScore score_demo_outcome(const std::uint64_t seed, const DemoOutcom
     };
 }
 
+SimulationConfig make_demo_simulation_config(const DemoScenario& scenario) {
+    SimulationConfig config{.seed = scenario.seed, .initial_population = scenario.initial_population};
+    if (scenario.layout == DemoStartLayout::SingleSettlement) {
+        config.initial_region_count = 1;
+        config.initial_settlements_per_region = 1;
+        config.base_region_area_units = kSingleSettlementRegionLandUnits;
+    }
+    return config;
+}
+
 DemoCandidateScore run_demo_candidate(const std::uint64_t seed,
                                       const std::uint64_t initial_population,
-                                      const std::uint64_t years) {
-    Simulation simulation{SimulationConfig{.seed = seed, .initial_population = initial_population}};
+                                      const std::uint64_t years,
+                                      const DemoStartLayout layout) {
+    Simulation simulation{make_demo_simulation_config(
+        DemoScenario{.seed = seed, .initial_population = initial_population, .years = years, .layout = layout})};
     const auto initial_state = simulation.state();
     simulation.run_years(years);
     return score_demo_outcome(seed, measure_demo_outcome(initial_state, simulation.state()));
@@ -211,7 +272,22 @@ std::optional<DemoScenario> parse_demo_scenario(const std::string_view json, std
         return std::nullopt;
     }
 
-    return DemoScenario{.seed = *seed, .initial_population = *population, .years = *years};
+    auto layout = DemoStartLayout::DefaultLayout;
+    bool layout_failed = false;
+    const auto layout_text = read_optional_string_field(json, "layout", layout_failed, error);
+    if (layout_failed) {
+        return std::nullopt;
+    }
+    if (layout_text.has_value()) {
+        if (*layout_text == kSingleSettlementLayoutName) {
+            layout = DemoStartLayout::SingleSettlement;
+        } else if (*layout_text != kDefaultLayoutName) {
+            error = "layout must be \"default\" or \"single_settlement\"";
+            return std::nullopt;
+        }
+    }
+
+    return DemoScenario{.seed = *seed, .initial_population = *population, .years = *years, .layout = layout};
 }
 
 std::string format_demo_scenario_json(const DemoScenario& scenario, const DemoCandidateScore& picked_by) {
@@ -221,6 +297,7 @@ std::string format_demo_scenario_json(const DemoScenario& scenario, const DemoCa
         << "  \"seed\": " << scenario.seed << ",\n"
         << "  \"initial_population\": " << scenario.initial_population << ",\n"
         << "  \"years\": " << scenario.years << ",\n"
+        << "  \"layout\": \"" << layout_name(scenario.layout) << "\",\n"
         << "  \"picked_by\": {\n"
         << "    \"score\": " << picked_by.score << ",\n"
         << "    \"final_population\": " << outcome.final_population << ",\n"

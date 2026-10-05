@@ -2,6 +2,7 @@
 // the headless Simulation seam: they read state through the public API only.
 #pragma once
 
+#include "universe/demo_scenario.hpp"
 #include "universe/simulation.hpp"
 
 #include <cstdint>
@@ -14,7 +15,7 @@ namespace settlement_test {
 inline constexpr std::uint64_t kStartingPopulation = 200U;
 // One region holding as much land as the default four regions together, so a
 // single-settlement start is not starved of land.
-inline constexpr std::int64_t kSingleRegionLandUnits = 480;
+inline constexpr std::int64_t kSingleRegionLandUnits = universe::kSingleSettlementRegionLandUnits;
 // Access share is a fraction of a region's land, in points out of this many.
 inline constexpr std::uint32_t kAccessShareScale = 10'000;
 

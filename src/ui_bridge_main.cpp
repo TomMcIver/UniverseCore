@@ -107,8 +107,7 @@ int main(int argc, char** argv) {
                     std::cerr << "Invalid scenario " << path << ": " << error << '\n';
                     return 2;
                 }
-                config.seed = scenario->seed;
-                config.initial_population = scenario->initial_population;
+                config = universe::make_demo_simulation_config(*scenario);
             }
         }
     } catch (const std::exception&) {

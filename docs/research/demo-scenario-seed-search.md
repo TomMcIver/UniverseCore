@@ -62,3 +62,24 @@ Rerun at 200 people, 20 years, seeds 1–64: all 64 complete buildings, and none
 Completion is gradual rather than front-loaded. Seed 1 completes 6 buildings by year 1, 30 by year 5, 45 by year 10 and 60 by year 20.
 
 Tier promotions and merges are still 0. That depends on the fragmentation question (#59).
+
+## Committed demo scenario (#51)
+
+`scenarios/demo.json` holds the demo scenario: seed 39, 200 people, 20 years, `"layout": "single_settlement"`. The layout is ADR 0002's single-settlement start (one region of 480 land units, one starting settlement), which is how the demo begins; a scenario file without a layout means the simulation's default multi-settlement start. `universe_ui_bridge --scenario scenarios/demo.json` and `scripts/run-demo-bridge.ps1` start the world from it, and the bridge, the seed search and the tests all build their config through `make_demo_simulation_config`, so they run the same world. No `*.ucore` is committed.
+
+The search runs on the single-settlement start by default (`--layout default` searches the old layout). Seeds 1-64, 200 people, 20 years, after the fission and absorption rules (#61-#66) and the construction fix (#58). All 64 seeds that survive complete buildings; extinct seeds are ineligible. Top ten:
+
+| Rank | Seed | Score | Population | Buildings completed | Settlements founded | Discoveries | Institutions |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 39 | 496 | 200→332 | 28 | 4 | 3 | 2 |
+| 2 | 12 | 493 | 200→326 | 27 | 4 | 3 | 3 |
+| 3 | 2 | 489 | 200→319 | 24 | 3 | 3 | 2 |
+| 4 | 36 | 489 | 200→319 | 29 | 4 | 3 | 2 |
+| 5 | 49 | 488 | 200→316 | 26 | 4 | 3 | 2 |
+| 6 | 42 | 487 | 200→314 | 29 | 4 | 3 | 2 |
+| 7 | 6 | 486 | 200→312 | 22 | 4 | 3 | 3 |
+| 8 | 21 | 484 | 200→309 | 27 | 4 | 3 | 2 |
+| 9 | 54 | 483 | 200→306 | 27 | 4 | 3 | 2 |
+| 10 | 59 | 483 | 200→307 | 27 | 4 | 3 | 3 |
+
+Seed 39 grows from one settlement into five (ADR 0002 target: 2-5 settlements, a largest of 70 or more; at year 20 its largest holds 103), on arable land. Tier promotions and merges are 0 for every seed on this start. The test `test_committed_demo_scenario_still_delivers_visible_change` fails if a later change to the world rules stops this scenario completing a building, keeping its population, and showing a new settlement or discovery; regenerate with `universe_demo_seed_search --write-scenario scenarios/demo.json` and update this table when that happens.
