@@ -13,6 +13,7 @@ const HudPanel := preload("res://scripts/ui/hud.gd")
 const LifeHistoryPanel := preload("res://scripts/ui/life_history_panel.gd")
 const DemoFocusMarker := preload("res://scripts/ui/demo_focus_marker.gd")
 const OrbitCameraScript := preload("res://scripts/orbit_camera.gd")
+const VillageDressingScript := preload("res://scripts/world/village_dressing.gd")
 
 ## GDScript runtime errors can abort a test's Callable without changing the
 ## process exit code. Count them so an interrupted test cannot report a pass.
@@ -35,6 +36,15 @@ class ScriptErrorLogger extends Logger:
 class FakeVillageDressing extends Node3D:
 	func fields_in_region(_region_id: int) -> Array:
 		return [{"household_id": 17, "centre": Vector2(50.0, 5.0)}]
+
+## Routes every walk north to (0, 30) first, so a test can tell a followed route
+## from a straight line.
+class FakeRoutingDressing extends Node3D:
+	func fields_in_region(_region_id: int) -> Array:
+		return []
+
+	func route(_region_id: int, from: Vector2, to: Vector2) -> PackedVector2Array:
+		return PackedVector2Array([from, Vector2(0.0, 30.0), to])
 
 class FakePanel extends "res://scripts/ui/ui_panel.gd":
 	var slot := "inspector"
@@ -137,6 +147,10 @@ func _initialize() -> void:
 
 	_run_test("world_view renders a newly spawned agent at its real canonical position", Callable(self, "_test_world_view_agent_renders_at_real_position_on_spawn"))
 	_run_test("world_view walks an agent to the server-given target on schedule", Callable(self, "_test_world_view_agent_walks_to_server_given_target_on_schedule"))
+	_run_test("dressing routes follow the tracks", Callable(self, "_test_dressing_routes_follow_the_tracks"))
+	_run_test("dressing routes prefer a straight line to a long detour", Callable(self, "_test_dressing_routes_prefer_a_straight_line_to_a_long_detour"))
+	_run_test("dressing routes fall back when tracks do not connect", Callable(self, "_test_dressing_routes_fall_back_when_tracks_do_not_connect"))
+	_run_test("world_view villagers follow their route", Callable(self, "_test_world_view_villagers_follow_their_route"))
 	_run_test("orbit camera frames a wide area", Callable(self, "_test_orbit_camera_frames_a_wide_area"))
 	_run_test("world_view lists only inhabited settlements", Callable(self, "_test_world_view_lists_only_inhabited_settlements"))
 	_run_test("event log entries have a readable width", Callable(self, "_test_event_log_entries_have_a_readable_width"))
@@ -552,6 +566,64 @@ func _test_event_log_entries_have_a_readable_width() -> void:
 	var label: Label = log._list.get_child(0)
 	_assert_eq(label.custom_minimum_size.x >= 200.0, true, "an event entry must be wide enough to read, not one word per line")
 	log.queue_free()
+
+func _test_dressing_routes_follow_the_tracks() -> void:
+	# An L-shaped track: a villager from one end to the other walks round the
+	# corner instead of cutting across.
+	var segments := [
+		[Vector2(0.0, 0.0), Vector2(20.0, 0.0), 1.9],
+		[Vector2(20.0, 0.0), Vector2(20.0, 20.0), 1.9],
+	]
+	var graph := VillageDressingScript.build_route_graph(segments, [Vector2(0.0, 0.0)])
+	var route := VillageDressingScript.route_on_graph(graph, Vector2(0.0, 1.0), Vector2(20.0, 19.0))
+	_assert_eq(route.has(Vector2(20.0, 0.0)), true, "the route must turn the corner of the track")
+	_assert_eq(route[0], Vector2(0.0, 1.0), "the route starts where the villager stands")
+	_assert_eq(route[route.size() - 1], Vector2(20.0, 19.0), "the route ends at the goal")
+
+func _test_dressing_routes_prefer_a_straight_line_to_a_long_detour() -> void:
+	var segments := [
+		[Vector2(0.0, 0.0), Vector2(100.0, 0.0), 1.9],
+		[Vector2(100.0, 0.0), Vector2(100.0, 100.0), 1.9],
+		[Vector2(100.0, 100.0), Vector2(0.0, 100.0), 1.9],
+	]
+	var graph := VillageDressingScript.build_route_graph(segments, [])
+	var route := VillageDressingScript.route_on_graph(graph, Vector2(0.0, 2.0), Vector2(0.0, 98.0))
+	_assert_eq(route.size(), 2, "a track that sends the villager three times as far round must lose to the straight line")
+
+func _test_dressing_routes_fall_back_when_tracks_do_not_connect() -> void:
+	var segments := [
+		[Vector2(0.0, 0.0), Vector2(10.0, 0.0), 1.9],
+		[Vector2(50.0, 0.0), Vector2(60.0, 0.0), 1.9],
+	]
+	var graph := VillageDressingScript.build_route_graph(segments, [])
+	var route := VillageDressingScript.route_on_graph(graph, Vector2(0.0, 1.0), Vector2(60.0, 1.0))
+	_assert_eq(route.size(), 2, "with no connecting track the villager must walk straight, not stand still")
+	_assert_eq(VillageDressingScript.route_on_graph(VillageDressingScript.build_route_graph([], []), Vector2.ZERO, Vector2(5.0, 5.0)).size(), 2, "an empty network gives a straight line")
+
+func _test_world_view_villagers_follow_their_route() -> void:
+	# Walking to work, a villager goes where the route says (here north to
+	# (0, 30) first), not in a straight line to the goal.
+	var view := WorldView.new()
+	root.add_child(view)
+	var dressing := FakeRoutingDressing.new()
+	root.add_child(dressing)
+	view.set_village_dressing(dressing)
+	view.apply_snapshot({
+		"agents": [{
+			"id": 11, "sex": "Male", "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+			"currentActivity": "Work", "targetKind": "Common",
+			"target": {"x": 20.0, "z": 0.0}, "departTick": 100, "returnDepartTick": 1000000,
+		}],
+		"settlements": [], "buildings": [],
+	})
+	view.set_simulation_playback(false, 1)
+	var node: Node3D = view.get_child(0)
+	view.set_tick(500)
+	for _frame in range(20):  # 20 s at 1.3 units/s is 26 units along the route
+		view._process(1.0)
+	_assert_eq(node.position.z > 15.0, true, "a villager must follow the route north first, not walk straight to the goal (z=%s)" % node.position.z)
+	view.queue_free()
+	dressing.queue_free()
 
 func _test_event_log_append() -> void:
 	var log := EventLog.new()

@@ -49,6 +49,13 @@ const REBUILD_INTERVAL := 0.25
 ## How far beyond a queried area an item can still block a point in it
 ## (the largest core radius plus tree clearance, or half a field).
 const EXCLUSION_REACH := 40.0
+## A node this close to a settlement centre is joined to it (door paths and
+## tracks meet at the common without sharing one exact point).
+const ROUTE_PLAZA_JOIN := 4.0
+## A route longer than this multiple of the straight line, plus the slack, is
+## dropped in favour of the straight line.
+const ROUTE_DETOUR_LIMIT := 2.0
+const ROUTE_DETOUR_SLACK := 12.0
 
 const DIRT := Color(0.58, 0.46, 0.32)
 const PLAZA := Color(0.64, 0.58, 0.47)
@@ -63,6 +70,9 @@ var _buildings: Dictionary = {}
 var _people: Dictionary = {}
 ## region id -> per-region derived layout (fields, segments, cores)
 var _layouts: Dictionary = {}
+## region id -> path graph for routing, built on first use and dropped when the
+## region is rebuilt.
+var _route_graphs: Dictionary = {}
 var _signatures: Dictionary = {}
 var _region_nodes: Dictionary = {}
 var _dirty: Dictionary = {}
@@ -138,6 +148,134 @@ func _process(delta: float) -> void:
 func fields_in_region(region_id: int) -> Array:
 	return _layouts.get(region_id, {}).get("fields", [])
 
+## Where a villager walks between two points: the drawn tracks and paths, so
+## people follow the village's roads instead of cutting across fields and
+## through houses. Presentation only, derived from the same segments that are
+## drawn, so what is walked can never disagree with what is shown.
+func route(region_id: int, from: Vector2, to: Vector2) -> PackedVector2Array:
+	var layout: Dictionary = _layouts.get(region_id, {})
+	if layout.is_empty():
+		return PackedVector2Array([from, to])
+	if not _route_graphs.has(region_id):
+		var centres: Array = []
+		for core: Dictionary in layout["cores"]:
+			centres.append(core["pos"])
+		_route_graphs[region_id] = build_route_graph(layout["segments"], centres)
+	return route_on_graph(_route_graphs[region_id], from, to)
+
+## A path graph from drawn segments ([from, to, width]): their endpoints are the
+## nodes. Every node within ROUTE_PLAZA_JOIN of a settlement centre is joined to
+## it, because door paths and tracks all meet at the common without sharing one
+## exact point.
+static func build_route_graph(segments: Array, centres: Array) -> Dictionary:
+	var graph := {"points": [], "index": {}, "adjacency": [], "paths": {}}
+	for segment: Array in segments:
+		_link(graph, _graph_node(graph, segment[0]), _graph_node(graph, segment[1]))
+	for centre: Vector2 in centres:
+		var centre_node := _graph_node(graph, centre)
+		for node in graph["points"].size():
+			if node != centre_node and (graph["points"][node] as Vector2).distance_to(centre) <= ROUTE_PLAZA_JOIN:
+				_link(graph, centre_node, node)
+	return graph
+
+## The route from `from` to `to`: join the nearest node, follow the graph to the
+## node nearest `to`, then leave it. A straight line wins when the graph would
+## send the villager a long way round or does not connect the two.
+static func route_on_graph(graph: Dictionary, from: Vector2, to: Vector2) -> PackedVector2Array:
+	var straight := PackedVector2Array([from, to])
+	var points: Array = graph["points"]
+	if points.is_empty():
+		return straight
+	var start := _nearest_node(points, from)
+	var finish := _nearest_node(points, to)
+	# Many villagers share the same few start and finish nodes (a door and the
+	# common), so each node pair is searched once.
+	var key := start * points.size() + finish
+	var paths: Dictionary = graph["paths"]
+	if not paths.has(key):
+		paths[key] = _shortest_path(graph, start, finish)
+	var nodes: Array = paths[key]
+	if nodes.is_empty():
+		return straight
+	var route := PackedVector2Array([from])
+	for node in nodes:
+		var point: Vector2 = points[node]
+		if point.distance_to(route[route.size() - 1]) > 0.01:
+			route.append(point)
+	if to.distance_to(route[route.size() - 1]) > 0.01:
+		route.append(to)
+	var length := 0.0
+	for i in range(1, route.size()):
+		length += route[i - 1].distance_to(route[i])
+	if length > from.distance_to(to) * ROUTE_DETOUR_LIMIT + ROUTE_DETOUR_SLACK:
+		return straight
+	return route
+
+static func _graph_node(graph: Dictionary, point: Vector2) -> int:
+	var index: Dictionary = graph["index"]
+	if index.has(point):
+		return index[point]
+	var node: int = graph["points"].size()
+	graph["points"].append(point)
+	graph["adjacency"].append([])
+	index[point] = node
+	return node
+
+static func _link(graph: Dictionary, a: int, b: int) -> void:
+	if a == b:
+		return
+	var length: float = (graph["points"][a] as Vector2).distance_to(graph["points"][b])
+	graph["adjacency"][a].append([b, length])
+	graph["adjacency"][b].append([a, length])
+
+static func _nearest_node(points: Array, point: Vector2) -> int:
+	var best := 0
+	var best_distance := INF
+	for node in points.size():
+		var distance := (points[node] as Vector2).distance_squared_to(point)
+		if distance < best_distance:
+			best_distance = distance
+			best = node
+	return best
+
+## Dijkstra over the small path graph; node indices from `start` to `finish`,
+## or empty when they are not connected.
+static func _shortest_path(graph: Dictionary, start: int, finish: int) -> Array:
+	var count: int = graph["points"].size()
+	var distance: Array = []
+	var previous: Array = []
+	var done: Array = []
+	distance.resize(count)
+	previous.resize(count)
+	done.resize(count)
+	distance.fill(INF)
+	previous.fill(-1)
+	done.fill(false)
+	distance[start] = 0.0
+	for _step in count:
+		var current := -1
+		for node in count:
+			if not done[node] and (current == -1 or distance[node] < distance[current]):
+				current = node
+		if current == -1 or distance[current] == INF:
+			break
+		done[current] = true
+		if current == finish:
+			break
+		for edge: Array in graph["adjacency"][current]:
+			var candidate: float = distance[current] + float(edge[1])
+			if candidate < distance[edge[0]]:
+				distance[edge[0]] = candidate
+				previous[edge[0]] = current
+	if distance[finish] == INF:
+		return []
+	var path: Array = []
+	var node := finish
+	while node != -1:
+		path.push_front(node)
+		node = previous[node]
+	return path
+
 ## Whether `point` is taken by a field, track, path, common or building.
 ## `core_clearance` also keeps it out of every settlement's built-up core
 ## (trees stay out of villages; grass does not need to).
@@ -188,6 +326,7 @@ static func is_blocked(exclusions: Dictionary, point: Vector2, pad: float, core_
 func rebuild_region(region_id: int) -> void:
 	var layout := _plan_region(region_id)
 	_layouts[region_id] = layout
+	_route_graphs.erase(region_id)
 	_signatures[region_id] = _cultivator_signature(region_id)
 	if _region_nodes.has(region_id):
 		_region_nodes[region_id].free()

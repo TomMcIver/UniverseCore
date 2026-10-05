@@ -13,6 +13,8 @@ const CONNECT_SECONDS := 12.0
 const JUMP_TIMEOUT_SECONDS := 180.0
 const SETTLE_SECONDS := 2.5
 const BESIDE_NPC_OFFSET := Vector3(2.5, 0.5, 2.5)
+const ROUTE_OBSERVE_SECONDS := 25.0
+const UniverseProtocol := preload("res://scripts/net/universe_protocol.gd")
 
 var _dir := ""
 var _panels: Node
@@ -69,6 +71,15 @@ func run(dir: String, panels: Node, world_view: Node3D, ground_view: Node3D) -> 
 		_panels.select("agent", focus_id)
 		await _settle()
 		_shot("6_demo_npc_life_history")
+
+	# Route check in the real village layout: let the world run at 4x for a while,
+	# then count the villagers walking and how many follow a track route.
+	var hud_node = _find_panel("Hud")
+	hud_node.action_requested.emit("set_speed", UniverseProtocol.command_set_speed(4))
+	hud_node.action_requested.emit("resume", UniverseProtocol.command_resume())
+	await get_tree().create_timer(ROUTE_OBSERVE_SECONDS).timeout
+	var counts: Dictionary = _world_view.walking_route_counts()
+	print("DEMO_CAPTURE_ROUTES walking=%d following_a_route=%d" % [counts["walking"], counts["routed"]])
 
 	print("DEMO_CAPTURE years=%d..%d settlements=%d people_shown=%d (start %d) focus_npc=%d jump_waited=%.1fs" % [
 		start_year, end_year, settlements.size(), _world_view.agent_count(), start_population, focus_id, waited])

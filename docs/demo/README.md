@@ -22,7 +22,7 @@ $env:UNIVERSECORE_DEMO_CAPTURE_DIR = "<existing folder>"
 Godot_v4.7.2-stable_win64_console.exe --path apps/godot-client   # terminal 2: runs the sequence, saves the PNGs, quits
 ```
 
-The capture prints `DEMO_CAPTURE years=0..20 settlements=5 people_shown=332 ...`; those numbers match the headless seed search for seed 39. Restart the bridge between runs, because the world keeps its year.
+The capture prints `DEMO_CAPTURE years=0..20 settlements=5 people_shown=332 ...`; those numbers match the headless seed search for seed 39. It then runs the world at 4x for 25 seconds and prints `DEMO_CAPTURE_ROUTES walking=85 following_a_route=85`: every villager on the move was following a route along the village's tracks. Restart the bridge between runs, because the world keeps its year.
 
 ## Assets
 
@@ -33,3 +33,4 @@ Every asset used, with its licence, is listed in [apps/godot-client/assets/CREDI
 - The event log shows the most recent events, which at year 20 are mostly annual job changes ("Villager 221 became a farmer"). Births and new settlements scroll past earlier.
 - The economy totals are cumulative since the start, not per year.
 - Villagers gather around the common in the afternoon, so the village centre is crowded. The spacing is set by `GATHER_SPACING` in `world_view.gd`.
+- Routes along the tracks are planned in the client (`VillageDressing.route`) from the same path segments it draws, not sent by the server as `{from, to, depart_tick, arrive_tick}` routes. Fields are laid out client-side, so the server cannot route to them.

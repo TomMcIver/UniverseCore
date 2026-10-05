@@ -65,6 +65,8 @@ var _agent_labels: Dictionary
 ## Each villager model's own AnimationPlayer (id -> player), driven by whether the
 ## villager is walking or standing.
 var _agent_animators: Dictionary
+## Each walking villager's current route (id -> {goal, points, next}).
+var _agent_routes: Dictionary
 
 ## Ticket #40/#56: movement must track canonical simulation time, not raw
 ## frame time -- pausing halts it, the speed multiplier scales it.
@@ -84,6 +86,7 @@ func _init() -> void:
 	_agent_facts = {}
 	_agent_labels = {}
 	_agent_animators = {}
+	_agent_routes = {}
 
 func set_navmesh_manager(_manager: Node3D) -> void:
 	pass  # Villagers no longer path via the navmesh; kept only so main.gd's existing wiring is harmless.
@@ -205,6 +208,7 @@ func _clear_all() -> void:
 	_agent_facts.clear()
 	_agent_labels.clear()
 	_agent_animators.clear()
+	_agent_routes.clear()
 
 ## An existing agent is updated in place, not destroyed and respawned -- a
 ## destroy+respawn on every delta tick (which upserts nearly every alive
@@ -225,6 +229,7 @@ func _remove_agent(id: int) -> void:
 	_agent_facts.erase(id)
 	_agent_labels.erase(id)
 	_agent_animators.erase(id)
+	_agent_routes.erase(id)
 
 ## Same churn fix as buildings (E1): settlements arrive as "updated" in
 ## every delta, so only respawn when the firepit would look different.
@@ -424,6 +429,8 @@ func _crowd_offset_for_person(id: int) -> Vector2:
 ## a sunflower spiral keyed on the person id, so a crowd of a hundred spreads
 ## across the green about a metre apart instead of piling onto one point.
 ## Deterministic per id, never re-rolled and never dodging (decision M3).
+## A goal that moves by less than this does not replan the route.
+const ROUTE_GOAL_TOLERANCE := 0.5
 const GATHER_SLOTS := 300
 const GATHER_SPACING := 0.6
 const GOLDEN_ANGLE := 2.39996323
@@ -477,8 +484,9 @@ func _resolve_agent_position(id: int) -> Vector3:
 ## WALK_SPEED_UNITS_PER_SECOND at 1x, scaled by the playback speed so faster
 ## playback looks faster. A walk is a real-time movement, not a function of the
 ## simulation clock -- a day passes in minutes, so a clock-driven walk would be
-## over in a blink. Above WALKING_VISIBLE_MAX_SPEED walking is not drawn and
-## agents snap to their goal (decision M4).
+## over in a blink. The walk follows the village's tracks (see _route_to), and
+## above WALKING_VISIBLE_MAX_SPEED walking is not drawn and agents snap to their
+## goal (decision M4).
 func _advance_agents(delta: float) -> void:
 	var snap := _playback_speed > WALKING_VISIBLE_MAX_SPEED
 	var step := WALK_SPEED_UNITS_PER_SECOND * float(_playback_speed) * delta
@@ -487,14 +495,69 @@ func _advance_agents(delta: float) -> void:
 		var goal := _resolve_agent_position(id)
 		var current := Vector2(node.position.x, node.position.z)
 		var goal_flat := Vector2(goal.x, goal.z)
-		var next := goal_flat if snap else current.move_toward(goal_flat, step)
+		var next := goal_flat
+		var heading := goal_flat - current
+		if snap:
+			_agent_routes.erase(id)
+		else:
+			var route := _route_for(id, current, goal_flat)
+			next = _follow_route(route, current, step)
+			heading = (route["points"][mini(route["next"], route["points"].size() - 1)] as Vector2) - current
 		var height: float = _height_sampler.call(next.x, next.y) if _height_sampler.is_valid() else 0.0
 		node.position = Vector3(next.x, height, next.y)
-		var heading := goal_flat - current
 		var is_walking := next != current and heading.length() > 0.05
 		if is_walking:
 			node.rotation.y = atan2(heading.x, heading.y)
 		_set_agent_animation(id, WALK_ANIMATION if is_walking else IDLE_ANIMATION)
+
+## How many villagers are mid-walk, and how many of those follow a route with
+## waypoints between start and goal rather than a straight line.
+func walking_route_counts() -> Dictionary:
+	var walking := 0
+	var routed := 0
+	for route: Dictionary in _agent_routes.values():
+		if route["next"] < (route["points"] as PackedVector2Array).size():
+			walking += 1
+			if (route["points"] as PackedVector2Array).size() > 2:
+				routed += 1
+	return {"walking": walking, "routed": routed}
+
+## The agent's current route to its goal, planned afresh whenever the goal moves
+## (it heads home or to work, or its field is rebuilt).
+func _route_for(id: int, from: Vector2, goal: Vector2) -> Dictionary:
+	var route: Dictionary = _agent_routes.get(id, {})
+	if route.is_empty() or (route["goal"] as Vector2).distance_to(goal) > ROUTE_GOAL_TOLERANCE:
+		# Someone already standing on their goal has nowhere to route to.
+		var points := PackedVector2Array([from, goal]) if from.distance_to(goal) < ROUTE_GOAL_TOLERANCE else _route_to(id, from, goal)
+		route = {"goal": goal, "points": points, "next": 1}
+		_agent_routes[id] = route
+	return route
+
+## Waypoints from `from` to `to` along the village's tracks, or a straight line
+## when there is no village dressing to route over.
+func _route_to(id: int, from: Vector2, to: Vector2) -> PackedVector2Array:
+	var facts: Dictionary = _agent_facts.get(id, {})
+	if _village_dressing == null or facts.is_empty() or not _village_dressing.has_method("route"):
+		return PackedVector2Array([from, to])
+	return _village_dressing.route(int(facts["region_id"]), from, to)
+
+## Walks `step` units along the route from `from`, turning corners as it goes,
+## and returns where that ends up. The route keeps its own progress.
+func _follow_route(route: Dictionary, from: Vector2, step: float) -> Vector2:
+	var points: PackedVector2Array = route["points"]
+	var position := from
+	var remaining := step
+	while remaining > 0.0 and route["next"] < points.size():
+		var waypoint: Vector2 = points[route["next"]]
+		var distance := position.distance_to(waypoint)
+		if distance <= remaining:
+			position = waypoint
+			remaining -= distance
+			route["next"] += 1
+		else:
+			position = position.move_toward(waypoint, remaining)
+			remaining = 0.0
+	return position
 
 ## Plays the villager's walk or idle animation from the model's own clips. The
 ## walk plays faster with playback speed, up to the speed at which walking stops
