@@ -1,6 +1,7 @@
 // Regression tests for issue #60: a region merged into population groups
 // (demotion) and split back out (promotion) must preserve the world's
 // consequential state, and the result must continue deterministically.
+#include "universe/demo_scenario.hpp"
 #include "universe/simulation.hpp"
 
 #include <cstdint>
@@ -115,12 +116,54 @@ void test_save_load_continuation_matches_after_cycle() {
         "save/load continuation after a demote/promote cycle must match the uninterrupted run");
 }
 
+// The demo's long time jump runs the single-settlement start, which splits and
+// absorbs settlements as it goes. A demote/promote cycle taken before or after
+// those splits must neither cost the village its people nor make a reloaded run
+// drift from the uninterrupted one over a long continuation.
+universe::SimulationConfig demo_scenario_config() {
+    return universe::make_demo_simulation_config(universe::DemoScenario{
+        .seed = 39U,
+        .initial_population = 200U,
+        .years = 20U,
+        .layout = universe::DemoStartLayout::SingleSettlement,
+    });
+}
+
+void test_demo_scenario_survives_a_cycle_and_continues_identically() {
+    constexpr std::uint64_t kContinuationYears = 12U;
+    for (const std::uint64_t warmup_years : {1U, 8U}) {
+        universe::Simulation control{demo_scenario_config()};
+        control.run_years(warmup_years + kContinuationYears);
+        const auto control_population = living_population(control);
+
+        universe::Simulation cycled{demo_scenario_config()};
+        cycled.run_years(warmup_years);
+        const auto before_cycle = living_population(cycled);
+        cycle_every_region(cycled);
+        require(living_population(cycled) == before_cycle, "the demo world's cycle must conserve population");
+
+        universe::Simulation restored{universe::SimulationConfig{.seed = 999U, .initial_population = 10U}};
+        require(universe::Simulation::load_snapshot(cycled.save_snapshot(), restored).ok,
+                "the demo world's post-cycle snapshot must load");
+
+        cycled.run_years(kContinuationYears);
+        restored.run_years(kContinuationYears);
+
+        const auto floor = control_population - (control_population * kMaxCycleLossPercent) / 100U;
+        require(living_population(cycled) >= floor,
+                "the demo village must stay near the uncycled run after a demote/promote cycle");
+        require(cycled.save_snapshot() == restored.save_snapshot(),
+                "a reloaded demo world must keep matching the uninterrupted one over a long continuation");
+    }
+}
+
 }  // namespace
 
 int main() {
     test_promotion_restores_working_occupations();
     test_demote_promote_cycle_does_not_starve_the_population();
     test_save_load_continuation_matches_after_cycle();
+    test_demo_scenario_survives_a_cycle_and_continues_identically();
     std::cout << "lod round-trip tests passed\n";
     return 0;
 }
