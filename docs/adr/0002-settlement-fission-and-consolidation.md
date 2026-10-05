@@ -24,3 +24,15 @@ Measured over seeds 1-64 from the single-settlement start (200 people, one regio
 Making fission and absorption fire exposed three defects in the existing merge, which had almost never run: it did not move a settlement's commons food; it left record accesses and the settlement-keyed record index pointing at the absorbed settlement, which made the world unloadable or let a live run drift from a reloaded one; and it did not move the aggregate ledger of a settlement in a demoted region, stranding its stock. All three are fixed. A snapshot round-trip and continuation test runs right after every absorption, including in a demoted region, and the ledger test was confirmed to fail without the fix.
 
 Worlds stay healthier under the new rules, so long simulations now hold more people and the long test suite runs noticeably slower.
+
+## Measured distribution for #66 (single-settlement start, seeds 1-64, 200 people, 20 years)
+
+Settlements remaining: 0 in 10 seeds, 1 in 2, 2 in 0, 3 in 3, 4 in 20, 5 in 29. Among the 54 worlds that did not go extinct the largest settlement ranges 75 to 118 (median 97); the two single-settlement worlds (seeds 50 and 64) end at 75 and 76 people.
+
+No fission or strain threshold was changed. The misses are not threshold problems:
+
+- Extinct seeds (7, 8, 19, 28, 31, 43, 44, 56, 58, 63): eight never split (peak of one settlement) and two peak at two. In seed 7 the world loses 117 of 200 people in year one, before the first year-boundary split can run.
+- Seeds 50 and 64 split once in year one (about 150 and 51 people). The source then starves from about 150 to 1 over six years despite holding 85% of the land, while the 9%-share daughter grows. Strain reaches 240 days within a year, faster than the 730-day trigger, and a split divides land without creating food.
+- Raising initial household food from 80 to 200 leaves 8 seeds extinct; raising food production to 150% or 200% leaves 11. So the collapse is not a shortage of starting food or yield. The cause is unexplained and sits in the food and labour model for one large settlement, not in fission.
+
+The scenario test therefore still asserts the 2-5 settlement and 70-person targets only for worlds that did not collapse (see `tests/settlement_distribution_tests.cpp`). Meeting the ticket's every-seed wording needs the single-settlement famine diagnosed first.
