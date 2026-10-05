@@ -144,7 +144,7 @@ if(UNIVERSECORE_BUILD_TESTS)
 
     add_executable(universe_demo_scenario_tests tests/demo_scenario_tests.cpp)
     target_link_libraries(universe_demo_scenario_tests PRIVATE universe_core)
-    target_compile_definitions(universe_demo_scenario_tests PRIVATE UNIVERSE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    target_compile_definitions(universe_demo_scenario_tests PRIVATE UNIVERSE_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
     add_test(NAME universe_demo_scenario_tests COMMAND universe_demo_scenario_tests)
     set_tests_properties(universe_demo_scenario_tests PROPERTIES LABELS "fast")
 

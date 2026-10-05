@@ -1,5 +1,6 @@
 #include "universe/demo_scenario.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <fstream>
 #include <sstream>
@@ -222,6 +223,27 @@ void test_committed_demo_scenario_still_delivers_visible_change() {
             "the demo village must not shrink over the demo window");
     require(result.outcome.discoveries_made > 0U || result.outcome.settlements_founded > 0U,
             "the demo scenario must show a new settlement or a discovery");
+
+    // ADR 0002 / #66: only arable land feeds the single-settlement start, and a
+    // healthy start grows into two to five settlements with a village of 70+.
+    constexpr std::size_t kMinSettlements = 2;
+    constexpr std::size_t kMaxSettlements = 5;
+    constexpr std::uint64_t kMinLargestSettlement = 70;
+    universe::Simulation world{universe::make_demo_simulation_config(*scenario)};
+    require(world.state().regions.front().environment_class == universe::EnvironmentClass::ProductiveArable,
+            "the demo scenario must start on arable land");
+    world.run_years(scenario->years);
+    std::size_t settlements = 0;
+    std::uint64_t largest = 0;
+    for (const auto& settlement : world.state().settlements) {
+        if (settlement.active) {
+            ++settlements;
+            largest = std::max(largest, settlement.population);
+        }
+    }
+    require(settlements >= kMinSettlements && settlements <= kMaxSettlements,
+            "the demo world must end with two to five settlements");
+    require(largest >= kMinLargestSettlement, "the demo world must hold a village of at least seventy people");
 }
 
 }  // namespace
