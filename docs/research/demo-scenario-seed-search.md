@@ -67,7 +67,7 @@ Tier promotions and merges are still 0. That depends on the fragmentation questi
 
 `scenarios/demo.json` holds the demo scenario: seed 39, 200 people, 20 years, `"layout": "single_settlement"`. The layout is ADR 0002's single-settlement start (one region of 480 land units, one starting settlement), which is how the demo begins; a scenario file without a layout means the simulation's default multi-settlement start. `universe_ui_bridge --scenario scenarios/demo.json` and `scripts/run-demo-bridge.ps1` start the world from it, and the bridge, the seed search and the tests all build their config through `make_demo_simulation_config`, so they run the same world. No `*.ucore` is committed.
 
-The search runs on the single-settlement start by default (`--layout default` searches the old layout). Seeds 1-64, 200 people, 20 years, after the fission and absorption rules (#61-#66) and the construction fix (#58). All 64 seeds that survive complete buildings; extinct seeds are ineligible. Top ten:
+The search runs on the single-settlement start by default (`--layout default` searches the old layout). Seeds 1-64, 200 people, 20 years, after the fission and absorption rules (#61-#66) and the construction fix (#58). The 54 seeds that survive each complete 9-29 buildings; the 10 that go extinct (the marginal and wetland starts in ADR 0002) are ineligible. Top ten:
 
 | Rank | Seed | Score | Population | Buildings completed | Settlements founded | Discoveries | Institutions |
 | --- | --- | --- | --- | --- | --- | --- | --- |
