@@ -33,7 +33,7 @@ Settlements today share nothing with each other: `process_local_exchange` only s
 
 ## To calibrate or confirm
 
-- **Where coin comes from.** Proposed default: a seeded endowment at world creation proportional to each settlement's starting stock value, conserved afterwards (no minting), so total coin never changes. This needs the owner's confirmation.
+- **Coin supply (confirmed).** Coin comes from a seeded endowment at world creation, proportional to each settlement's starting stock value, and is conserved afterwards: total coin never changes and no settlement can make more. The simulation has no metal or ore, so there is nothing to mint from yet. The consequence to accept is a fixed money supply: as the economy grows, prices in coin drift down, which is harmless over the 20-year demo and would matter over centuries. Making more coin needs a metals resource and an institution that mints, which belongs to a later resource-system map; the coin balance is a plain integer field with a single place where coin is created (world creation), so a mint can be added there later without reworking trade.
 - The profit-share fraction, the base cargo load, the profit threshold for training a merchant, the merchant count bound, and the price range. These get a measured sweep when built, the same way the settlement size distribution was calibrated, and any change is recorded here.
 - The capability function for speed and load: for now it returns the walking baseline and a multiplier of one.
 
