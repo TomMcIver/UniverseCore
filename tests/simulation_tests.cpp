@@ -2,6 +2,7 @@
 #include "universe/snapshot.hpp"
 #include "universe/seed.hpp"
 #include "universe/ui/simulation_controller.hpp"
+#include "snapshot_test_support.hpp"
 
 #include <algorithm>
 #include <array>
@@ -2825,13 +2826,16 @@ int main() {
             universe::SnapshotErrorCode::InvalidStructure,
             "malformed collection lengths must be rejected");
 
-        // The payload ends with aggregate_births_total then aggregate_deaths_total.
+        // The payload ends with aggregate_births_total then aggregate_deaths_total,
+        // followed by the schema v27 coin section.
         constexpr std::size_t aggregate_demography_tail_size = 16U;
+        const auto coin_section_size = snapshot_test::coin_section_size(source.state());
         require(
-            valid.size() > aggregate_demography_tail_size,
+            valid.size() > aggregate_demography_tail_size + coin_section_size,
             "snapshot must include the aggregate demography tail");
-        const auto aggregate_births_offset = valid.size() - aggregate_demography_tail_size;
-        const auto aggregate_deaths_offset = valid.size() - 8U;
+        const auto aggregate_tail_end = valid.size() - coin_section_size;
+        const auto aggregate_births_offset = aggregate_tail_end - aggregate_demography_tail_size;
+        const auto aggregate_deaths_offset = aggregate_tail_end - 8U;
 
         auto excessive_aggregate_births = clone_bytes(valid);
         write_u64_le(excessive_aggregate_births, aggregate_births_offset, 1'000'000'000ULL);

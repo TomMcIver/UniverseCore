@@ -203,6 +203,8 @@ struct Household {
     std::int64_t cumulative_material_transferred_in{};
     std::int64_t cumulative_material_transferred_out{};
     std::int64_t derived_wealth_points{};
+    // Coin held by the household (ADR 0003); see Settlement::coin.
+    std::int64_t coin{};
 
     // Ticket #35/#38: a person's canonical position is always
     // Settlement.position + Household.settlement_offset -- derived once at
@@ -247,6 +249,9 @@ struct Settlement {
     std::int64_t cumulative_basic_tool_produced{};
     std::int64_t cumulative_basic_tool_broken{};
     ResourceAmount commons_food{};
+    // Coin held by the commons (ADR 0003). A plain conserved integer balance,
+    // not a resource: it is created once at world creation and only moves.
+    std::int64_t coin{};
     std::int64_t last_transfer_food_volume{};
     std::int64_t last_exchange_volume{};
     std::uint32_t economic_viability_streak{};
@@ -826,6 +831,7 @@ private:
     void assign_position_for_new_settlement(SettlementId settlement_id, RegionId region_id);
     void initialize_region_lod_states();
     void initialize_settlement_aggregates();
+    void endow_initial_coin();
     [[nodiscard]] bool is_region_detailed(RegionId region_id) const noexcept;
     [[nodiscard]] bool is_settlement_detailed(SettlementId settlement_id) const noexcept;
     [[nodiscard]] bool is_household_detailed(HouseholdId household_id) const noexcept;

@@ -40,6 +40,24 @@ _Avoid_: minimum size, threshold (unqualified)
 A settlement below the viable size. It is a descriptive term only and is not a settlement tier.
 _Avoid_: small village, outpost
 
+### Trade
+
+**Coin**:
+A conserved integer balance held by settlement commons and households. It is created once at world creation and only ever moves; it is a currency, not a resource type.
+_Avoid_: money (unqualified), gold, currency resource
+
+**Merchant**:
+A person whose occupation is carrying goods between settlements to sell at a profit. Settlements train merchants only when trading pays.
+_Avoid_: trader, caravan, NPC vendor
+
+**Trade**:
+Goods carried by a merchant from one settlement to another, paid for in coin at each settlement's own prices.
+_Avoid_: exchange (which already means sharing goods within one settlement), barter
+
+**Trip**:
+One merchant's journey from their home settlement to another and back, with a cargo, taking real simulated days.
+_Avoid_: route (which means the path a villager walks), run
+
 ### Presentation
 
 **Command view**:
