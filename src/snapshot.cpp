@@ -323,8 +323,10 @@ constexpr std::uint16_t kCoinSectionSchemaVersion = 27U;
 }
 
 // Reads the schema v27 section, last in the payload: settlement commons coin
-// then household coin, each in ascending id order. Coin is never negative.
+// then household coin, each in ascending id order. Coin is never negative, and
+// the world's total fits an i64: coin only moves, so every later sum is safe.
 [[nodiscard]] SnapshotLoadResult read_v27_coin_section(SnapshotReader& reader, WorldState& state) {
+    std::int64_t world_total = 0;
     std::uint64_t settlement_count = 0;
     if (!reader.read_u64(settlement_count)) {
         return load_error(SnapshotErrorCode::TruncatedData, "Snapshot coin section is truncated");
@@ -353,6 +355,9 @@ constexpr std::uint16_t kCoinSectionSchemaVersion = 27U;
         }
         if (coin < 0) {
             return load_error(SnapshotErrorCode::InvalidState, "Snapshot settlement coin is negative");
+        }
+        if (!checked_add_i64(world_total, coin, world_total)) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot total coin overflows");
         }
         it->second->coin = coin;
     }
@@ -385,6 +390,9 @@ constexpr std::uint16_t kCoinSectionSchemaVersion = 27U;
         }
         if (coin < 0) {
             return load_error(SnapshotErrorCode::InvalidState, "Snapshot household coin is negative");
+        }
+        if (!checked_add_i64(world_total, coin, world_total)) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot total coin overflows");
         }
         it->second->coin = coin;
     }

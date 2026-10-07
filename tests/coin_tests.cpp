@@ -92,17 +92,107 @@ void test_older_snapshots_load_with_no_coin() {
     require(restored.state().population == source.state().population, "migration must change nothing but coin");
 }
 
-void test_snapshot_rejects_negative_coin() {
-    universe::Simulation source{default_layout_config(5)};
-    auto bytes = source.save_snapshot();
-    // First settlement record: id at +8 after the section count, coin 8 bytes later.
-    const auto section_start = bytes.size() - snapshot_test::coin_section_size(source.state());
-    snapshot_test::write_u64_at(bytes, section_start + snapshot_test::kCountSize + 8U, ~std::uint64_t{0});
-    const auto payload_size = bytes.size() - snapshot_test::kHeaderSize;
-    snapshot_test::write_u64_at(bytes, 16U, universe::snapshot_hash64(std::span<const std::byte>{bytes.data() + snapshot_test::kHeaderSize, payload_size}));
+constexpr std::size_t kPayloadSizeOffset = 8U;
+constexpr std::size_t kPayloadHashOffset = 16U;
+constexpr std::uint64_t kMaxCoinBits = 0x7FFF'FFFF'FFFF'FFFFULL;
+constexpr std::uint64_t kUnknownId = 0x7FFF'FFFFULL;
 
+// Offsets into the trailing coin section: [count][(id, coin) x settlements]
+// [count][(id, coin) x households]. Records are 16 bytes: id then coin.
+struct CoinSectionLayout {
+    std::size_t settlement_count_offset;
+    std::size_t household_count_offset;
+    std::size_t settlement_count;
+    std::size_t household_count;
+
+    [[nodiscard]] std::size_t settlement_id(const std::size_t index) const {
+        return settlement_count_offset + snapshot_test::kCountSize + (index * snapshot_test::kCoinRecordSize);
+    }
+    [[nodiscard]] std::size_t settlement_coin(const std::size_t index) const { return settlement_id(index) + 8U; }
+    [[nodiscard]] std::size_t household_id(const std::size_t index) const {
+        return household_count_offset + snapshot_test::kCountSize + (index * snapshot_test::kCoinRecordSize);
+    }
+    [[nodiscard]] std::size_t household_coin(const std::size_t index) const { return household_id(index) + 8U; }
+};
+
+CoinSectionLayout coin_section_layout(const universe::Simulation& source, const std::size_t snapshot_size) {
+    const auto& state = source.state();
+    const auto start = snapshot_size - snapshot_test::coin_section_size(state);
+    return CoinSectionLayout{
+        .settlement_count_offset = start,
+        .household_count_offset = start + snapshot_test::kCountSize + (state.settlements.size() * snapshot_test::kCoinRecordSize),
+        .settlement_count = state.settlements.size(),
+        .household_count = state.households.size(),
+    };
+}
+
+void refresh_payload_hash(std::vector<std::byte>& bytes) {
+    const auto payload_size = bytes.size() - snapshot_test::kHeaderSize;
+    snapshot_test::write_u64_at(bytes, kPayloadSizeOffset, payload_size);
+    snapshot_test::write_u64_at(
+        bytes,
+        kPayloadHashOffset,
+        universe::snapshot_hash64(std::span<const std::byte>{bytes.data() + snapshot_test::kHeaderSize, payload_size}));
+}
+
+void require_load_fails_with(
+    const std::vector<std::byte>& bytes, const universe::SnapshotErrorCode expected, const char* message) {
     universe::Simulation destination{universe::SimulationConfig{.seed = 999U, .initial_population = 10U}};
-    require(!universe::Simulation::load_snapshot(bytes, destination).ok, "negative coin must be rejected");
+    const auto result = universe::Simulation::load_snapshot(bytes, destination);
+    require(!result.ok && result.code == expected, message);
+}
+
+void test_snapshot_rejects_corrupt_coin_sections() {
+    universe::Simulation source{default_layout_config(5)};
+    const auto valid = source.save_snapshot();
+    const auto layout = coin_section_layout(source, valid.size());
+    require(layout.settlement_count >= 2U && layout.household_count >= 2U, "corruption cases need two records of each kind");
+    const auto last_settlement = layout.settlement_count - 1U;
+    const auto last_household = layout.household_count - 1U;
+
+    const auto corrupt = [&](const auto& mutate) {
+        auto bytes = valid;
+        mutate(bytes);
+        refresh_payload_hash(bytes);
+        return bytes;
+    };
+    const auto set = [](std::vector<std::byte>& bytes, const std::size_t offset, const std::uint64_t value) {
+        snapshot_test::write_u64_at(bytes, offset, value);
+    };
+
+    require_load_fails_with(
+        corrupt([&](auto& b) { set(b, layout.settlement_coin(0), ~std::uint64_t{0}); }),
+        universe::SnapshotErrorCode::InvalidState, "negative settlement coin must be rejected");
+    require_load_fails_with(
+        corrupt([&](auto& b) { set(b, layout.household_coin(0), ~std::uint64_t{0}); }),
+        universe::SnapshotErrorCode::InvalidState, "negative household coin must be rejected");
+    require_load_fails_with(
+        corrupt([&](auto& b) { set(b, layout.settlement_count_offset, layout.settlement_count + 1U); }),
+        universe::SnapshotErrorCode::InvalidStructure, "a wrong settlement coin count must be rejected");
+    require_load_fails_with(
+        corrupt([&](auto& b) { set(b, layout.household_count_offset, layout.household_count + 1U); }),
+        universe::SnapshotErrorCode::InvalidStructure, "a wrong household coin count must be rejected");
+    require_load_fails_with(
+        corrupt([&](auto& b) { set(b, layout.settlement_id(1), 0U); }),
+        universe::SnapshotErrorCode::InvalidStructure, "settlement coin ids out of order must be rejected");
+    require_load_fails_with(
+        corrupt([&](auto& b) { set(b, layout.household_id(1), 0U); }),
+        universe::SnapshotErrorCode::InvalidStructure, "household coin ids out of order must be rejected");
+    require_load_fails_with(
+        corrupt([&](auto& b) { set(b, layout.settlement_id(last_settlement), kUnknownId); }),
+        universe::SnapshotErrorCode::InvalidReference, "coin for an unknown settlement must be rejected");
+    require_load_fails_with(
+        corrupt([&](auto& b) { set(b, layout.household_id(last_household), kUnknownId); }),
+        universe::SnapshotErrorCode::InvalidReference, "coin for an unknown household must be rejected");
+    require_load_fails_with(
+        corrupt([&](auto& b) {
+            set(b, layout.settlement_coin(0), kMaxCoinBits);
+            set(b, layout.settlement_coin(1), kMaxCoinBits);
+        }),
+        universe::SnapshotErrorCode::InvalidState, "a world coin total that overflows must be rejected");
+    require_load_fails_with(
+        corrupt([&](auto& b) { b.resize(b.size() - 4U); }),
+        universe::SnapshotErrorCode::TruncatedData, "a truncated coin section must be rejected");
 }
 
 void test_demote_and_promote_keep_total_coin() {
@@ -134,7 +224,7 @@ int main() {
     test_total_coin_is_unchanged_as_the_world_runs();
     test_coin_survives_a_snapshot_round_trip();
     test_older_snapshots_load_with_no_coin();
-    test_snapshot_rejects_negative_coin();
+    test_snapshot_rejects_corrupt_coin_sections();
     test_demote_and_promote_keep_total_coin();
     std::cout << "coin tests passed\n";
     return 0;

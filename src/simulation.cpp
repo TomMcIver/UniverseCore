@@ -3249,7 +3249,9 @@ void Simulation::demote_region_to_settlement_aggregate(const RegionId region_id)
         }
 
         if (settlement != nullptr) {
-            settlement->coin += household.coin;
+            if (!checked_add_i64(settlement->coin, household.coin, settlement->coin)) {
+                throw std::overflow_error("Settlement coin overflow while folding a household");
+            }
             settlement->materials.wood.value += household.owned_materials.wood.value;
             settlement->materials.stone.value += household.owned_materials.stone.value;
             settlement->materials.timber.value += household.owned_materials.timber.value;
@@ -5203,26 +5205,39 @@ void Simulation::initialize_region_lod_states() {
 // proportion to the value of what it starts with, and each settlement's commons
 // in proportion to what its households were given. After this, coin only moves.
 void Simulation::endow_initial_coin() {
+    const auto add_checked = [](const std::int64_t lhs, const std::int64_t rhs) {
+        std::int64_t sum = 0;
+        if (!checked_add_i64(lhs, rhs, sum)) {
+            throw std::overflow_error("Coin endowment overflow");
+        }
+        return sum;
+    };
+    const auto mul_checked = [](const std::int64_t lhs, const std::int64_t rhs) {
+        std::int64_t product = 0;
+        if (!checked_mul_i64(lhs, rhs, product)) {
+            throw std::overflow_error("Coin endowment overflow");
+        }
+        return product;
+    };
+
     std::unordered_map<SettlementId, std::int64_t> household_coin_by_settlement;
     for (auto& household : state_.households) {
         const auto& materials = household.owned_materials;
-        const auto stock_value = std::max<std::int64_t>(0, household.resources.food_inventory.value) +
-            (std::max<std::int64_t>(0, materials.wood.value) * kWealthValueWood) +
-            (std::max<std::int64_t>(0, materials.stone.value) * kWealthValueStone) +
-            (std::max<std::int64_t>(0, materials.timber.value) * kWealthValueTimber) +
-            (std::max<std::int64_t>(0, materials.basic_tool.value) * kWealthValueBasicTool);
-        std::int64_t endowment = 0;
-        if (!checked_mul_i64(stock_value, kCoinPerStockValue, endowment)) {
-            throw std::overflow_error("Coin endowment overflow");
-        }
-        household.coin = endowment;
-        household_coin_by_settlement[household.settlement_id] += endowment;
+        auto stock_value = std::max<std::int64_t>(0, household.resources.food_inventory.value);
+        stock_value = add_checked(stock_value, mul_checked(std::max<std::int64_t>(0, materials.wood.value), kWealthValueWood));
+        stock_value = add_checked(stock_value, mul_checked(std::max<std::int64_t>(0, materials.stone.value), kWealthValueStone));
+        stock_value = add_checked(stock_value, mul_checked(std::max<std::int64_t>(0, materials.timber.value), kWealthValueTimber));
+        stock_value = add_checked(stock_value, mul_checked(std::max<std::int64_t>(0, materials.basic_tool.value), kWealthValueBasicTool));
+        household.coin = mul_checked(stock_value, kCoinPerStockValue);
+        auto& settlement_total = household_coin_by_settlement[household.settlement_id];
+        settlement_total = add_checked(settlement_total, household.coin);
     }
+    // The floored remainder of the commons share is deliberately never issued.
     for (auto& settlement : state_.settlements) {
         const auto it = household_coin_by_settlement.find(settlement.id);
         settlement.coin = it == household_coin_by_settlement.end()
             ? 0
-            : (it->second * kCommonsCoinPercentOfHouseholds) / 100;
+            : mul_checked(it->second, kCommonsCoinPercentOfHouseholds) / 100;
     }
 }
 
@@ -5923,7 +5938,9 @@ void Simulation::merge_settlements(const SettlementId survivor_id, const Settlem
 
     // Commons food is finite regional stock, so it moves with the households.
     survivor->commons_food.value += absorbed->commons_food.value;
-    survivor->coin += absorbed->coin;
+    if (!checked_add_i64(survivor->coin, absorbed->coin, survivor->coin)) {
+        throw std::overflow_error("Settlement coin overflow while merging");
+    }
     absorbed->coin = 0;
     absorbed->commons_food.value = 0;
 
