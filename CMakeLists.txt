@@ -122,6 +122,21 @@ if(UNIVERSECORE_BUILD_TESTS)
     add_test(NAME universe_life_events_placement_tests COMMAND universe_life_events_placement_tests)
     set_tests_properties(universe_life_events_placement_tests PROPERTIES LABELS "fast")
 
+    add_executable(universe_lod_roundtrip_tests tests/lod_roundtrip_tests.cpp)
+    target_link_libraries(universe_lod_roundtrip_tests PRIVATE universe_core)
+    add_test(NAME universe_lod_roundtrip_tests COMMAND universe_lod_roundtrip_tests)
+    set_tests_properties(universe_lod_roundtrip_tests PROPERTIES LABELS "fast")
+
+    add_executable(universe_settlement_structure_tests tests/settlement_structure_tests.cpp)
+    target_link_libraries(universe_settlement_structure_tests PRIVATE universe_core)
+    add_test(NAME universe_settlement_structure_tests COMMAND universe_settlement_structure_tests)
+    set_tests_properties(universe_settlement_structure_tests PROPERTIES LABELS "fast")
+
+    add_executable(universe_settlement_distribution_tests tests/settlement_distribution_tests.cpp)
+    target_link_libraries(universe_settlement_distribution_tests PRIVATE universe_core)
+    add_test(NAME universe_settlement_distribution_tests COMMAND universe_settlement_distribution_tests)
+    set_tests_properties(universe_settlement_distribution_tests PROPERTIES LABELS "integration")
+
     add_executable(universe_construction_tests tests/construction_tests.cpp)
     target_link_libraries(universe_construction_tests PRIVATE universe_core)
     add_test(NAME universe_construction_tests COMMAND universe_construction_tests)
@@ -129,6 +144,7 @@ if(UNIVERSECORE_BUILD_TESTS)
 
     add_executable(universe_demo_scenario_tests tests/demo_scenario_tests.cpp)
     target_link_libraries(universe_demo_scenario_tests PRIVATE universe_core)
+    target_compile_definitions(universe_demo_scenario_tests PRIVATE UNIVERSE_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
     add_test(NAME universe_demo_scenario_tests COMMAND universe_demo_scenario_tests)
     set_tests_properties(universe_demo_scenario_tests PROPERTIES LABELS "fast")
 

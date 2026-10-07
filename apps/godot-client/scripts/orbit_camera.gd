@@ -52,6 +52,18 @@ func _ready() -> void:
 func center_on(world_x: float, world_z: float) -> void:
 	position = Vector3(world_x, _height, world_z + _height * 0.6)
 
+## Height needed to fit a circle of `radius` world units in view, per unit of
+## radius, at the default pitch and field of view.
+const FRAME_HEIGHT_PER_RADIUS := 1.1
+const FRAME_MAX_HEIGHT := 320.0
+
+## Backs the camera off so everything within `radius` of (world_x, world_z) is in
+## view, such as every settlement after a long time jump. The framing may sit
+## higher than the manual zoom limit; the next manual zoom clamps back to it.
+func frame_area(world_x: float, world_z: float, radius: float) -> void:
+	_height = clampf(radius * FRAME_HEIGHT_PER_RADIUS, _height, FRAME_MAX_HEIGHT)
+	center_on(world_x, world_z)
+
 func _process(delta: float) -> void:
 	var input_dir := Vector3.ZERO
 	if Input.is_key_pressed(KEY_W):

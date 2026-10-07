@@ -31,14 +31,30 @@ struct DemoCandidateScore {
     std::int64_t score{};
 };
 
+// How the demo world starts. ADR 0002: the demo begins as one settlement that
+// grows and splits; the default layout is the simulation's own multi-settlement
+// start and is what scenario files without a layout mean.
+enum class DemoStartLayout : std::uint8_t {
+    DefaultLayout = 0,
+    SingleSettlement = 1,
+};
+
 struct DemoScenario {
     std::uint64_t seed{};
     std::uint64_t initial_population{};
     std::uint64_t years{};
+    DemoStartLayout layout{DemoStartLayout::DefaultLayout};
 };
 
 inline constexpr std::uint64_t kDemoScenarioMaxPopulation = 100'000;
 inline constexpr std::uint64_t kDemoScenarioMaxYears = 1'000;
+// One region holding as much land as the default four regions together, so a
+// single-settlement start is not starved of land.
+inline constexpr std::int64_t kSingleSettlementRegionLandUnits = 480;
+
+// The one place a scenario becomes a simulation config, shared by the seed
+// search, the bridge and the tests so they all run the same world.
+[[nodiscard]] SimulationConfig make_demo_simulation_config(const DemoScenario& scenario);
 
 // Counts only change after `initial_state`, so the starting world never scores.
 [[nodiscard]] DemoOutcome measure_demo_outcome(const WorldState& initial_state, const WorldState& final_state);
@@ -47,7 +63,8 @@ inline constexpr std::uint64_t kDemoScenarioMaxYears = 1'000;
 
 [[nodiscard]] DemoCandidateScore run_demo_candidate(std::uint64_t seed,
                                                     std::uint64_t initial_population,
-                                                    std::uint64_t years);
+                                                    std::uint64_t years,
+                                                    DemoStartLayout layout = DemoStartLayout::DefaultLayout);
 
 // Eligible candidates first, then higher score, then lower seed.
 [[nodiscard]] std::vector<DemoCandidateScore> rank_demo_candidates(std::vector<DemoCandidateScore> candidates);

@@ -218,6 +218,19 @@ enum class SettlementTier : std::uint8_t {
     City = 2,
 };
 
+// The smallest population a settlement can hold and still be treated as
+// sustainable on its own. Fission and absorption share it so neither rule can
+// leave a settlement the other can never resolve (ADR 0002).
+inline constexpr std::uint64_t kViableSettlementSize = 20U;
+
+// Absorption (ADR 0002): a settlement below the viable size for this many
+// consecutive days is absorbed by a neighbour in its region that is viable, has
+// kept a viability streak of at least kSurvivorViabilityStreakDays and lies
+// within kSettlementMergeDistanceUnits. With no such neighbour it stays.
+inline constexpr std::uint32_t kAbsorptionBelowViableDays = 5U * 365U;
+inline constexpr std::uint32_t kSurvivorViabilityStreakDays = 365U;
+inline constexpr std::int64_t kSettlementMergeDistanceUnits = 2'000;
+
 struct Settlement {
     SettlementId id{};
     RegionId region_id{};
@@ -250,6 +263,14 @@ struct Settlement {
     SettlementTier tier{SettlementTier::Village};
     SettlementTier pending_tier{SettlementTier::Village};
     std::uint32_t tier_transition_streak{};
+    // Consecutive days this settlement's population has been below
+    // kViableSettlementSize. Resets as soon as it is viable again. An inactive
+    // settlement keeps its last value until the next daily update zeroes it,
+    // because merges and extinctions happen between daily updates.
+    std::uint32_t days_below_viable_size{};
+    // Consecutive days on which at least a third of this settlement's
+    // households went short of food. Resets on the first day below that share.
+    std::uint32_t days_under_food_strain{};
 };
 
 enum class BuildingType : std::uint8_t {
@@ -576,6 +597,11 @@ struct SimulationConfig {
     std::uint32_t food_production_scale_percent{100};
     bool food_system_enabled{true};
     std::uint64_t initial_region_count{4};
+    // Starting settlements per region. 0 keeps the automatic layout (about one
+    // per 8 households, at most 4); a positive value is used as given, capped at
+    // the region's household count. It only shapes world creation, which the
+    // snapshot records through the settlements themselves, so it is not saved.
+    std::uint64_t initial_settlements_per_region{0};
     std::int64_t base_region_area_units{120};
     std::uint32_t productive_effort_scale_percent{100};
     bool materials_system_enabled{true};
@@ -816,6 +842,15 @@ private:
     void process_settlement_restructuring(std::uint64_t demographic_year);
     void process_settlement_extinction();
     void process_settlement_founding(std::uint64_t demographic_year);
+    // The households a fission would move, movers first. See the definition.
+    struct FissionPlan {
+        std::vector<Household*> households{};
+        std::uint64_t move_count{};
+    };
+    [[nodiscard]] std::optional<FissionPlan> plan_fission_households(
+        const Settlement& source,
+        std::uint64_t demographic_year,
+        const std::unordered_set<PersonId>& alive_person_ids);
     void process_settlement_merging();
     void merge_settlements(SettlementId survivor_id, SettlementId absorbed_id);
     [[nodiscard]] std::uint32_t settlement_pressure_per_10k(const Settlement& settlement) const noexcept;
@@ -860,6 +895,7 @@ private:
     void rebuild_communication_indexes();
     void rebuild_record_indexes();
     void refresh_economic_aggregates() noexcept;
+    void advance_settlement_daily_counters();
     void refresh_population_count() noexcept;
 
     struct KnowledgeSemanticKey {

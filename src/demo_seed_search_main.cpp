@@ -20,6 +20,8 @@ struct SearchOptions {
     std::uint64_t population{200};
     std::uint64_t years{20};
     std::uint64_t top{10};
+    // ADR 0002: the demo starts as one settlement, so that is what is searched.
+    universe::DemoStartLayout layout{universe::DemoStartLayout::SingleSettlement};
     std::optional<std::string> write_scenario_path{};
 };
 
@@ -33,7 +35,7 @@ bool parse_number(const std::string_view text, std::uint64_t& value) {
 void print_usage(const char* executable) {
     std::cout << "Usage: " << executable
               << " [--seed-start N] [--seed-count N] [--population N] [--years N] [--top N]"
-              << " [--write-scenario PATH]\n";
+              << " [--layout single|default] [--write-scenario PATH]\n";
 }
 
 std::optional<SearchOptions> parse_options(const int argc, char** argv) {
@@ -45,6 +47,17 @@ std::optional<SearchOptions> parse_options(const int argc, char** argv) {
             return std::nullopt;
         }
         const std::string_view value{argv[++i]};
+        if (arg == "--layout") {
+            if (value == "single") {
+                options.layout = universe::DemoStartLayout::SingleSettlement;
+            } else if (value == "default") {
+                options.layout = universe::DemoStartLayout::DefaultLayout;
+            } else {
+                std::cerr << "Invalid layout " << value << " (expected single or default)\n";
+                return std::nullopt;
+            }
+            continue;
+        }
         if (arg == "--write-scenario") {
             options.write_scenario_path = std::string{value};
             continue;
@@ -111,7 +124,7 @@ int main(int argc, char** argv) {
     candidates.reserve(options->seed_count);
     for (std::uint64_t offset = 0; offset < options->seed_count; ++offset) {
         const auto seed = options->seed_start + offset;
-        candidates.push_back(universe::run_demo_candidate(seed, options->population, options->years));
+        candidates.push_back(universe::run_demo_candidate(seed, options->population, options->years, options->layout));
         std::cerr << "scored seed " << seed << '\n';
     }
 
@@ -129,6 +142,7 @@ int main(int argc, char** argv) {
             .seed = best.seed,
             .initial_population = options->population,
             .years = options->years,
+            .layout = options->layout,
         };
         std::ofstream file{*options->write_scenario_path, std::ios::trunc};
         file << universe::format_demo_scenario_json(scenario, best);

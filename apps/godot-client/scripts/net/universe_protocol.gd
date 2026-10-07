@@ -9,6 +9,12 @@ extends RefCounted
 const HOST := "127.0.0.1"
 const PORT := 19081
 
+## Simulation seconds (ticks) that pass per real second at playback speed 1x:
+## one simulated day (86400 ticks) per 120 real seconds. Must match
+## kRealSecondsPerSimulatedDayAtOneX in src/ui_bridge_main.cpp; at Nx both the
+## bridge and the client run N times faster.
+const SIMULATION_SECONDS_PER_REAL_SECOND_AT_1X := 720.0
+
 ## Either override lets parallel bridges (e.g. one per git worktree) avoid the
 ## default port; UNIVERSE_WS_PORT matches what ws-bridge.mjs reads.
 static func url() -> String:

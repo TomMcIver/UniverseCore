@@ -4082,14 +4082,16 @@ int main() {
     }
 
     {
-        // Ticket #33: settlement merging -- two active, nearby, sustained-viability
-        // settlements merge; the larger survives, the smaller becomes inactive and
-        // transfers households/materials/access-share, and a SettlementMergedEventPayload
-        // is emitted. Conservation: nothing is lost across a merge.
-        auto merge_config = config;
-        merge_config.initial_population = 400;
-        merge_config.initial_region_count = 1;
-        merge_config.base_region_area_units = 10'000;
+        // Ticket #33, amended by ADR 0002: a settlement that has stayed below the
+        // viable size for five years is absorbed by a nearby viable settlement; the
+        // larger survives, the smaller becomes inactive and transfers
+        // households/materials/access-share, and a SettlementMergedEventPayload is
+        // emitted. Conservation: nothing is lost across a merge. The default layout
+        // starts several settlements below the viable size, so it exercises this;
+        // the old scenario (two settlements of 50 or more people merging) no longer
+        // can, because that symmetric trigger was replaced.
+        constexpr std::uint64_t kAbsorptionRunYears = 8;
+        const auto merge_config = config;
 
         universe::Simulation merge_run{merge_config};
         require(merge_run.state().settlements.size() > 1U,
@@ -4122,10 +4124,9 @@ int main() {
         const auto births_before = merge_run.state().total_births;
         const auto deaths_before = merge_run.state().total_deaths;
 
-        // At this world scale, settlements only drift close enough together
-        // (and both hold a sustained enough viability streak) to qualify for
-        // merging after several years, not within the first year.
-        merge_run.run_years(5);
+        // A settlement is only absorbed after five consecutive years below the
+        // viable size (ADR 0002), so the run has to outlast that.
+        merge_run.run_years(kAbsorptionRunYears);
 
         std::size_t merge_events = 0;
         std::unordered_set<universe::SettlementId> absorbed_ids;
@@ -4145,7 +4146,7 @@ int main() {
                 ++merge_events;
             }
         }
-        require(merge_events > 0U, "close, sustained-viability settlements must eventually merge");
+        require(merge_events > 0U, "settlements below the viable size for five years must be absorbed");
 
         verify_settlement_invariants(merge_run.state());
         const auto births_during_run = merge_run.state().total_births - births_before;
@@ -4155,23 +4156,21 @@ int main() {
         require(total_alive_members(merge_run.state()) == expected_members_after,
                 "merging must not lose or duplicate any living household member beyond ordinary births/deaths");
 
-        // Viability exclusion is enforced structurally by process_settlement_merging's
-        // own candidate filter (economic_viability_streak >= 365 days), not something
-        // observable after the fact: once absorbed, a settlement has zero households,
-        // so its very next refresh_economic_aggregates() pass resets its own streak to
-        // zero (the same early-continue path used for any settlement with no wealth
-        // data). Every settlement in absorbed_ids was, by construction, a candidate
-        // that passed the trigger's viability check at the moment it was selected.
+        // The five-year rule is enforced structurally by process_settlement_merging's
+        // own candidate filter (days_below_viable_size) and checked from outside in
+        // the settlement structure tests, which observe the counter before each
+        // absorption; once absorbed, a settlement has no households, so the counter
+        // is not observable after the fact here.
 
         universe::Simulation merge_repeat{merge_config};
-        merge_repeat.run_years(5);
+        merge_repeat.run_years(kAbsorptionRunYears);
         require(merge_run.save_snapshot() == merge_repeat.save_snapshot(),
                 "settlement merge outcomes must be deterministic for a given seed");
 
         auto merge_different_seed_config = merge_config;
         merge_different_seed_config.seed = 5150U;
         universe::Simulation merge_different_seed{merge_different_seed_config};
-        merge_different_seed.run_years(5);
+        merge_different_seed.run_years(kAbsorptionRunYears);
         require(merge_run.save_snapshot() != merge_different_seed.save_snapshot(),
                 "a different seed must produce a different settlement merge trajectory");
 

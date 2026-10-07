@@ -269,6 +269,58 @@ constexpr std::uint16_t kMaxFacingDegreesExclusive = 360U;
     return SnapshotLoadResult{.ok = true, .code = SnapshotErrorCode::None, .message = {}};
 }
 
+constexpr std::uint16_t kViabilitySectionSchemaVersion = 26U;
+
+// Reads the schema v26 section: one record per settlement in ascending id
+// order, carrying the days it has spent below the viable size and under food
+// strain.
+[[nodiscard]] SnapshotLoadResult read_v26_viability_section(SnapshotReader& reader, WorldState& state) {
+    std::uint64_t record_count = 0;
+    if (!reader.read_u64(record_count)) {
+        return load_error(SnapshotErrorCode::TruncatedData, "Snapshot settlement viability section is truncated");
+    }
+    if (record_count != static_cast<std::uint64_t>(state.settlements.size())) {
+        return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot settlement viability count does not match settlements");
+    }
+
+    std::unordered_map<SettlementId, Settlement*> settlement_by_id;
+    settlement_by_id.reserve(state.settlements.size());
+    for (auto& settlement : state.settlements) {
+        settlement_by_id.emplace(settlement.id, &settlement);
+    }
+
+    const auto ticks_per_day = days(1).ticks;
+    const auto elapsed_days = state.time.ticks > 0 ? state.time.ticks / ticks_per_day : 0;
+    const auto max_elapsed_days = static_cast<std::uint64_t>(elapsed_days);
+
+    SettlementId previous_id = 0;
+    for (std::uint64_t i = 0; i < record_count; ++i) {
+        SettlementId settlement_id = 0;
+        std::uint32_t days_below_viable_size = 0;
+        std::uint32_t days_under_food_strain = 0;
+        if (!reader.read_u64(settlement_id) || !reader.read_u32(days_below_viable_size) ||
+            !reader.read_u32(days_under_food_strain)) {
+            return load_error(SnapshotErrorCode::TruncatedData, "Snapshot settlement viability record is truncated");
+        }
+        if (settlement_id <= previous_id) {
+            return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot settlement viability records must be in ascending id order");
+        }
+        previous_id = settlement_id;
+        const auto settlement_it = settlement_by_id.find(settlement_id);
+        if (settlement_it == settlement_by_id.end()) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot settlement viability references unknown settlement");
+        }
+        // A count of daily updates cannot exceed the days that have elapsed.
+        if (days_below_viable_size > max_elapsed_days || days_under_food_strain > max_elapsed_days) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot settlement viability counter exceeds elapsed days");
+        }
+        settlement_it->second->days_below_viable_size = days_below_viable_size;
+        settlement_it->second->days_under_food_strain = days_under_food_strain;
+    }
+
+    return SnapshotLoadResult{.ok = true, .code = SnapshotErrorCode::None, .message = {}};
+}
+
 [[nodiscard]] bool is_valid_household_id(const HouseholdId id) noexcept {
     return id > 0U;
 }
@@ -1092,6 +1144,15 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
         payload.write_u64(person_id);
     }
 
+    // Schema v26 section: days each settlement has spent below the viable
+    // size, written in settlement id order just before the totals.
+    payload.write_u64(static_cast<std::uint64_t>(settlement_order.size()));
+    for (const auto* settlement : settlement_order) {
+        payload.write_u64(settlement->id);
+        payload.write_u32(settlement->days_below_viable_size);
+        payload.write_u32(settlement->days_under_food_strain);
+    }
+
     payload.write_u64(simulation.state_.aggregate_births_total);
     payload.write_u64(simulation.state_.aggregate_deaths_total);
 
@@ -1131,10 +1192,11 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         return load_error(SnapshotErrorCode::InvalidMagic, "Snapshot magic does not match");
     }
 
-    if (version != kSchemaVersion && version != kMinimumMigratableSchemaVersion) {
+    if (version < kMinimumMigratableSchemaVersion || version > kSchemaVersion) {
         return load_error(SnapshotErrorCode::UnsupportedVersion, "Snapshot schema version is unsupported");
     }
     const bool is_v24_migration = version == kMinimumMigratableSchemaVersion;
+    const bool has_viability_section = version >= kViabilitySectionSchemaVersion;
 
     if (reserved != 0U) {
         return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot reserved header field must be zero");
@@ -2803,6 +2865,15 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         const auto section_result = read_v25_placement_and_resync_section(payload_reader, restored_state);
         if (!section_result.ok) {
             return section_result;
+        }
+    }
+
+    // v24 and v25 snapshots carry no viability section: every settlement
+    // starts its count of days below the viable size at zero.
+    if (has_viability_section) {
+        const auto viability_result = read_v26_viability_section(payload_reader, restored_state);
+        if (!viability_result.ok) {
+            return viability_result;
         }
     }
 

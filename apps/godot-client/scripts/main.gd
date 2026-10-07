@@ -17,6 +17,7 @@ const NavmeshManagerScript := preload("res://scripts/world/navmesh_manager.gd")
 const VillageDressingScript := preload("res://scripts/world/village_dressing.gd")
 const VegetationScatterScript := preload("res://scripts/world/vegetation_scatter.gd")
 const GroundViewScript := preload("res://scripts/ground/ground_view.gd")
+const DemoCaptureScript := preload("res://scripts/tools/demo_capture.gd")
 
 var _client: Node
 var _world_view: Node3D
@@ -31,6 +32,9 @@ var _sky_material: ProceduralSkyMaterial
 var _navmesh_manager: Node3D
 var _navmeshes_baked := false
 var _camera: Camera3D
+var _was_jumping := false
+## World units added around the outermost settlement when framing them all.
+const FRAME_MARGIN := 40.0
 
 func _ready() -> void:
 	_setup_environment()
@@ -83,6 +87,13 @@ func _ready() -> void:
 	add_child(_ground_view)
 
 	_client.connect_to_bridge()
+
+	var demo_capture_dir := OS.get_environment("UNIVERSECORE_DEMO_CAPTURE_DIR")
+	if demo_capture_dir != "":
+		var capture := DemoCaptureScript.new()
+		capture.name = "DemoCapture"
+		add_child(capture)
+		capture.run(demo_capture_dir, _panels, _world_view, _ground_view)
 
 	var schedule_env := OS.get_environment("UNIVERSECORE_SCREENSHOT_SCHEDULE")
 	var dir_env := OS.get_environment("UNIVERSECORE_SCREENSHOT_DIR")
@@ -207,6 +218,21 @@ func _apply_capture_view(center: Vector2) -> void:
 	capture.global_position = Vector3(center.x + offset.x, ground_at_eye + offset.y, center.y + offset.z)
 	capture.look_at(Vector3(center.x + look.x, ground_at_target + look.y, center.y + look.z))
 	capture.current = true
+
+## Frames every inhabited settlement: centred on their midpoint, backed off
+## to fit the farthest one with a margin. A single settlement keeps the view.
+func _frame_all_settlements() -> void:
+	var points: Array = _world_view.active_settlement_points()
+	if _camera == null or points.size() < 2:
+		return
+	var sum := Vector2.ZERO
+	for point in points:
+		sum += point
+	var centre: Vector2 = sum / float(points.size())
+	var radius := 0.0
+	for point in points:
+		radius = maxf(radius, centre.distance_to(point))
+	_camera.frame_area(centre.x, centre.y, radius + FRAME_MARGIN)
 
 func _active_settlements(settlements: Array) -> Array:
 	var active: Array = []
@@ -365,6 +391,12 @@ func _apply_world_message(message: Dictionary) -> void:
 			_world_view.set_tick(int(message.get("tick", 0)))
 			_apply_day_night(int(message.get("tick", 0)))
 			_world_view.set_simulation_playback(bool(payload.get("paused", true)), int(payload.get("speed", 1)))
+			# A long jump can found new settlements well outside the first view,
+			# so when one finishes, back the camera off to show them all.
+			var is_jumping: bool = payload.get("targetYear") != null
+			if _was_jumping and not is_jumping:
+				_frame_all_settlements()
+			_was_jumping = is_jumping
 		"error":
 			push_warning("UniverseCore error: %s" % payload.get("message", "unknown"))
 		_:

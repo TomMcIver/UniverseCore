@@ -7,6 +7,7 @@
 #include <iostream>
 #include <limits>
 #include <unordered_map>
+#include <optional>
 #include <unordered_set>
 #include <variant>
 
@@ -536,9 +537,11 @@ int main() {
             auto no_omniscience_config = config;
             no_omniscience_config.initial_population = 300;
             no_omniscience_config.initial_region_count = 1;
-            no_omniscience_config.base_region_area_units = 60;
-            no_omniscience_config.initial_household_food_units = 10;
-            no_omniscience_config.food_production_scale_percent = 90;
+            // Founding is pressure-driven (ADR 0002), so this needs one settlement that
+            // starts over the population threshold, on land that survives its first
+            // split; the old starved-out world (60 land units) founds nothing now.
+            no_omniscience_config.initial_settlements_per_region = 1;
+            no_omniscience_config.base_region_area_units = 480;
 
             universe::Simulation no_omniscience_run{no_omniscience_config};
             no_omniscience_run.run_years(220);
@@ -671,7 +674,20 @@ int main() {
                         continue;
                     }
 
-                    const auto observer_id = founded_observers.front();
+                    // A settlement now lives for decades before it goes extinct (founding is
+                    // pressure-driven, ADR 0002), so the first observer may have died or
+                    // lost the knowledge by then. The case needs an observer who kept it.
+                    std::optional<universe::PersonId> retained_observer;
+                    for (const auto candidate_id : founded_observers) {
+                        if (run.known_settlement_status(candidate_id, founded_payload.settlement_id).has_value()) {
+                            retained_observer = candidate_id;
+                            break;
+                        }
+                    }
+                    if (!retained_observer.has_value()) {
+                        continue;
+                    }
+                    const auto observer_id = *retained_observer;
                     require(
                         !run.person_remembers_event(observer_id, event.id),
                         "settlement extinction currently has zero direct observer memories");
@@ -692,9 +708,13 @@ int main() {
             auto stale_settlement_config = config;
             stale_settlement_config.initial_population = 300;
             stale_settlement_config.initial_region_count = 1;
-            stale_settlement_config.base_region_area_units = 60;
-            stale_settlement_config.initial_household_food_units = 10;
-            stale_settlement_config.food_production_scale_percent = 90;
+            // Founding is pressure-driven (ADR 0002), so the founded-then-extinct
+            // case needs one settlement that starts over the population
+            // threshold, on enough land to survive its first split. The old
+            // starved-out stress world (60 land units) now loses everyone before
+            // anything is founded, so it no longer produces the case.
+            stale_settlement_config.initial_settlements_per_region = 1;
+            stale_settlement_config.base_region_area_units = 480;
 
             universe::Simulation stale_settlement_run{stale_settlement_config};
             stale_settlement_run.run_years(220);
@@ -1176,6 +1196,9 @@ int main() {
         m3_success.seed = 93;
         m3_success.initial_population = 260;
         m3_success.initial_region_count = 2;
+        // Founding is pressure-driven (ADR 0002): each region starts as one settlement
+        // of about 130 people, over the split threshold, instead of about four of 30.
+        m3_success.initial_settlements_per_region = 1;
         m3_success.base_region_area_units = 130;
         m3_success.initial_household_food_units = 90;
         m3_success.food_production_scale_percent = 105;
