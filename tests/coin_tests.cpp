@@ -81,8 +81,9 @@ void test_coin_survives_a_snapshot_round_trip() {
 }
 
 void test_older_snapshots_load_with_no_coin() {
+    // A fresh world: merchants exist only from schema v28, and none is trained
+    // before the first yearly boundary, so it can stand in for a real v26 file.
     universe::Simulation source{default_layout_config(5)};
-    source.run_years(1);
     require(total_coin(source.state()) > 0, "the source world has coin to lose");
     const auto v26 = snapshot_test::downgrade_to_v26(source.save_snapshot(), source.state());
 
@@ -117,7 +118,8 @@ struct CoinSectionLayout {
 
 CoinSectionLayout coin_section_layout(const universe::Simulation& source, const std::size_t snapshot_size) {
     const auto& state = source.state();
-    const auto start = snapshot_size - snapshot_test::coin_section_size(state);
+    // The coin section is followed by the merchant memory section.
+    const auto start = snapshot_size - snapshot_test::trailing_sections_size(state);
     return CoinSectionLayout{
         .settlement_count_offset = start,
         .household_count_offset = start + snapshot_test::kCountSize + (state.settlements.size() * snapshot_test::kCoinRecordSize),
@@ -191,7 +193,10 @@ void test_snapshot_rejects_corrupt_coin_sections() {
         }),
         universe::SnapshotErrorCode::InvalidState, "a world coin total that overflows must be rejected");
     require_load_fails_with(
-        corrupt([&](auto& b) { b.resize(b.size() - 4U); }),
+        corrupt([&](auto& b) {
+            // Cut the merchant section off, then four more bytes out of the coin section.
+            b.resize(b.size() - snapshot_test::merchant_section_size(source.state()) - 4U);
+        }),
         universe::SnapshotErrorCode::TruncatedData, "a truncated coin section must be rejected");
 }
 

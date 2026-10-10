@@ -62,6 +62,7 @@ enum class SeedDomain : std::uint64_t {
     CohortSexSplit = 0xA85D31F70C94BE26ULL,
     CohortRealization = 0x1C63BE85A4F209D7ULL,
     RegionPosition = 0x5AE837C6D1B0F294ULL,
+    MerchantSelection = 0x8E41D7B26C0A93F5ULL,
     SettlementPosition = 0xE29B47C0A6D3158FULL,
     HouseholdPosition = 0x76D4C1A9E38F502BULL,
     Schedule = 0x3B96A1D0E4C75F28ULL,

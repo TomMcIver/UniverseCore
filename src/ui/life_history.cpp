@@ -39,6 +39,8 @@ constexpr std::array<std::pair<LifeEntryKind, std::string_view>, 11> kEntryKindL
             return "quarrier";
         case Occupation::CraftWorker:
             return "crafter";
+        case Occupation::Merchant:
+            return "merchant";
     }
     return "unknown job";
 }

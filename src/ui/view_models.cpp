@@ -113,6 +113,7 @@ void write_settlement_economy(std::ostringstream& out, const SettlementEconomyVi
         << ",\"WoodGatherer\":" << view.wood_gatherers
         << ",\"StoneExtractor\":" << view.stone_extractors
         << ",\"CraftWorker\":" << view.craft_workers
+        << ",\"Merchant\":" << view.merchants
         << ",\"Unallocated\":" << view.unallocated_workers
         << "}"
         << ",\"wealth\":{"
@@ -270,6 +271,7 @@ std::optional<SettlementEconomyView> build_settlement_economy(const SimulationCo
         .wood_gatherers = summary_it->wood_gatherers,
         .stone_extractors = summary_it->stone_extractors,
         .craft_workers = summary_it->craft_workers,
+        .merchants = summary_it->merchants,
         .unallocated_workers = summary_it->unallocated_workers,
         .min_household_wealth = settlement->last_min_household_wealth,
         .median_household_wealth = settlement->last_median_household_wealth,

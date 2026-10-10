@@ -565,6 +565,12 @@ int main(int argc, char** argv) {
                 std::cout << "SettlementExtinct"
                           << " settlement=" << payload.settlement_id
                           << " region=" << payload.region_id;
+            } else if (event.type == universe::EventType::OccupationChanged) {
+                const auto& payload = std::get<universe::OccupationChangedEventPayload>(event.payload);
+                std::cout << "OccupationChanged"
+                          << " person=" << payload.person_id
+                          << " from=" << static_cast<unsigned>(payload.from)
+                          << " to=" << static_cast<unsigned>(payload.to);
             }
             std::cout << '\n';
         }
