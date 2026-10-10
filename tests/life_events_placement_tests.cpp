@@ -1,6 +1,8 @@
 #include "universe/simulation.hpp"
 #include "universe/snapshot.hpp"
 
+#include "snapshot_test_support.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -90,7 +92,7 @@ constexpr std::size_t kViabilityRecordSize = 16U;
 // Rewrites a v26 snapshot as v25 by removing the v26-only section (settlement
 // viability counters) that sits immediately before the 16-byte aggregate
 // demography tail.
-std::vector<std::byte> downgrade_to_v25(const std::vector<std::byte>& v26_bytes, const universe::WorldState& state) {
+std::vector<std::byte> downgrade_v26_to_v25(const std::vector<std::byte>& v26_bytes, const universe::WorldState& state) {
     const auto section_size = 8U + (state.settlements.size() * kViabilityRecordSize);
     const auto tail_start = v26_bytes.size() - kAggregateTotalsTailSize;
     const auto section_start = tail_start - section_size;
@@ -106,6 +108,12 @@ std::vector<std::byte> downgrade_to_v25(const std::vector<std::byte>& v26_bytes,
     const std::span<const std::byte> payload{v25_bytes.data() + kSnapshotHeaderSize, payload_size};
     write_u64_le(v25_bytes, 16U, universe::snapshot_hash64(payload));
     return v25_bytes;
+}
+
+// Rewrites a current snapshot as v25: strips the v27 coin section, then the v26
+// viability section.
+std::vector<std::byte> downgrade_to_v25(const std::vector<std::byte>& current_bytes, const universe::WorldState& state) {
+    return downgrade_v26_to_v25(snapshot_test::downgrade_to_v26(current_bytes, state), state);
 }
 
 // Rewrites a v25 snapshot as v24 by removing the v25-only section that sits
@@ -497,11 +505,12 @@ void test_v26_viability_counters_survive_save_load_continuation() {
 std::vector<std::byte> with_viability_counters(
     std::vector<std::byte> bytes,
     const std::size_t settlement_count,
+    const std::size_t coin_section_bytes,
     const std::size_t settlement_index,
     const std::uint32_t days_below_viable_size,
     const std::uint32_t days_under_food_strain) {
     const auto section_size = 8U + (settlement_count * kViabilityRecordSize);
-    const auto section_start = bytes.size() - kAggregateTotalsTailSize - section_size;
+    const auto section_start = bytes.size() - coin_section_bytes - kAggregateTotalsTailSize - section_size;
     const auto offset = section_start + 8U + (settlement_index * kViabilityRecordSize) + 8U;
     for (std::size_t i = 0; i < 4U; ++i) {
         bytes[offset + i] = static_cast<std::byte>((days_below_viable_size >> (8U * i)) & 0xFFU);
@@ -523,7 +532,7 @@ void test_snapshot_rejects_viability_counters_beyond_elapsed_time() {
         universe::Simulation destination{universe::SimulationConfig{.seed = 999U, .initial_population = 10U}};
         require(
             universe::Simulation::load_snapshot(
-                with_viability_counters(bytes, settlement_count, 0U, elapsed_days, elapsed_days), destination).ok,
+                with_viability_counters(bytes, settlement_count, snapshot_test::coin_section_size(source.state()), 0U, elapsed_days, elapsed_days), destination).ok,
             "both counters may equal the number of complete elapsed days");
         const auto before_rejection = destination.save_snapshot();
 
@@ -531,7 +540,7 @@ void test_snapshot_rejects_viability_counters_beyond_elapsed_time() {
             const auto below_days = elapsed_days + (invalid_strain ? 0U : 1U);
             const auto strain_days = elapsed_days + (invalid_strain ? 1U : 0U);
             const auto result = universe::Simulation::load_snapshot(
-                with_viability_counters(bytes, settlement_count, 0U, below_days, strain_days), destination);
+                with_viability_counters(bytes, settlement_count, snapshot_test::coin_section_size(source.state()), 0U, below_days, strain_days), destination);
             require(!result.ok, "neither daily counter may exceed elapsed days");
             require(result.code == universe::SnapshotErrorCode::InvalidState, "an impossible viability counter is an invalid state");
             require(destination.save_snapshot() == before_rejection, "rejecting an impossible counter must leave the destination intact");

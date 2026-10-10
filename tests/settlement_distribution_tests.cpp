@@ -35,8 +35,10 @@ bool is_arable_start(const universe::Simulation& sim) {
 // neighbour could have absorbed it. ADR 0002 absorbs only into a viable neighbour
 // in range, so a lone survivor or an isolated hamlet legitimately stays.
 void run_scenario_checking_every_year(universe::Simulation& sim) {
+    const auto starting_coin = total_coin(sim.state());
     for (int year = 0; year < kDistributionYears; ++year) {
         sim.run_years(1);
+        require(total_coin(sim.state()) == starting_coin, "total coin must never change as settlements split and merge");
         for (const auto* settlement : active_settlements(sim.state())) {
             require(
                 settlement->days_below_viable_size <= universe::kAbsorptionBelowViableDays ||

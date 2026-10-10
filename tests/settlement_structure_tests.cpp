@@ -318,8 +318,10 @@ void test_settlements_below_viable_size_for_five_years_are_absorbed_into_a_viabl
             const auto events_before = sim.state().event_log.size();
             const auto before = snapshot_before(sim.state());
             const auto household_before = household_of_living_people(sim.state());
+            const auto coin_before = total_coin(sim.state());
             sim.run_years(1);
 
+            require(total_coin(sim.state()) == coin_before, "absorbing a settlement must not change total coin");
             const auto absorptions = absorptions_since(sim.state(), events_before);
             for (const auto& absorption : absorptions) {
                 const auto& absorbed = settlement_by_id(sim.state(), absorption.absorbed_id);
@@ -338,6 +340,7 @@ void test_settlements_below_viable_size_for_five_years_are_absorbed_into_a_viabl
                 // Nothing is left behind in the absorbed settlement.
                 require(absorbed.access_share_points == 0U, "an absorbed settlement keeps no access share");
                 require(absorbed.commons_food.value == 0, "an absorbed settlement keeps no commons food");
+                require(absorbed.coin == 0, "an absorbed settlement keeps no coin");
                 require(
                     absorbed.materials.wood.value == 0 && absorbed.materials.stone.value == 0 &&
                         absorbed.materials.timber.value == 0 && absorbed.materials.basic_tool.value == 0,
@@ -410,9 +413,12 @@ void test_absorption_in_a_demoted_region_moves_the_aggregate_ledger() {
 
         for (int year = 0; year < kYears; ++year) {
             const auto events_before = sim.state().event_log.size();
+            const auto coin_before = total_coin(sim.state());
             sim.run_years(1);
+            require(total_coin(sim.state()) == coin_before, "absorbing a demoted settlement must not change total coin");
             const auto absorptions = absorptions_since(sim.state(), events_before);
             for (const auto& absorption : absorptions) {
+                require(settlement_by_id(sim.state(), absorption.absorbed_id).coin == 0, "an absorbed settlement keeps no coin");
                 require_absorbed_ledger_empty(sim.state(), absorption.absorbed_id);
                 ++absorptions_checked;
             }

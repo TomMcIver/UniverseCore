@@ -132,6 +132,11 @@ if(UNIVERSECORE_BUILD_TESTS)
     add_test(NAME universe_settlement_structure_tests COMMAND universe_settlement_structure_tests)
     set_tests_properties(universe_settlement_structure_tests PROPERTIES LABELS "fast")
 
+    add_executable(universe_coin_tests tests/coin_tests.cpp)
+    target_link_libraries(universe_coin_tests PRIVATE universe_core)
+    add_test(NAME universe_coin_tests COMMAND universe_coin_tests)
+    set_tests_properties(universe_coin_tests PROPERTIES LABELS "fast")
+
     add_executable(universe_settlement_distribution_tests tests/settlement_distribution_tests.cpp)
     target_link_libraries(universe_settlement_distribution_tests PRIVATE universe_core)
     add_test(NAME universe_settlement_distribution_tests COMMAND universe_settlement_distribution_tests)

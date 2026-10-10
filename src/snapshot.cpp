@@ -270,6 +270,7 @@ constexpr std::uint16_t kMaxFacingDegreesExclusive = 360U;
 }
 
 constexpr std::uint16_t kViabilitySectionSchemaVersion = 26U;
+constexpr std::uint16_t kCoinSectionSchemaVersion = 27U;
 
 // Reads the schema v26 section: one record per settlement in ascending id
 // order, carrying the days it has spent below the viable size and under food
@@ -318,6 +319,83 @@ constexpr std::uint16_t kViabilitySectionSchemaVersion = 26U;
         settlement_it->second->days_under_food_strain = days_under_food_strain;
     }
 
+    return SnapshotLoadResult{.ok = true, .code = SnapshotErrorCode::None, .message = {}};
+}
+
+// Reads the schema v27 section, last in the payload: settlement commons coin
+// then household coin, each in ascending id order. Coin is never negative, and
+// the world's total fits an i64: coin only moves, so every later sum is safe.
+[[nodiscard]] SnapshotLoadResult read_v27_coin_section(SnapshotReader& reader, WorldState& state) {
+    std::int64_t world_total = 0;
+    std::uint64_t settlement_count = 0;
+    if (!reader.read_u64(settlement_count)) {
+        return load_error(SnapshotErrorCode::TruncatedData, "Snapshot coin section is truncated");
+    }
+    if (settlement_count != static_cast<std::uint64_t>(state.settlements.size())) {
+        return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot settlement coin count does not match settlements");
+    }
+    std::unordered_map<SettlementId, Settlement*> settlement_by_id;
+    for (auto& settlement : state.settlements) {
+        settlement_by_id.emplace(settlement.id, &settlement);
+    }
+    SettlementId previous_settlement = 0;
+    for (std::uint64_t i = 0; i < settlement_count; ++i) {
+        SettlementId id = 0;
+        std::int64_t coin = 0;
+        if (!reader.read_u64(id) || !reader.read_i64(coin)) {
+            return load_error(SnapshotErrorCode::TruncatedData, "Snapshot settlement coin record is truncated");
+        }
+        if (id <= previous_settlement) {
+            return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot settlement coin records must be in ascending id order");
+        }
+        previous_settlement = id;
+        const auto it = settlement_by_id.find(id);
+        if (it == settlement_by_id.end()) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot settlement coin references unknown settlement");
+        }
+        if (coin < 0) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot settlement coin is negative");
+        }
+        if (!checked_add_i64(world_total, coin, world_total)) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot total coin overflows");
+        }
+        it->second->coin = coin;
+    }
+
+    std::uint64_t household_count = 0;
+    if (!reader.read_u64(household_count)) {
+        return load_error(SnapshotErrorCode::TruncatedData, "Snapshot household coin section is truncated");
+    }
+    if (household_count != static_cast<std::uint64_t>(state.households.size())) {
+        return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot household coin count does not match households");
+    }
+    std::unordered_map<HouseholdId, Household*> household_by_id;
+    for (auto& household : state.households) {
+        household_by_id.emplace(household.id, &household);
+    }
+    HouseholdId previous_household = 0;
+    for (std::uint64_t i = 0; i < household_count; ++i) {
+        HouseholdId id = 0;
+        std::int64_t coin = 0;
+        if (!reader.read_u64(id) || !reader.read_i64(coin)) {
+            return load_error(SnapshotErrorCode::TruncatedData, "Snapshot household coin record is truncated");
+        }
+        if (id <= previous_household) {
+            return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot household coin records must be in ascending id order");
+        }
+        previous_household = id;
+        const auto it = household_by_id.find(id);
+        if (it == household_by_id.end()) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot household coin references unknown household");
+        }
+        if (coin < 0) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot household coin is negative");
+        }
+        if (!checked_add_i64(world_total, coin, world_total)) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot total coin overflows");
+        }
+        it->second->coin = coin;
+    }
     return SnapshotLoadResult{.ok = true, .code = SnapshotErrorCode::None, .message = {}};
 }
 
@@ -1156,6 +1234,19 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
     payload.write_u64(simulation.state_.aggregate_births_total);
     payload.write_u64(simulation.state_.aggregate_deaths_total);
 
+    // Schema v27 section, last in the payload: coin on every settlement commons
+    // then every household, in ascending id order.
+    payload.write_u64(static_cast<std::uint64_t>(settlement_order.size()));
+    for (const auto* settlement : settlement_order) {
+        payload.write_u64(settlement->id);
+        payload.write_i64(settlement->coin);
+    }
+    payload.write_u64(static_cast<std::uint64_t>(household_order.size()));
+    for (const auto* household : household_order) {
+        payload.write_u64(household->id);
+        payload.write_i64(household->coin);
+    }
+
     auto payload_bytes = payload.take();
     const auto payload_hash = fnv1a64(payload_bytes);
 
@@ -1197,6 +1288,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     }
     const bool is_v24_migration = version == kMinimumMigratableSchemaVersion;
     const bool has_viability_section = version >= kViabilitySectionSchemaVersion;
+    const bool has_coin_section = version >= kCoinSectionSchemaVersion;
 
     if (reserved != 0U) {
         return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot reserved header field must be zero");
@@ -2880,6 +2972,14 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     if (!payload_reader.read_u64(restored_state.aggregate_births_total) ||
         !payload_reader.read_u64(restored_state.aggregate_deaths_total)) {
         return load_error(SnapshotErrorCode::TruncatedData, "Snapshot aggregate demography totals are truncated");
+    }
+
+    // Snapshots before v27 carry no coin: every balance stays at zero.
+    if (has_coin_section) {
+        const auto coin_result = read_v27_coin_section(payload_reader, restored_state);
+        if (!coin_result.ok) {
+            return coin_result;
+        }
     }
 
     if (!payload_reader.fully_consumed()) {

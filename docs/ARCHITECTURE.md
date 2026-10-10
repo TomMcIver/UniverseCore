@@ -385,6 +385,10 @@ Current implementation status:
   - The counters are written in settlement-id order and cannot exceed elapsed whole days.
   - v24 and v25 snapshots migrate with both counters zeroed.
   - The v26 counter section follows the v25 section, before the aggregate demography totals, which remain the final 16 bytes.
+- snapshot schema v27 adds coin (ADR 0003): a conserved balance on every settlement commons and every household:
+  - The coin section is last in the payload, after the aggregate demography totals: a count and one (id, coin) record per settlement, then the same for households, each in ascending id order. Negative coin is rejected.
+  - v24, v25 and v26 snapshots migrate with every balance at zero.
+  - Coin is created once, at world creation, in proportion to each household's starting stock value (and each commons in proportion to its households); after that it only moves: demoting a region folds a household's coin into its settlement commons, and absorbing a settlement moves its commons coin to the survivor.
 
 Snapshot invariants:
 

@@ -45,6 +45,19 @@ inline universe::SimulationConfig single_settlement_config(const std::uint64_t s
     return config;
 }
 
+// Every unit of coin in the world: settlement commons plus households, active or
+// not. Coin is created once at world creation and only moves (ADR 0003).
+inline std::int64_t total_coin(const universe::WorldState& state) {
+    std::int64_t total = 0;
+    for (const auto& settlement : state.settlements) {
+        total += settlement.coin;
+    }
+    for (const auto& household : state.households) {
+        total += household.coin;
+    }
+    return total;
+}
+
 inline std::vector<const universe::Settlement*> active_settlements(const universe::WorldState& state) {
     std::vector<const universe::Settlement*> active;
     for (const auto& settlement : state.settlements) {
