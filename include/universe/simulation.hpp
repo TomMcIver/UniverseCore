@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "universe/resources.hpp"
+#include "universe/trade_pricing.hpp"
 #include "universe/seed.hpp"
 #include "universe/snapshot.hpp"
 #include "universe/time.hpp"
@@ -709,6 +710,10 @@ public:
     explicit Simulation(SimulationConfig config);
 
     [[nodiscard]] const WorldState& state() const noexcept;
+    // A settlement's price for each resource, derived from its own stock and daily
+    // need (ADR 0003). Computed from canonical state, never stored. Empty for an
+    // unknown or inactive settlement.
+    [[nodiscard]] std::optional<SettlementPrices> settlement_prices(SettlementId settlement_id) const;
     [[nodiscard]] SimulationTime time() const noexcept;
     [[nodiscard]] std::span<const AgentMemory> agent_memories() const noexcept;
     [[nodiscard]] std::vector<AgentMemory> memories_for_person(PersonId person_id) const;
