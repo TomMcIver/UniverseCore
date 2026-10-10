@@ -27,10 +27,6 @@ constexpr std::size_t kHeaderSize = 4U + 2U + 2U + 8U + 8U;
 // snapshot bytes, not real placement geometry.
 constexpr std::int64_t kMaxSnapshotPositionMagnitude = 1'000'000;
 constexpr std::int64_t kToolWearWorkUnitsPerBreak = 24;
-constexpr std::int64_t kWealthValueWood = 2;
-constexpr std::int64_t kWealthValueStone = 2;
-constexpr std::int64_t kWealthValueTimber = 4;
-constexpr std::int64_t kWealthValueBasicTool = 8;
 constexpr std::int64_t kDwellingCapacityBonusPerBuilding = 18;
 constexpr std::int64_t kFoodStoreCapacityBonusPerBuilding = 32;
 constexpr std::int64_t kWorkshopCapacityBonusPerBuilding = 14;
