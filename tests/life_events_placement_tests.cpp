@@ -532,7 +532,7 @@ void test_snapshot_rejects_viability_counters_beyond_elapsed_time() {
         universe::Simulation destination{universe::SimulationConfig{.seed = 999U, .initial_population = 10U}};
         require(
             universe::Simulation::load_snapshot(
-                with_viability_counters(bytes, settlement_count, snapshot_test::coin_section_size(source.state()), 0U, elapsed_days, elapsed_days), destination).ok,
+                with_viability_counters(bytes, settlement_count, snapshot_test::trailing_sections_size(source.state()), 0U, elapsed_days, elapsed_days), destination).ok,
             "both counters may equal the number of complete elapsed days");
         const auto before_rejection = destination.save_snapshot();
 
@@ -540,7 +540,7 @@ void test_snapshot_rejects_viability_counters_beyond_elapsed_time() {
             const auto below_days = elapsed_days + (invalid_strain ? 0U : 1U);
             const auto strain_days = elapsed_days + (invalid_strain ? 1U : 0U);
             const auto result = universe::Simulation::load_snapshot(
-                with_viability_counters(bytes, settlement_count, snapshot_test::coin_section_size(source.state()), 0U, below_days, strain_days), destination);
+                with_viability_counters(bytes, settlement_count, snapshot_test::trailing_sections_size(source.state()), 0U, below_days, strain_days), destination);
             require(!result.ok, "neither daily counter may exceed elapsed days");
             require(result.code == universe::SnapshotErrorCode::InvalidState, "an impossible viability counter is an invalid state");
             require(destination.save_snapshot() == before_rejection, "rejecting an impossible counter must leave the destination intact");

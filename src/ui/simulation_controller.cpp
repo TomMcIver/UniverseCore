@@ -430,7 +430,11 @@ std::vector<SettlementSummaryView> SimulationController::settlement_summaries() 
                     ++summary.craft_workers;
                     summary.craft_labour_available += labour_capacity;
                 } else {
+                    // Not assigned to settlement labour; merchants are shown separately.
                     ++summary.unallocated_workers;
+                    if (person->occupation == Occupation::Merchant) {
+                        ++summary.merchants;
+                    }
                 }
             }
         }

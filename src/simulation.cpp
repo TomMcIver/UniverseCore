@@ -6,6 +6,7 @@
 #include <array>
 #include <limits>
 #include <stdexcept>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -244,7 +245,11 @@ constexpr std::uint32_t kWorkDayChancePer10k = 7'000U;
     const Occupation occupation) noexcept {
     const auto day_seed = derive_seed(person_schedule_seed, SeedDomain::Schedule, food_period);
 
-    if (occupation != Occupation::None && seed_chance_per_10k(day_seed, kWorkDayChancePer10k)) {
+    // A merchant does no settlement work (ADR 0003), so it spends its days as an
+    // unassigned adult does: teaching, keeping records and discovering. Its days
+    // away on a trip will be modelled when trips exist.
+    if (occupation != Occupation::None && occupation != Occupation::Merchant &&
+        seed_chance_per_10k(day_seed, kWorkDayChancePer10k)) {
         return ActivityKind::Work;
     }
 
@@ -1344,6 +1349,8 @@ void Simulation::process_food_period(const std::uint64_t food_period) {
                 throw std::overflow_error("Craft available labour overflow");
             }
         } else {
+            // Unallocated means not assigned to settlement labour; a merchant does no
+            // settlement work, so it is counted here (the UI lists merchants separately).
             ++state_.unallocated_workers;
         }
     }
@@ -2263,6 +2270,7 @@ void Simulation::process_demography_period(const std::uint64_t demographic_year)
         occupations_before.emplace(person.id, person.occupation);
     }
     process_occupation_reassignment(demographic_year);
+    process_merchant_recruitment(demographic_year);
     record_occupation_changes(occupations_before);
 
     process_household_access_allocation();
@@ -3213,6 +3221,8 @@ void Simulation::demote_region_to_settlement_aggregate(const RegionId region_id)
         person.alive = false;
         person.occupation = Occupation::None;
     }
+    // A folded merchant is no longer a person to remember prices.
+    prune_merchant_memory();
 
     // Exact conservation: household food, materials and wealth move into the
     // settlement aggregate ledger rather than vanishing with the detail level.
@@ -6279,6 +6289,12 @@ void Simulation::process_occupation_reassignment(const std::uint64_t demographic
                     continue;
                 }
 
+                // A merchant is not a labour candidate: it is trained and
+                // retired by process_merchant_recruitment, not by allocation.
+                if (person->occupation == Occupation::Merchant) {
+                    continue;
+                }
+
                 candidates.push_back(Candidate{
                     .person = person,
                     .labour_capacity = productive_effort_for_person(*person),
@@ -6523,6 +6539,166 @@ void Simulation::process_occupation_reassignment(const std::uint64_t demographic
     }
 
     refresh_labour_aggregates();
+}
+
+// ADR 0003: trade grows where it pays. Once a year each settlement compares its
+// prices with those of the neighbours within a day's walk, on goods its commons
+// actually holds. If the best margin clears the threshold it trains one adult
+// as a merchant (seeded choice among its eligible adults who have no assignment, in ascending id
+// order); if none does, its merchants retire to ordinary labour. A world with
+// fewer than two active settlements has nowhere to trade, so it has no merchants.
+// This runs inside the occupation bracket, so every appointment and retirement
+// is recorded by the existing occupation-changed event.
+void Simulation::process_merchant_recruitment(const std::uint64_t demographic_year) {
+    std::vector<SettlementId> settlement_ids;
+    for (const auto& settlement : state_.settlements) {
+        if (settlement.active) {
+            settlement_ids.push_back(settlement.id);
+        }
+    }
+    std::sort(settlement_ids.begin(), settlement_ids.end());
+
+    std::unordered_map<SettlementId, SettlementPrices> prices;
+    for (const auto settlement_id : settlement_ids) {
+        if (const auto settlement_prices_now = settlement_prices(settlement_id); settlement_prices_now.has_value()) {
+            prices.emplace(settlement_id, *settlement_prices_now);
+        }
+    }
+
+    std::unordered_map<PersonId, Person*> person_by_id;
+    person_by_id.reserve(state_.people.size());
+    for (auto& person : state_.people) {
+        person_by_id.emplace(person.id, &person);
+    }
+
+    const bool has_trading_partner = settlement_ids.size() >= 2U;
+    for (const auto settlement_id : settlement_ids) {
+        const auto* settlement = find_settlement(settlement_id);
+        const auto own_prices_it = prices.find(settlement_id);
+        if (settlement == nullptr || own_prices_it == prices.end()) {
+            continue;
+        }
+
+        const std::array<bool, 5> holds{
+            settlement->commons_food.value > 0,
+            settlement->materials.wood.value > 0,
+            settlement->materials.stone.value > 0,
+            settlement->materials.timber.value > 0,
+            settlement->materials.basic_tool.value > 0,
+        };
+
+        std::vector<SettlementId> neighbour_ids;
+        std::optional<PriceMargin> best;
+        if (has_trading_partner) {
+            for (const auto other_id : settlement_ids) {
+                const auto* other = find_settlement(other_id);
+                const auto other_prices_it = prices.find(other_id);
+                if (other_id == settlement_id || other == nullptr || other_prices_it == prices.end() ||
+                    !within_days_of_walking(
+                        settlement->position_x, settlement->position_z, other->position_x, other->position_z, kDaysWalkKnownNeighbours)) {
+                    continue;
+                }
+                neighbour_ids.push_back(other_id);
+                const auto margin = best_margin(own_prices_it->second, other_prices_it->second, holds);
+                if (margin.has_value() && (!best.has_value() || margin->margin_permille > best->margin_permille)) {
+                    best = margin;
+                }
+            }
+        }
+        const bool trade_pays = margin_clears_threshold(best);
+
+        std::vector<Person*> merchants;
+        std::vector<Person*> candidates;
+        std::uint64_t eligible_adults = 0;
+        for (const auto& household : state_.households) {
+            if (household.settlement_id != settlement_id) {
+                continue;
+            }
+            for (const auto member_id : household.member_ids) {
+                const auto person_it = person_by_id.find(member_id);
+                if (person_it == person_by_id.end() || !person_it->second->alive) {
+                    continue;
+                }
+                auto* person = person_it->second;
+                if (person->occupation == Occupation::Merchant) {
+                    merchants.push_back(person);
+                }
+                if (occupation_eligible_for_productive_work(*person)) {
+                    ++eligible_adults;
+                    // Spare means unassigned: the labour allocation that just ran left
+                    // this adult with no work, so training them costs no production.
+                    if (person->occupation == Occupation::None) {
+                        candidates.push_back(person);
+                    }
+                }
+            }
+        }
+        const auto by_id = [](const Person* lhs, const Person* rhs) { return lhs->id < rhs->id; };
+        std::sort(merchants.begin(), merchants.end(), by_id);
+        std::sort(candidates.begin(), candidates.end(), by_id);
+
+        // A merger can leave more merchants than the bound allows: the highest
+        // ids return to ordinary work.
+        while (merchants.size() > kMaxMerchantsPerSettlement) {
+            merchants.back()->occupation = Occupation::None;
+            merchants.pop_back();
+        }
+
+        const auto action = decide_merchant_action(
+            trade_pays, merchants.size(), eligible_adults, candidates.size(), settlement->days_under_food_strain > 0U);
+        if (action == MerchantAction::Retire) {
+            for (auto* merchant : merchants) {
+                merchant->occupation = Occupation::None;
+            }
+            continue;
+        }
+        if (action != MerchantAction::Appoint) {
+            continue;
+        }
+
+        const auto selection_seed = derive_seed(settlement_seed(settlement_id), SeedDomain::MerchantSelection, demographic_year);
+        auto* chosen = candidates[static_cast<std::size_t>(seed_random_bounded(selection_seed, candidates.size()))];
+        chosen->occupation = Occupation::Merchant;
+
+        // A new merchant knows its home settlement's prices and its neighbours'.
+        std::vector<SettlementId> known{settlement_id};
+        known.insert(known.end(), neighbour_ids.begin(), neighbour_ids.end());
+        for (const auto known_id : known) {
+            const auto known_prices = prices.at(known_id);
+            for (std::size_t resource = 0; resource < known_prices.millicoin.size(); ++resource) {
+                state_.merchant_price_memory.push_back(MerchantPriceMemory{
+                    .merchant_id = chosen->id,
+                    .settlement_id = known_id,
+                    .resource = static_cast<ResourceType>(resource),
+                    .price_millicoin = known_prices.millicoin[resource],
+                    .seen_at = state_.time,
+                });
+            }
+        }
+    }
+
+    prune_merchant_memory();
+}
+
+// A merchant who is gone, dead or no longer a merchant keeps no memory, and the
+// rest stays in (merchant, settlement, resource) order.
+void Simulation::prune_merchant_memory() {
+    std::unordered_set<PersonId> living_merchants;
+    for (const auto& person : state_.people) {
+        if (person.alive && person.occupation == Occupation::Merchant) {
+            living_merchants.insert(person.id);
+        }
+    }
+    std::erase_if(state_.merchant_price_memory, [&living_merchants](const MerchantPriceMemory& memory) {
+        return !living_merchants.contains(memory.merchant_id);
+    });
+    std::sort(
+        state_.merchant_price_memory.begin(),
+        state_.merchant_price_memory.end(),
+        [](const MerchantPriceMemory& lhs, const MerchantPriceMemory& rhs) {
+            return std::tie(lhs.merchant_id, lhs.settlement_id, lhs.resource) <
+                std::tie(rhs.merchant_id, rhs.settlement_id, rhs.resource);
+        });
 }
 
 void Simulation::refresh_labour_aggregates() {
@@ -8341,7 +8517,12 @@ void Simulation::process_construction(const std::uint64_t demographic_year) {
                     continue;
                 }
 
-                auto& labour_pool = person.occupation == Occupation::None ? unallocated_labour_capacity : allocated_labour_capacity;
+                // Unassigned adults are the labour construction draws on. A merchant is
+                // one of them until trips exist: it does no assigned work, so it counts
+                // as unallocated rather than as allocated labour. (A merchant away on a
+                // trip will be left out when trips are built.)
+                const bool is_unassigned = person.occupation == Occupation::None || person.occupation == Occupation::Merchant;
+                auto& labour_pool = is_unassigned ? unallocated_labour_capacity : allocated_labour_capacity;
                 if (!checked_add_i64(labour_pool, productive_effort_for_person(person), labour_pool)) {
                     throw std::overflow_error("Construction labour capacity overflow");
                 }

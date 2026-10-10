@@ -78,6 +78,7 @@ struct SettlementEconomyView {
     std::uint64_t wood_gatherers{};
     std::uint64_t stone_extractors{};
     std::uint64_t craft_workers{};
+    std::uint64_t merchants{};
     std::uint64_t unallocated_workers{};
     std::int64_t min_household_wealth{};
     std::int64_t median_household_wealth{};

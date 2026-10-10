@@ -389,6 +389,11 @@ Current implementation status:
   - The coin section is last in the payload, after the aggregate demography totals: a count and one (id, coin) record per settlement, then the same for households, each in ascending id order. Negative coin is rejected.
   - v24, v25 and v26 snapshots migrate with every balance at zero.
   - Coin is created once, at world creation, in proportion to each household's starting stock value (and each commons in proportion to its households); after that it only moves: demoting a region folds a household's coin into its settlement commons, and absorbing a settlement moves its commons coin to the survivor.
+- snapshot schema v28 adds merchant price memory (ADR 0003): what each merchant last saw of settlement prices:
+  - The section is last in the payload, after the coin section: a count, then one 33-byte row per remembered price (merchant id, settlement id, resource byte, price in milli-coin, time seen), in strictly ascending (merchant, settlement, resource) order.
+  - A row must belong to a living merchant, name a known settlement, hold a price between the floor and ceiling of its resource, and not be dated after the simulation time.
+  - v24-v27 snapshots migrate with no remembered prices. `Occupation::Merchant` (value 6) is accepted wherever an occupation is read.
+  - Merchants are trained and retired once a year inside the occupation bracket (`process_merchant_recruitment`), so each change is recorded by the existing occupation-changed event.
 
 Settlement prices (ADR 0003, `trade_pricing.hpp`, `Simulation::settlement_prices`):
 

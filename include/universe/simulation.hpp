@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "universe/resources.hpp"
+#include "universe/trade_merchants.hpp"
 #include "universe/trade_pricing.hpp"
 #include "universe/seed.hpp"
 #include "universe/snapshot.hpp"
@@ -42,6 +43,9 @@ enum class Occupation : std::uint8_t {
     WoodGatherer = 3,
     StoneExtractor = 4,
     CraftWorker = 5,
+    // Carries goods between settlements (ADR 0003). Takes no part in labour
+    // allocation; trained and retired by process_merchant_recruitment.
+    Merchant = 6,
 };
 
 // Ticket #37: a person's activity for the current day. Work/Social/
@@ -691,6 +695,9 @@ struct WorldState {
     std::vector<RegionLodState> region_lod_states{};
     std::vector<PopulationCohort> population_cohorts{};
     std::vector<SettlementAggregateState> settlement_aggregates{};
+    // What each merchant last saw of settlement prices (ADR 0003), sorted by
+    // (merchant, settlement, resource). A merchant reasons only from these.
+    std::vector<MerchantPriceMemory> merchant_price_memory{};
     std::vector<Person> people{};
     std::vector<Household> households{};
     std::vector<RegionEnvironmentState> regions{};
@@ -812,6 +819,8 @@ private:
     void process_food_period(std::uint64_t food_period);
     void process_materials_period(std::uint64_t food_period);
     void process_occupation_reassignment(std::uint64_t demographic_year);
+    void process_merchant_recruitment(std::uint64_t demographic_year);
+    void prune_merchant_memory();
     void process_household_access_allocation();
     void process_household_stabilization_transfers();
     void process_local_exchange(std::uint64_t demographic_year);
