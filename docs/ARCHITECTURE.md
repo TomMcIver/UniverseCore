@@ -390,6 +390,14 @@ Current implementation status:
   - v24, v25 and v26 snapshots migrate with every balance at zero.
   - Coin is created once, at world creation, in proportion to each household's starting stock value (and each commons in proportion to its households); after that it only moves: demoting a region folds a household's coin into its settlement commons, and absorbing a settlement moves its commons coin to the survivor.
 
+Settlement prices (ADR 0003, `trade_pricing.hpp`, `Simulation::settlement_prices`):
+
+- A price is derived from state on demand and never stored, so it needs no snapshot field and a reload prices identically.
+- price = base x multiplier. The base is the household wealth value of the resource times ten coin, in milli-coin per unit (food 10, wood 20, stone 20, timber 40, tool 80 coin). The multiplier is thirty days of target cover divided by actual days of cover, clamped to 0.25x-4x, in integer arithmetic.
+- Stock is the commons plus detailed households' holdings, plus the aggregate ledger for food in a demoted region. Daily need is the people's food requirement (detailed members and cohorts), outstanding construction and crafting demand spread over thirty days for wood, stone and timber, and one tool-wear break per twenty-four worker-days for tools.
+- No need is the floor price; no stock against a need is the ceiling. A demoted region approximates workers from the aggregate eligible-worker share until level-of-detail trade handling (#74).
+- Thirty-day cover, the thirty-day horizon and the 0.25x-4x range are first values, calibrated by #76.
+
 Snapshot invariants:
 
 - snapshots are canonical simulation state, not debug dumps or raw memory images

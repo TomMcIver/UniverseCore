@@ -308,14 +308,9 @@ constexpr std::uint64_t kInstitutionTargetMembers = 6;
 constexpr std::uint32_t kInstitutionTeachingConfidenceCapPer10k = 9'200;
 constexpr std::array<std::uint32_t, 3> kBasicDiscoveryKeys{1U, 2U, 3U};
 constexpr std::int64_t kFoodCommonsTransferReserveDays = 14;
-constexpr std::int64_t kWealthValueWood = 2;
-constexpr std::int64_t kWealthValueStone = 2;
-constexpr std::int64_t kWealthValueTimber = 4;
-constexpr std::int64_t kWealthValueBasicTool = 8;
 // Coin endowment (ADR 0003): the one place coin is created. A household starts
-// with this much coin per unit of starting stock value, and its settlement's
-// commons with this percentage of what its households were given.
-constexpr std::int64_t kCoinPerStockValue = 10;
+// with kCoinPerStockValue coin per unit of starting stock value (trade_pricing.hpp),
+// and its settlement's commons with this percentage of what its households were given.
 constexpr std::int64_t kCommonsCoinPercentOfHouseholds = 25;
 constexpr std::int64_t kDwellingTimberRequired = 20;
 constexpr std::int64_t kDwellingStoneRequired = 8;
@@ -5239,6 +5234,120 @@ void Simulation::endow_initial_coin() {
             ? 0
             : mul_checked(it->second, kCommonsCoinPercentOfHouseholds) / 100;
     }
+}
+
+// Prices follow days of cover (ADR 0003): a settlement's stock of each resource
+// against its own daily need. Stock is the commons plus what its detailed
+// households hold, plus the aggregate ledger for food when its region is
+// demoted. Need is the daily food requirement of its people (detailed members
+// and cohorts), outstanding construction and crafting demand spread over a
+// horizon for wood, stone and timber, and tool wear for tools. Everything is read
+// from canonical state, so nothing is stored and a reload prices identically.
+std::optional<SettlementPrices> Simulation::settlement_prices(const SettlementId settlement_id) const {
+    const auto* settlement = find_settlement(settlement_id);
+    if (settlement == nullptr || !settlement->active) {
+        return std::nullopt;
+    }
+
+    // A price query never throws: an input too large to hold saturates, and the
+    // pricing curve then reads it as a very large stock or need.
+    constexpr auto kSaturated = std::numeric_limits<std::int64_t>::max();
+    const auto add = [](const std::int64_t lhs, const std::int64_t rhs) {
+        std::int64_t sum = 0;
+        return checked_add_i64(lhs, rhs, sum) ? sum : kSaturated;
+    };
+    const auto mul = [](const std::int64_t lhs, const std::int64_t rhs) {
+        std::int64_t product = 0;
+        return checked_mul_i64(lhs, rhs, product) ? product : kSaturated;
+    };
+    const auto held = [](const std::int64_t value) { return std::max<std::int64_t>(0, value); };
+
+    std::unordered_map<PersonId, const Person*> person_by_id;
+    person_by_id.reserve(state_.people.size());
+    for (const auto& person : state_.people) {
+        person_by_id.emplace(person.id, &person);
+    }
+
+    std::int64_t food_stock = held(settlement->commons_food.value);
+    std::int64_t wood_stock = held(settlement->materials.wood.value);
+    std::int64_t stone_stock = held(settlement->materials.stone.value);
+    std::int64_t timber_stock = held(settlement->materials.timber.value);
+    std::int64_t tool_stock = held(settlement->materials.basic_tool.value);
+    std::int64_t daily_food_need = 0;
+    std::uint64_t alive_population = 0;
+    std::uint64_t eligible_workers = 0;
+    std::uint64_t productive_workers = 0;
+
+    for (const auto& household : state_.households) {
+        if (household.settlement_id != settlement_id) {
+            continue;
+        }
+        // Household owned_materials are the settlement stock shared out among its
+        // households each day, so only settlement->materials is counted here.
+        food_stock = add(food_stock, held(household.resources.food_inventory.value));
+        for (const auto member_id : household.member_ids) {
+            const auto person_it = person_by_id.find(member_id);
+            if (person_it == person_by_id.end() || !person_it->second->alive) {
+                continue;
+            }
+            const auto& person = *person_it->second;
+            ++alive_population;
+            daily_food_need = add(daily_food_need, food_requirement_for_person(person));
+            if (occupation_eligible_for_productive_work(person)) {
+                ++eligible_workers;
+            }
+            if (is_productive_occupation(person.occupation)) {
+                ++productive_workers;
+            }
+        }
+    }
+
+    // A demoted region holds its people as cohorts and its food in a ledger.
+    for (const auto& aggregate : state_.settlement_aggregates) {
+        if (aggregate.settlement_id == settlement_id) {
+            food_stock = add(food_stock, held(aggregate.food_inventory));
+        }
+    }
+    for (const auto& cohort : state_.population_cohorts) {
+        if (cohort.settlement_id != settlement_id) {
+            continue;
+        }
+        const auto population = static_cast<std::int64_t>(cohort.population);
+        const auto per_person = cohort.age_band == CohortAgeBand::Child
+            ? food_parameters_.child_daily_food_units
+            : food_parameters_.adult_daily_food_units;
+        daily_food_need = add(daily_food_need, mul(population, per_person));
+        alive_population += cohort.population;
+        if (cohort.age_band == CohortAgeBand::YoungAdult || cohort.age_band == CohortAgeBand::Adult) {
+            const auto workers = (cohort.population * kAggregateEligibleWorkersPer10k) / 10'000U;
+            eligible_workers += workers;
+            productive_workers += workers;
+        }
+    }
+
+    const auto construction = construction_demand_for_settlement(settlement_id, state_.buildings);
+    const auto tool_target = material_targets_for_settlement(alive_population, eligible_workers).basic_tool_target;
+    const auto tool_deficit = std::max<std::int64_t>(0, tool_target - tool_stock);
+    // Wood is needed to craft only the timber not already in stock.
+    const auto timber_to_craft = std::max<std::int64_t>(0, construction.timber_remaining - timber_stock);
+    const auto wood_outstanding = add(
+        mul(timber_to_craft, material_parameters_.wood_per_timber),
+        mul(tool_deficit, material_parameters_.wood_per_basic_tool));
+    const auto stone_outstanding = add(construction.stone_remaining, mul(tool_deficit, material_parameters_.stone_per_basic_tool));
+
+    SettlementPrices prices{};
+    const auto price_into = [&prices](const ResourceType resource, const std::int64_t stock, const std::int64_t need_milli) {
+        prices.millicoin[static_cast<std::size_t>(resource)] = price_millicoin(resource, stock, need_milli);
+    };
+    price_into(ResourceType::Food, food_stock, mul(daily_food_need, kNeedMilliPerUnit));
+    price_into(ResourceType::Wood, wood_stock, daily_need_milli_from_outstanding(wood_outstanding));
+    price_into(ResourceType::Stone, stone_stock, daily_need_milli_from_outstanding(stone_outstanding));
+    price_into(ResourceType::Timber, timber_stock, daily_need_milli_from_outstanding(construction.timber_remaining));
+    price_into(
+        ResourceType::BasicTool,
+        tool_stock,
+        mul(static_cast<std::int64_t>(productive_workers), kNeedMilliPerUnit) / kToolWearWorkUnitsPerBreak);
+    return prices;
 }
 
 void Simulation::initialize_settlement_aggregates() {

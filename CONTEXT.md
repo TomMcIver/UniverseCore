@@ -46,6 +46,14 @@ _Avoid_: small village, outpost
 A conserved integer balance held by settlement commons and households. It is created once at world creation and only ever moves; it is a currency, not a resource type.
 _Avoid_: money (unqualified), gold, currency resource
 
+**Price**:
+What one unit of a resource costs in a settlement, in coin. It follows the settlement's days of cover: it rises as stock falls against need and stays between a quarter and four times its base. Derived from state, never stored.
+_Avoid_: rate, value (value means the household wealth points base prices are built from)
+
+**Days of cover**:
+How many days a settlement's stock of a resource lasts at its own daily need.
+_Avoid_: runway, buffer (the commons reserve is a separate food rule)
+
 **Merchant**:
 A person whose occupation is carrying goods between settlements to sell at a profit. Settlements train merchants only when trading pays.
 _Avoid_: trader, caravan, NPC vendor

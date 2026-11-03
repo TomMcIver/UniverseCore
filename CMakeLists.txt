@@ -10,6 +10,7 @@ option(UNIVERSECORE_BUILD_UI "Build SDL3 + Dear ImGui simulation inspector" OFF)
 
 add_library(universe_core
     src/resources.cpp
+    src/trade_pricing.cpp
     src/simulation.cpp
     src/snapshot.cpp
     src/demo_scenario.cpp
@@ -136,6 +137,11 @@ if(UNIVERSECORE_BUILD_TESTS)
     target_link_libraries(universe_coin_tests PRIVATE universe_core)
     add_test(NAME universe_coin_tests COMMAND universe_coin_tests)
     set_tests_properties(universe_coin_tests PROPERTIES LABELS "fast")
+
+    add_executable(universe_trade_pricing_tests tests/trade_pricing_tests.cpp)
+    target_link_libraries(universe_trade_pricing_tests PRIVATE universe_core)
+    add_test(NAME universe_trade_pricing_tests COMMAND universe_trade_pricing_tests)
+    set_tests_properties(universe_trade_pricing_tests PROPERTIES LABELS "fast")
 
     add_executable(universe_settlement_distribution_tests tests/settlement_distribution_tests.cpp)
     target_link_libraries(universe_settlement_distribution_tests PRIVATE universe_core)
