@@ -39,6 +39,8 @@ namespace universe::ui::detail {
             return "StoneExtractor";
         case Occupation::CraftWorker:
             return "CraftWorker";
+        case Occupation::Merchant:
+            return "Merchant";
     }
     return "Unknown";
 }

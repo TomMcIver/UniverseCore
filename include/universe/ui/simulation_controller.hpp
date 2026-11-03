@@ -114,6 +114,7 @@ struct SettlementSummaryView {
     std::uint64_t wood_gatherers{};
     std::uint64_t stone_extractors{};
     std::uint64_t craft_workers{};
+    std::uint64_t merchants{};
     std::int64_t cultivation_labour_available{};
     std::int64_t cultivation_labour_allocated{};
     std::int64_t gathering_labour_available{};

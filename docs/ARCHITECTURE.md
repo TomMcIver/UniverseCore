@@ -389,6 +389,19 @@ Current implementation status:
   - The coin section is last in the payload, after the aggregate demography totals: a count and one (id, coin) record per settlement, then the same for households, each in ascending id order. Negative coin is rejected.
   - v24, v25 and v26 snapshots migrate with every balance at zero.
   - Coin is created once, at world creation, in proportion to each household's starting stock value (and each commons in proportion to its households); after that it only moves: demoting a region folds a household's coin into its settlement commons, and absorbing a settlement moves its commons coin to the survivor.
+- snapshot schema v28 adds merchant price memory (ADR 0003): what each merchant last saw of settlement prices:
+  - The section is last in the payload, after the coin section: a count, then one 33-byte row per remembered price (merchant id, settlement id, resource byte, price in milli-coin, time seen), in strictly ascending (merchant, settlement, resource) order.
+  - A row must belong to a living merchant, name a known settlement, hold a price between the floor and ceiling of its resource, and not be dated after the simulation time.
+  - v24-v27 snapshots migrate with no remembered prices. `Occupation::Merchant` (value 6) is accepted wherever an occupation is read.
+  - Merchants are trained and retired once a year inside the occupation bracket (`process_merchant_recruitment`), so each change is recorded by the existing occupation-changed event.
+
+Settlement prices (ADR 0003, `trade_pricing.hpp`, `Simulation::settlement_prices`):
+
+- A price is derived from state on demand and never stored, so it needs no snapshot field and a reload prices identically.
+- price = base x multiplier. The base is the household wealth value of the resource times ten coin, in milli-coin per unit (food 10, wood 20, stone 20, timber 40, tool 80 coin). The multiplier is thirty days of target cover divided by actual days of cover, clamped to 0.25x-4x, in integer arithmetic.
+- Stock is the commons plus detailed households' holdings, plus the aggregate ledger for food in a demoted region. Daily need is the people's food requirement (detailed members and cohorts), outstanding construction and crafting demand spread over thirty days for wood, stone and timber, and one tool-wear break per twenty-four worker-days for tools.
+- No need is the floor price; no stock against a need is the ceiling. A demoted region approximates workers from the aggregate eligible-worker share until level-of-detail trade handling (#74).
+- Thirty-day cover, the thirty-day horizon and the 0.25x-4x range are first values, calibrated by #76.
 
 Settlement prices (ADR 0003, `trade_pricing.hpp`, `Simulation::settlement_prices`):
 

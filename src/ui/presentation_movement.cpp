@@ -67,6 +67,7 @@ struct DaySchedule {
                 case Occupation::CraftWorker:
                     return ActivityTargetKind::Workshop;
                 case Occupation::None:
+                case Occupation::Merchant:
                     return ActivityTargetKind::Home;
             }
             return ActivityTargetKind::Home;

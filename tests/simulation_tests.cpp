@@ -1,3 +1,4 @@
+#include "universe/demo_scenario.hpp"
 #include "universe/simulation.hpp"
 #include "universe/snapshot.hpp"
 #include "universe/seed.hpp"
@@ -2829,7 +2830,7 @@ int main() {
         // The payload ends with aggregate_births_total then aggregate_deaths_total,
         // followed by the schema v27 coin section.
         constexpr std::size_t aggregate_demography_tail_size = 16U;
-        const auto coin_section_size = snapshot_test::coin_section_size(source.state());
+        const auto coin_section_size = snapshot_test::trailing_sections_size(source.state());
         require(
             valid.size() > aggregate_demography_tail_size + coin_section_size,
             "snapshot must include the aggregate demography tail");
@@ -3617,10 +3618,16 @@ int main() {
     require_world_state_equal(a.state(), with_probe.state(), "unrelated scoped random probes must not alter canonical results");
 
     {
-        universe::Simulation founding_run{universe::SimulationConfig{
-            .seed = 42,
-            .initial_population = 600,
-        }};
+        // The committed demo scenario starts as one settlement and splits as it
+        // grows, so foundings are certain. (An earlier seed-42, 600-person famine
+        // world founded a settlement only by luck: on the 5 seeds 41-45 it founded
+        // in 1, and any change to the world's rules moved that one.)
+        universe::Simulation founding_run{universe::make_demo_simulation_config(universe::DemoScenario{
+            .seed = 39U,
+            .initial_population = 200U,
+            .years = 20U,
+            .layout = universe::DemoStartLayout::SingleSettlement,
+        })};
 
         std::uint64_t initial_settlement_count = 0;
         universe::SettlementId initial_max_settlement_id = 0;
@@ -3631,7 +3638,7 @@ int main() {
             initial_max_settlement_id = std::max(initial_max_settlement_id, settlement.id);
         }
 
-        founding_run.run_years(200);
+        founding_run.run_years(20);
 
         std::unordered_map<universe::SettlementId, std::uint64_t> founded_counts;
         std::uint64_t founded_total = 0;

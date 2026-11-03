@@ -8,6 +8,7 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -267,6 +268,7 @@ constexpr std::uint16_t kMaxFacingDegreesExclusive = 360U;
 
 constexpr std::uint16_t kViabilitySectionSchemaVersion = 26U;
 constexpr std::uint16_t kCoinSectionSchemaVersion = 27U;
+constexpr std::uint16_t kMerchantMemorySchemaVersion = 28U;
 
 // Reads the schema v26 section: one record per settlement in ascending id
 // order, carrying the days it has spent below the viable size and under food
@@ -391,6 +393,114 @@ constexpr std::uint16_t kCoinSectionSchemaVersion = 27U;
             return load_error(SnapshotErrorCode::InvalidState, "Snapshot total coin overflows");
         }
         it->second->coin = coin;
+    }
+    return SnapshotLoadResult{.ok = true, .code = SnapshotErrorCode::None, .message = {}};
+}
+
+// Reads the schema v28 section, last in the payload: what each merchant last saw
+// of settlement prices, one row per (merchant, settlement, resource) in strictly
+// ascending order. Every row names a living merchant and a known settlement, and
+// a price no lower than the floor nor higher than the ceiling of its resource.
+[[nodiscard]] SnapshotLoadResult read_v28_merchant_memory_section(SnapshotReader& reader, WorldState& state) {
+    std::uint64_t row_count = 0;
+    if (!reader.read_u64(row_count)) {
+        return load_error(SnapshotErrorCode::TruncatedData, "Snapshot merchant memory section is truncated");
+    }
+
+    std::unordered_map<PersonId, const Person*> person_by_id;
+    person_by_id.reserve(state.people.size());
+    for (const auto& person : state.people) {
+        person_by_id.emplace(person.id, &person);
+    }
+    std::unordered_set<SettlementId> settlement_ids;
+    for (const auto& settlement : state.settlements) {
+        settlement_ids.insert(settlement.id);
+    }
+
+    state.merchant_price_memory.clear();
+    for (std::uint64_t i = 0; i < row_count; ++i) {
+        MerchantPriceMemory row{};
+        std::uint8_t resource_raw = 0;
+        if (!reader.read_u64(row.merchant_id) || !reader.read_u64(row.settlement_id) || !reader.read_u8(resource_raw) ||
+            !reader.read_i64(row.price_millicoin) || !reader.read_i64(row.seen_at.ticks)) {
+            return load_error(SnapshotErrorCode::TruncatedData, "Snapshot merchant memory row is truncated");
+        }
+        if (resource_raw > static_cast<std::uint8_t>(ResourceType::BasicTool)) {
+            return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot merchant memory names an unknown resource");
+        }
+        row.resource = static_cast<ResourceType>(resource_raw);
+
+        if (!state.merchant_price_memory.empty()) {
+            const auto& previous = state.merchant_price_memory.back();
+            if (!(std::tie(previous.merchant_id, previous.settlement_id, previous.resource) <
+                  std::tie(row.merchant_id, row.settlement_id, row.resource))) {
+                return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot merchant memory rows must be in strictly ascending order");
+            }
+        }
+        const auto person_it = person_by_id.find(row.merchant_id);
+        if (person_it == person_by_id.end() || !person_it->second->alive || person_it->second->occupation != Occupation::Merchant) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot merchant memory must belong to a living merchant");
+        }
+        if (!settlement_ids.contains(row.settlement_id)) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot merchant memory references unknown settlement");
+        }
+        const auto base = base_price_millicoin(row.resource);
+        if (row.price_millicoin < (base * kPriceFloorPermille) / kPricePermilleScale ||
+            row.price_millicoin > (base * kPriceCeilingPermille) / kPricePermilleScale) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot merchant memory price is outside the price range");
+        }
+        if (row.seen_at.ticks < 0 || row.seen_at.ticks > state.time.ticks) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot merchant memory time is outside the simulated past");
+        }
+        state.merchant_price_memory.push_back(row);
+    }
+
+    // The world must be one the simulation could have produced. Rows come in
+    // whole groups of five prices (one per resource) per merchant and settlement.
+    std::unordered_map<PersonId, std::uint64_t> groups_per_merchant;
+    for (std::size_t i = 0; i < state.merchant_price_memory.size();) {
+        const auto& first = state.merchant_price_memory[i];
+        std::size_t end = i;
+        while (end < state.merchant_price_memory.size() &&
+               state.merchant_price_memory[end].merchant_id == first.merchant_id &&
+               state.merchant_price_memory[end].settlement_id == first.settlement_id) {
+            ++end;
+        }
+        if (end - i != 5U) {
+            return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot merchant memory must hold all five prices of each settlement it knows");
+        }
+        ++groups_per_merchant[first.merchant_id];
+        i = end;
+    }
+
+    std::unordered_map<HouseholdId, SettlementId> settlement_of_household;
+    for (const auto& household : state.households) {
+        settlement_of_household.emplace(household.id, household.settlement_id);
+    }
+    std::unordered_map<SettlementId, bool> settlement_active;
+    std::uint64_t active_settlement_count = 0;
+    for (const auto& settlement : state.settlements) {
+        settlement_active.emplace(settlement.id, settlement.active);
+        active_settlement_count += settlement.active ? 1U : 0U;
+    }
+    std::unordered_map<SettlementId, std::uint64_t> merchants_per_settlement;
+    for (const auto& person : state.people) {
+        if (!person.alive || person.occupation != Occupation::Merchant) {
+            continue;
+        }
+        const auto household_it = settlement_of_household.find(person.household_id);
+        if (household_it == settlement_of_household.end() || !settlement_active[household_it->second]) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot merchant must live in a household of an active settlement");
+        }
+        if (++merchants_per_settlement[household_it->second] > kMaxMerchantsPerSettlement) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot settlement has more merchants than the bound allows");
+        }
+        if (!groups_per_merchant.contains(person.id)) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot merchant must remember the prices it knows");
+        }
+    }
+    if (active_settlement_count < 2U && !merchants_per_settlement.empty()) {
+        return load_error(SnapshotErrorCode::InvalidState, "Snapshot has merchants in a world with fewer than two active settlements");
     }
     return SnapshotLoadResult{.ok = true, .code = SnapshotErrorCode::None, .message = {}};
 }
@@ -1243,6 +1353,17 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
         payload.write_i64(household->coin);
     }
 
+    // Schema v28 section, last in the payload: what each merchant last saw of
+    // settlement prices, in the state's (merchant, settlement, resource) order.
+    payload.write_u64(static_cast<std::uint64_t>(simulation.state_.merchant_price_memory.size()));
+    for (const auto& memory : simulation.state_.merchant_price_memory) {
+        payload.write_u64(memory.merchant_id);
+        payload.write_u64(memory.settlement_id);
+        payload.write_u8(static_cast<std::uint8_t>(memory.resource));
+        payload.write_i64(memory.price_millicoin);
+        payload.write_i64(memory.seen_at.ticks);
+    }
+
     auto payload_bytes = payload.take();
     const auto payload_hash = fnv1a64(payload_bytes);
 
@@ -1285,6 +1406,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     const bool is_v24_migration = version == kMinimumMigratableSchemaVersion;
     const bool has_viability_section = version >= kViabilitySectionSchemaVersion;
     const bool has_coin_section = version >= kCoinSectionSchemaVersion;
+    const bool has_merchant_memory_section = version >= kMerchantMemorySchemaVersion;
 
     if (reserved != 0U) {
         return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot reserved header field must be zero");
@@ -1477,7 +1599,9 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         person.nutrition_points = static_cast<std::int32_t>(nutrition_points);
         person.health_points = static_cast<std::int32_t>(health_points);
 
-        if (occupation_raw > static_cast<std::uint8_t>(Occupation::CraftWorker)) {
+        // Merchants exist only from schema v28; an older file naming one is invalid.
+        const auto highest_occupation = has_merchant_memory_section ? Occupation::Merchant : Occupation::CraftWorker;
+        if (occupation_raw > static_cast<std::uint8_t>(highest_occupation)) {
             return load_error(SnapshotErrorCode::InvalidEnum, "Snapshot person occupation enum is invalid");
         }
         person.occupation = static_cast<Occupation>(occupation_raw);
@@ -1793,8 +1917,9 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
                 !payload_reader.read_u8(to_raw)) {
                 return load_error(SnapshotErrorCode::TruncatedData, "Snapshot occupation changed event payload is truncated");
             }
-            if (from_raw > static_cast<std::uint8_t>(Occupation::CraftWorker) ||
-                to_raw > static_cast<std::uint8_t>(Occupation::CraftWorker)) {
+            const auto highest_event_occupation = has_merchant_memory_section ? Occupation::Merchant : Occupation::CraftWorker;
+            if (from_raw > static_cast<std::uint8_t>(highest_event_occupation) ||
+                to_raw > static_cast<std::uint8_t>(highest_event_occupation)) {
                 return load_error(SnapshotErrorCode::InvalidEnum, "Snapshot occupation changed event occupation is invalid");
             }
             payload_data.from = static_cast<Occupation>(from_raw);
@@ -2975,6 +3100,14 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         const auto coin_result = read_v27_coin_section(payload_reader, restored_state);
         if (!coin_result.ok) {
             return coin_result;
+        }
+    }
+
+    // Snapshots before v28 carry no merchants: nobody remembers any prices.
+    if (has_merchant_memory_section) {
+        const auto memory_result = read_v28_merchant_memory_section(payload_reader, restored_state);
+        if (!memory_result.ok) {
+            return memory_result;
         }
     }
 

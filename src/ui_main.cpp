@@ -185,6 +185,8 @@ struct UiState {
             return "StoneExtractor";
         case universe::Occupation::CraftWorker:
             return "CraftWorker";
+        case universe::Occupation::Merchant:
+            return "Merchant";
     }
     return "Unknown";
 }

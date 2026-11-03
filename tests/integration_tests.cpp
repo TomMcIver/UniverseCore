@@ -972,7 +972,112 @@ int main() {
     {
         universe::Simulation institutions_a{config};
         universe::Simulation institutions_b{config};
-        institutions_a.run_years(320);
+
+        // Whether an institution-member speaker taught a recipient about a child who had
+        // already died while neither had learned of the death. What people know changes
+        // with time, so this is searched at every checkpoint of the run as well as at its end.
+        const auto has_stale_knowledge_transfer = [&](const universe::Simulation& sim) {
+            const auto& a = sim.state();
+            for (const auto& transmission : a.knowledge_transmissions) {
+                if (transmission.method != universe::CommunicationMethod::Teaching) {
+                    continue;
+                }
+
+                const auto* speaker = find_person(a, transmission.speaker_id);
+                const auto* recipient = find_person(a, transmission.recipient_id);
+                if (speaker == nullptr || recipient == nullptr) {
+                    continue;
+                }
+
+                const auto* speaker_household = find_household(a, speaker->household_id);
+                const auto* recipient_household = find_household(a, recipient->household_id);
+                if (speaker_household == nullptr || recipient_household == nullptr) {
+                    continue;
+                }
+
+                if (speaker_household->settlement_id != recipient_household->settlement_id) {
+                    continue;
+                }
+
+                bool institution_member_speaker = false;
+                for (const auto& institution : a.institutions) {
+                    if (!institution.active || institution.settlement_id != speaker_household->settlement_id) {
+                        continue;
+                    }
+                    if (std::find(institution.member_ids.begin(), institution.member_ids.end(), speaker->id) != institution.member_ids.end()) {
+                        institution_member_speaker = true;
+                        break;
+                    }
+                }
+                if (!institution_member_speaker) {
+                    continue;
+                }
+
+                const auto* recipient_memory = find_memory(a, transmission.recipient_memory_id);
+                const auto* source_event = recipient_memory == nullptr ? nullptr : find_event(a, recipient_memory->source_event_id);
+                if (source_event == nullptr || source_event->type != universe::EventType::Birth) {
+                    continue;
+                }
+
+                const auto& birth_payload = std::get<universe::BirthEventPayload>(source_event->payload);
+                const universe::SimulationEvent* death_event = nullptr;
+                for (const auto& event : a.event_log) {
+                    if (event.type != universe::EventType::Death) {
+                        continue;
+                    }
+                    const auto& death_payload = std::get<universe::DeathEventPayload>(event.payload);
+                    if (death_payload.person_id == birth_payload.child_id) {
+                        death_event = &event;
+                        break;
+                    }
+                }
+                if (death_event == nullptr || death_event->timestamp >= transmission.transmitted_at) {
+                    continue;
+                }
+
+                if (sim.person_remembers_event(transmission.speaker_id, death_event->id)) {
+                    continue;
+                }
+
+                const auto speaker_view = sim.known_life_status(transmission.speaker_id, birth_payload.child_id);
+                const auto recipient_view = sim.known_life_status(transmission.recipient_id, birth_payload.child_id);
+                if (speaker_view.has_value() && recipient_view.has_value() &&
+                    *speaker_view == universe::KnownLifeStatus::Alive &&
+                    *recipient_view == universe::KnownLifeStatus::Alive) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        // Institution members must be alive and live in their institution's
+        // settlement. This is observed at every twenty-year checkpoint of the run,
+        // not only at its end: whether any institution still has a living member
+        // after 320 years depends on how the world happened to unfold, but the
+        // invariant holds at each point along the way. Advancing in chunks gives the
+        // same final state as one 320-year run.
+        bool nonlocal_membership_verified = false;
+        bool dead_member_pruned_verified = false;
+        bool stale_knowledge_transfer_verified = false;
+        const auto observe_membership_locality = [&](const universe::WorldState& state) {
+            for (const auto& institution : state.institutions) {
+                for (const auto member_id : institution.member_ids) {
+                    const auto* member = find_person(state, member_id);
+                    require(member != nullptr, "institution member must exist");
+                    require(member->alive, "institution active members must be alive");
+                    dead_member_pruned_verified = true;
+                    const auto* household = find_household(state, member->household_id);
+                    require(household != nullptr, "institution member household must exist");
+                    require(household->settlement_id == institution.settlement_id, "institution members must remain local to institution settlement");
+                    nonlocal_membership_verified = true;
+                }
+            }
+        };
+        for (int checkpoint = 0; checkpoint < 16; ++checkpoint) {
+            institutions_a.run_years(20);
+            observe_membership_locality(institutions_a.state());
+            stale_knowledge_transfer_verified = stale_knowledge_transfer_verified || has_stale_knowledge_transfer(institutions_a);
+        }
         institutions_b.run_years(320);
 
         const auto& a = institutions_a.state();
@@ -988,10 +1093,6 @@ int main() {
             const auto& payload = std::get<universe::InstitutionFoundedEventPayload>(event.payload);
             founded_event_by_institution.emplace(payload.institution_id, &payload);
         }
-
-        bool nonlocal_membership_verified = false;
-        bool dead_member_pruned_verified = false;
-        bool stale_knowledge_transfer_verified = false;
 
         for (const auto& institution : a.institutions) {
             require(institution.id > 0U, "institution id must be non-zero");
@@ -1076,76 +1177,7 @@ int main() {
             }
         }
 
-        for (const auto& transmission : a.knowledge_transmissions) {
-            if (transmission.method != universe::CommunicationMethod::Teaching) {
-                continue;
-            }
-
-            const auto* speaker = find_person(a, transmission.speaker_id);
-            const auto* recipient = find_person(a, transmission.recipient_id);
-            if (speaker == nullptr || recipient == nullptr) {
-                continue;
-            }
-
-            const auto* speaker_household = find_household(a, speaker->household_id);
-            const auto* recipient_household = find_household(a, recipient->household_id);
-            if (speaker_household == nullptr || recipient_household == nullptr) {
-                continue;
-            }
-
-            if (speaker_household->settlement_id != recipient_household->settlement_id) {
-                continue;
-            }
-
-            bool institution_member_speaker = false;
-            for (const auto& institution : a.institutions) {
-                if (!institution.active || institution.settlement_id != speaker_household->settlement_id) {
-                    continue;
-                }
-                if (std::find(institution.member_ids.begin(), institution.member_ids.end(), speaker->id) != institution.member_ids.end()) {
-                    institution_member_speaker = true;
-                    break;
-                }
-            }
-            if (!institution_member_speaker) {
-                continue;
-            }
-
-            const auto* recipient_memory = find_memory(a, transmission.recipient_memory_id);
-            const auto* source_event = recipient_memory == nullptr ? nullptr : find_event(a, recipient_memory->source_event_id);
-            if (source_event == nullptr || source_event->type != universe::EventType::Birth) {
-                continue;
-            }
-
-            const auto& birth_payload = std::get<universe::BirthEventPayload>(source_event->payload);
-            const universe::SimulationEvent* death_event = nullptr;
-            for (const auto& event : a.event_log) {
-                if (event.type != universe::EventType::Death) {
-                    continue;
-                }
-                const auto& death_payload = std::get<universe::DeathEventPayload>(event.payload);
-                if (death_payload.person_id == birth_payload.child_id) {
-                    death_event = &event;
-                    break;
-                }
-            }
-            if (death_event == nullptr || death_event->timestamp >= transmission.transmitted_at) {
-                continue;
-            }
-
-            if (institutions_a.person_remembers_event(transmission.speaker_id, death_event->id)) {
-                continue;
-            }
-
-            const auto speaker_view = institutions_a.known_life_status(transmission.speaker_id, birth_payload.child_id);
-            const auto recipient_view = institutions_a.known_life_status(transmission.recipient_id, birth_payload.child_id);
-            if (speaker_view.has_value() && recipient_view.has_value() &&
-                *speaker_view == universe::KnownLifeStatus::Alive &&
-                *recipient_view == universe::KnownLifeStatus::Alive) {
-                stale_knowledge_transfer_verified = true;
-                break;
-            }
-        }
+        stale_knowledge_transfer_verified = stale_knowledge_transfer_verified || has_stale_knowledge_transfer(institutions_a);
 
         require(nonlocal_membership_verified, "institution membership locality should be verified");
         require(dead_member_pruned_verified, "institution membership pruning on death should be verified");
