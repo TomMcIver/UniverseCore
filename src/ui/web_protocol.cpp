@@ -129,6 +129,10 @@ using detail::occupation_label;
             return "OccupationChanged";
         case EventType::HouseholdRelocated:
             return "HouseholdRelocated";
+        case EventType::TradeDeparted:
+            return "TradeDeparted";
+        case EventType::TradeCompleted:
+            return "TradeCompleted";
     }
     return "Unknown";
 }
@@ -666,6 +670,9 @@ std::string make_world_event_message(
     } else if (event.type == EventType::HouseholdRelocated) {
         const auto& payload = std::get<HouseholdRelocatedEventPayload>(event.payload);
         out << ",\"entityId\":" << payload.household_id;
+    } else if (event.type == EventType::TradeDeparted || event.type == EventType::TradeCompleted) {
+        const auto& payload = std::get<TradeEventPayload>(event.payload);
+        out << ",\"entityId\":" << payload.merchant_id;
     }
 
     out << "}}";
