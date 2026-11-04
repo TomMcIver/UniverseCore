@@ -2379,9 +2379,8 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         if (tool_wear_work_units >= kToolWearWorkUnitsPerBreak) {
             return load_error(SnapshotErrorCode::InvalidState, "Snapshot tool wear remainder is out of canonical range");
         }
-        if (cumulative_basic_tool_broken > cumulative_basic_tool_produced) {
-            return load_error(SnapshotErrorCode::InvalidState, "Snapshot broken tools cannot exceed cumulative production");
-        }
+        // Tools now travel between settlements (ADR 0003), so one settlement may
+        // break more tools than it made; the world-wide check below still holds.
 
         auto* settlement = settlement_it->second;
         settlement->materials.wood.value = wood;
