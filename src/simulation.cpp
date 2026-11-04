@@ -246,8 +246,8 @@ constexpr std::uint32_t kWorkDayChancePer10k = 7'000U;
     const auto day_seed = derive_seed(person_schedule_seed, SeedDomain::Schedule, food_period);
 
     // A merchant does no settlement work (ADR 0003), so it spends its days as an
-    // unassigned adult does: teaching, keeping records and discovering. Its days
-    // away on a trip will be modelled when trips exist.
+    // unassigned adult does: teaching, keeping records and discovering. Days on a
+    // trip are Travel, set by process_schedule_period.
     if (occupation != Occupation::None && occupation != Occupation::Merchant &&
         seed_chance_per_10k(day_seed, kWorkDayChancePer10k)) {
         return ActivityKind::Work;
@@ -609,6 +609,9 @@ std::int64_t environment_class_wild_capacity_units_per_area(const EnvironmentCla
             return std::holds_alternative<OccupationChangedEventPayload>(event.payload);
         case EventType::HouseholdRelocated:
             return std::holds_alternative<HouseholdRelocatedEventPayload>(event.payload);
+        case EventType::TradeDeparted:
+        case EventType::TradeCompleted:
+            return std::holds_alternative<TradeEventPayload>(event.payload);
     }
     return false;
 }
@@ -1160,6 +1163,7 @@ void Simulation::run_scheduled_systems_until(const SimulationTime target_time) {
         if (config_.food_system_enabled && food_next_run_ <= next_time) {
             process_food_period(current_food_period());
             process_schedule_period(current_food_period());
+            process_trade_period();
 
             SimulationTime next_food_run{};
             if (!checked_add_time(food_next_run_, food_interval_, next_food_run)) {
@@ -1859,7 +1863,10 @@ void Simulation::process_schedule_period(const std::uint64_t food_period) {
             continue;
         }
         const auto schedule_seed = person_seed(person.id);
-        person.current_activity = derive_daily_activity(schedule_seed, food_period, person.occupation);
+        // A merchant on a trip is on the road every day of it (ADR 0003).
+        person.current_activity = person.occupation == Occupation::Merchant && is_merchant_away(person.id)
+            ? ActivityKind::Travel
+            : derive_daily_activity(schedule_seed, food_period, person.occupation);
 
         if (person.current_activity == ActivityKind::Rest) {
             person.health_points = clamp_i32(
@@ -2271,6 +2278,9 @@ void Simulation::process_demography_period(const std::uint64_t demographic_year)
     }
     process_occupation_reassignment(demographic_year);
     process_merchant_recruitment(demographic_year);
+    // A merchant who died or merged away this year ends their trip now, so the
+    // trip table never names someone who is gone.
+    resolve_orphaned_trips();
     record_occupation_changes(occupations_before);
 
     process_household_access_allocation();
@@ -3221,8 +3231,9 @@ void Simulation::demote_region_to_settlement_aggregate(const RegionId region_id)
         person.alive = false;
         person.occupation = Occupation::None;
     }
-    // A folded merchant is no longer a person to remember prices.
+    // A folded merchant is no longer a person to remember prices or carry cargo.
     prune_merchant_memory();
+    resolve_orphaned_trips();
 
     // Exact conservation: household food, materials and wealth move into the
     // settlement aggregate ledger rather than vanishing with the detail level.
@@ -6063,6 +6074,18 @@ void Simulation::merge_settlements(const SettlementId survivor_id, const Settlem
     absorbed->coin = 0;
     absorbed->commons_food.value = 0;
 
+    // Trips to or from the absorbed settlement now run to or from the survivor
+    // (a trip that would then start and end in the same place is ended by
+    // resolve_orphaned_trips).
+    for (auto& trip : state_.merchant_trips) {
+        if (trip.origin_settlement_id == absorbed_id) {
+            trip.origin_settlement_id = survivor_id;
+        }
+        if (trip.destination_settlement_id == absorbed_id) {
+            trip.destination_settlement_id = survivor_id;
+        }
+    }
+
     merge_aggregate_ledgers(state_.settlement_aggregates, survivor_id, absorbed_id);
 
     const auto combined_share =
@@ -6639,6 +6662,8 @@ void Simulation::process_merchant_recruitment(const std::uint64_t demographic_ye
 
         // A merger can leave more merchants than the bound allows: the highest
         // ids return to ordinary work.
+        // (A retired merchant who was away has their trip ended and cargo
+        // returned by resolve_orphaned_trips.)
         while (merchants.size() > kMaxMerchantsPerSettlement) {
             merchants.back()->occupation = Occupation::None;
             merchants.pop_back();
@@ -6647,8 +6672,11 @@ void Simulation::process_merchant_recruitment(const std::uint64_t demographic_ye
         const auto action = decide_merchant_action(
             trade_pays, merchants.size(), eligible_adults, candidates.size(), settlement->days_under_food_strain > 0U);
         if (action == MerchantAction::Retire) {
+            // A merchant away on a trip keeps the job until they are home.
             for (auto* merchant : merchants) {
-                merchant->occupation = Occupation::None;
+                if (!is_merchant_away(merchant->id)) {
+                    merchant->occupation = Occupation::None;
+                }
             }
             continue;
         }
@@ -8517,10 +8545,13 @@ void Simulation::process_construction(const std::uint64_t demographic_year) {
                     continue;
                 }
 
-                // Unassigned adults are the labour construction draws on. A merchant is
-                // one of them until trips exist: it does no assigned work, so it counts
-                // as unallocated rather than as allocated labour. (A merchant away on a
-                // trip will be left out when trips are built.)
+                // Unassigned adults are the labour construction draws on. A merchant at
+                // home is one of them: it does no assigned work, so it counts as
+                // unallocated rather than as allocated labour.
+                // A merchant away on a trip is not at the settlement at all.
+                if (person.occupation == Occupation::Merchant && is_merchant_away(person.id)) {
+                    continue;
+                }
                 const bool is_unassigned = person.occupation == Occupation::None || person.occupation == Occupation::Merchant;
                 auto& labour_pool = is_unassigned ? unallocated_labour_capacity : allocated_labour_capacity;
                 if (!checked_add_i64(labour_pool, productive_effort_for_person(person), labour_pool)) {

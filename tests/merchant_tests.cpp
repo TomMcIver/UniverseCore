@@ -333,7 +333,8 @@ void test_snapshot_rejects_corrupt_merchant_memory() {
     const auto valid = source.save_snapshot();
     const auto rows = source.state().merchant_price_memory.size();
     require(rows >= 2U, "the corruption cases need two remembered rows");
-    const auto section_start = valid.size() - snapshot_test::merchant_section_size(source.state());
+    const auto section_start =
+        valid.size() - snapshot_test::trade_trip_section_size(source.state()) - snapshot_test::merchant_section_size(source.state());
     const auto row_offset = [&](const std::size_t index) {
         return section_start + snapshot_test::kCountSize + (index * snapshot_test::kMerchantMemoryRowSize);
     };
@@ -361,7 +362,9 @@ void test_snapshot_rejects_corrupt_merchant_memory() {
 
     // Drop the last remembered row: its settlement group is then four prices, not five.
     auto incomplete_group = valid;
-    incomplete_group.resize(incomplete_group.size() - snapshot_test::kMerchantMemoryRowSize);
+    incomplete_group.erase(
+        incomplete_group.begin() + static_cast<std::ptrdiff_t>(row_offset(rows - 1U)),
+        incomplete_group.begin() + static_cast<std::ptrdiff_t>(row_offset(rows)));
     snapshot_test::write_u64_at(incomplete_group, section_start, static_cast<std::uint64_t>(rows - 1U));
     refresh_hash(incomplete_group);
     expect_failure(incomplete_group, universe::SnapshotErrorCode::InvalidStructure, "a settlement group with fewer than five prices must be rejected");
@@ -369,7 +372,11 @@ void test_snapshot_rejects_corrupt_merchant_memory() {
     auto too_many = valid;
     snapshot_test::write_u64_at(too_many, section_start, static_cast<std::uint64_t>(rows + 1U));
     refresh_hash(too_many);
-    expect_failure(too_many, universe::SnapshotErrorCode::TruncatedData, "a row count beyond the payload must be rejected");
+    {
+        // The extra row would be read out of whatever follows, so any rejection will do.
+        universe::Simulation destination{universe::SimulationConfig{.seed = 999U, .initial_population = 10U}};
+        require(!universe::Simulation::load_snapshot(too_many, destination).ok, "a row count beyond the memory section must be rejected");
+    }
 }
 
 }  // namespace
