@@ -49,3 +49,27 @@ A canonical state change, so snapshot schema impact must be evaluated and versio
 - **Merchants are outside the labour pools.** The allocator skips them and they add to no cultivation, gathering, wood, stone or craft total or to construction labour. They count as unallocated workers (not assigned to settlement labour, so eligible = active + unallocated still holds), and the economy view lists them separately as Merchants.
 - **Remembered prices (schema v28).** A new merchant remembers the five prices of its home settlement and of each neighbour within a day's walk, with the time they were seen. The rows are a snapshot section, last in the payload after coin, in strictly ascending (merchant, settlement, resource) order. A loaded snapshot is rejected if a row belongs to anyone but a living merchant, names an unknown settlement, falls outside the price range, or is dated in the future. Demoting a region drops the memory of the merchants it folds.
 - **Household coin on promotion.** Demotion folds a household's coin into its settlement commons, and promotion does not hand it back. Total coin is conserved and trade is unaffected, because only a commons funds cargo. A household's coin matters only as a share of realised profit, so this is revisited when households start to spend.
+
+## Calibration measured so far (#76, partial: before trade trips exist)
+
+Measured with `universe_trade_calibration` (`scripts/run-trade-calibration.ps1`, about five minutes for 64 seeds of both layouts), 20 years, 200 people, seeds 1-64. Merchants are trained but no trade trip runs yet, so no goods or coin move: these numbers show where the *decision* sits, not the effect of trade. Re-run after the trade trip lands and extend the harness with trips completed, realised profit and the no-trade comparison.
+
+| Measure (per seed) | Single-settlement start | Default layout |
+|---|---|---|
+| Seeds that ever trained a merchant | 49 / 64 | 49 / 64 |
+| Peak merchants, median / p90 / max | 2 / 5 / 6 | 1 / 3 / 5 |
+| Merchant-years (sum of year-end merchants), median / p90 / max | 21 / 43 / 62 | 7 / 37 / 51 |
+| Settlement-years where trade pays | 2163 / 4093 (53%) | 2150 / 7923 (27%) |
+| Best neighbour margin, median / max | 15000 / 15000 permille | 15000 / 15000 permille |
+| Widest price gap between two settlements | 15000 permille on nearly every seed | same |
+| Final population, median / min / max | 283 / 0 / 337 | 248 / 111 / 332 |
+| Final settlements, median | 4 | 6 |
+
+Invariants held on every one of the 128 runs: total coin never changed at any year end, every price stayed inside 0.25x-4x of its base. The end-of-run merchant count stayed within two per active settlement (asserted in the test; the sweep reports peak counts only).
+
+Findings:
+
+- **Prices saturate.** The widest gap is 15000 permille (4x ceiling against 0.25x floor) on nearly every seed, and the price range seen is the whole 2500-320000 milli-coin band. With stock held in commons and a thirty-day cover target, settlements routinely hit the floor or ceiling on some good, so the 500 permille threshold is almost always cleared when any neighbour is in range. The threshold is therefore not selective; the merchant bound and the eligible-adult floor are what limit numbers. Consider a wider cover target or a lower ceiling once trips show whether saturated prices are realistic.
+- **Merchant counts are small and uneven**, 0-6 per seed; 15 seeds per layout never train one (isolated hamlets, extinct starts, or no neighbour within a day's walk).
+- **Ten single-settlement seeds end extinct** (7, 8, 19, 28, 31, 43, 44, 56, 58, 63) (presumably the non-arable starts of ADR 0002, not checked); this is the pre-existing start, not a trade effect (merchants are outside labour pools and never cost production).
+- No constant was changed. The demo scenario and snapshot schema are untouched.

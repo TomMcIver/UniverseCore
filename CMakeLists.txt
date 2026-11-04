@@ -39,6 +39,9 @@ target_link_libraries(universe_lod_benchmark PRIVATE universe_core)
 add_executable(universe_demo_seed_search src/demo_seed_search_main.cpp)
 target_link_libraries(universe_demo_seed_search PRIVATE universe_core)
 
+add_executable(universe_trade_calibration src/trade_calibration_main.cpp)
+target_link_libraries(universe_trade_calibration PRIVATE universe_core)
+
 add_executable(universe_ui_bridge src/ui_bridge_main.cpp)
 target_link_libraries(universe_ui_bridge PRIVATE universe_ui_support)
 
@@ -153,6 +156,11 @@ if(UNIVERSECORE_BUILD_TESTS)
     target_link_libraries(universe_settlement_distribution_tests PRIVATE universe_core)
     add_test(NAME universe_settlement_distribution_tests COMMAND universe_settlement_distribution_tests)
     set_tests_properties(universe_settlement_distribution_tests PROPERTIES LABELS "integration")
+
+    add_executable(universe_trade_calibration_tests tests/trade_calibration_tests.cpp)
+    target_link_libraries(universe_trade_calibration_tests PRIVATE universe_core)
+    add_test(NAME universe_trade_calibration_tests COMMAND universe_trade_calibration_tests)
+    set_tests_properties(universe_trade_calibration_tests PROPERTIES LABELS "integration")
 
     add_executable(universe_construction_tests tests/construction_tests.cpp)
     target_link_libraries(universe_construction_tests PRIVATE universe_core)
