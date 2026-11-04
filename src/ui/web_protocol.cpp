@@ -222,6 +222,7 @@ WorldSnapshotView build_world_snapshot(const SimulationController& controller) {
             .target = placed.target,
             .depart_tick = placed.depart_tick,
             .return_depart_tick = placed.return_depart_tick,
+            .trip = placed.trip,
         });
     }
 
@@ -513,7 +514,19 @@ void write_agent_json(std::ostringstream& out, const AgentRenderView& agent) {
     }
     out << ",\"departTick\":" << agent.depart_tick
         << ",\"returnDepartTick\":" << agent.return_depart_tick
-        << "}";
+        << ",\"trip\":";
+    if (agent.trip.has_value()) {
+        const auto& trip = *agent.trip;
+        out << "{\"originId\":" << trip.origin_id << ",\"destinationId\":" << trip.destination_id << ",\"origin\":";
+        write_point_json(out, trip.origin);
+        out << ",\"destination\":";
+        write_point_json(out, trip.destination);
+        out << ",\"departTick\":" << trip.depart_tick << ",\"arriveTick\":" << trip.arrive_tick
+            << ",\"returnTick\":" << trip.return_tick << "}";
+    } else {
+        out << "null";
+    }
+    out << "}";
 }
 
 void write_settlement_json(std::ostringstream& out, const SettlementRenderView& settlement) {

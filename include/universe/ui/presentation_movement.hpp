@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <unordered_map>
 
 #include "universe/ui/simulation_controller.hpp"
@@ -38,8 +39,41 @@ enum class ActivityTargetKind : std::uint8_t {
     Workshop = 5,
 };
 
+// A merchant's trade trip as the client draws it (#78). The trip itself is
+// canonical (ADR 0003); this is only the two settlement centres and the trip
+// clock, so the client can walk the merchant out to `destination` from
+// `depart_tick`, and back to `origin` from `arrive_tick`, until `return_tick`.
+// The walk pace and route are client presentation, like any villager's.
+struct TripPresentation {
+    SettlementId origin_id{};
+    SettlementId destination_id{};
+    PresentationPoint origin{};
+    PresentationPoint destination{};
+    std::int64_t depart_tick{};
+    std::int64_t arrive_tick{};
+    std::int64_t return_tick{};
+
+    [[nodiscard]] bool operator==(const TripPresentation& other) const = default;
+};
+
+// The subset of canonical trip state presentation needs. Deliberately a
+// plain struct so the adapter from the canonical trip type (#72) is one small
+// mapping; ticks are simulation seconds like every other tick here.
+struct TradeTripFacts {
+    PersonId merchant{};
+    SettlementId origin{};
+    SettlementId destination{};
+    std::int64_t depart_tick{};
+    std::int64_t arrive_tick{};
+    std::int64_t return_tick{};
+};
+
 struct AgentPresentation {
     PresentationPoint home{};
+    // Set only while `tick` lies in [depart_tick, return_tick) of this
+    // person's trip. While set, the person is away from their settlement and
+    // does no settlement work.
+    std::optional<TripPresentation> trip{};
     ActivityTargetKind target_kind{ActivityTargetKind::Home};
     // Set for Common/Woodland/Quarry/Workshop, whose position the server
     // knows outright. Unset for Field (client-resolved) and for Home (equal
@@ -59,6 +93,7 @@ struct AgentPresentation {
 
 [[nodiscard]] std::unordered_map<PersonId, AgentPresentation> build_agent_presentations(
     const SimulationController& controller,
-    std::int64_t tick);
+    std::int64_t tick,
+    std::span<const TradeTripFacts> trips = {});
 
 }  // namespace universe::ui

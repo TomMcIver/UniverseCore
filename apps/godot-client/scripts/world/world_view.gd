@@ -67,6 +67,9 @@ var _agent_labels: Dictionary
 var _agent_animators: Dictionary
 ## Each walking villager's current route (id -> {goal, points, next}).
 var _agent_routes: Dictionary
+## Each agent's canonical activity name (id -> String), so the label can be
+## re-derived as a merchant's trip phase changes between server messages.
+var _agent_activity: Dictionary
 
 ## Ticket #40/#56: movement must track canonical simulation time, not raw
 ## frame time -- pausing halts it, the speed multiplier scales it.
@@ -87,6 +90,7 @@ func _init() -> void:
 	_agent_labels = {}
 	_agent_animators = {}
 	_agent_routes = {}
+	_agent_activity = {}
 
 func set_navmesh_manager(_manager: Node3D) -> void:
 	pass  # Villagers no longer path via the navmesh; kept only so main.gd's existing wiring is harmless.
@@ -209,6 +213,7 @@ func _clear_all() -> void:
 	_agent_labels.clear()
 	_agent_animators.clear()
 	_agent_routes.clear()
+	_agent_activity.clear()
 
 ## An existing agent is updated in place, not destroyed and respawned -- a
 ## destroy+respawn on every delta tick (which upserts nearly every alive
@@ -230,6 +235,7 @@ func _remove_agent(id: int) -> void:
 	_agent_labels.erase(id)
 	_agent_animators.erase(id)
 	_agent_routes.erase(id)
+	_agent_activity.erase(id)
 
 ## Same churn fix as buildings (E1): settlements arrive as "updated" in
 ## every delta, so only respawn when the firepit would look different.
@@ -279,6 +285,7 @@ func _agent_facts_from(agent: Dictionary) -> Dictionary:
 		target = Vector2(float(target_raw.get("x", 0.0)), float(target_raw.get("z", 0.0)))
 	var home_pos := UniverseProtocol.position_from(agent)
 	return {
+		"trip": _trip_from(agent.get("trip")),
 		"household_id": int(agent.get("householdId", 0)),
 		"region_id": int(agent.get("regionId", 0)),
 		"home": Vector2(home_pos.x, home_pos.z),
@@ -287,6 +294,48 @@ func _agent_facts_from(agent: Dictionary) -> Dictionary:
 		"depart_tick": int(agent.get("departTick", 0)),
 		"return_depart_tick": int(agent.get("returnDepartTick", 0)),
 	}
+
+## A merchant's trade trip (#78), or null when the agent is not travelling. The
+## trip is canonical (sent as a settlement pair and trip clock); the walk
+## between the two settlement centres is drawn here.
+func _trip_from(raw) -> Variant:
+	if typeof(raw) != TYPE_DICTIONARY:
+		return null
+	var origin: Dictionary = raw.get("origin", {})
+	var destination: Dictionary = raw.get("destination", {})
+	return {
+		"origin_id": int(raw.get("originId", 0)),
+		"destination_id": int(raw.get("destinationId", 0)),
+		"origin": Vector2(float(origin.get("x", 0.0)), float(origin.get("z", 0.0))),
+		"destination": Vector2(float(destination.get("x", 0.0)), float(destination.get("z", 0.0))),
+		"depart_tick": int(raw.get("departTick", 0)),
+		"arrive_tick": int(raw.get("arriveTick", 0)),
+		"return_tick": int(raw.get("returnTick", 0)),
+	}
+
+## Where a merchant is in their trip at the estimated tick: "none" (no trip, or
+## not yet departed / already returned), "outbound" (heading for the
+## destination) or "returning" (heading back to the origin).
+func trip_phase(id: int) -> String:
+	var trip = _agent_facts.get(id, {}).get("trip")
+	if trip == null:
+		return "none"
+	if _estimated_tick < float(trip["depart_tick"]) or _estimated_tick >= float(trip["return_tick"]):
+		return "none"
+	return "outbound" if _estimated_tick < float(trip["arrive_tick"]) else "returning"
+
+## True while the merchant is away on a trip: they are on the road, never
+## standing or working in their home settlement.
+func is_away_on_trip(id: int) -> bool:
+	return trip_phase(id) != "none"
+
+## The agent's activity label, with trips marked so a merchant on the road reads
+## as trading rather than as whatever they were doing at home.
+func _label_text_for(id: int, activity: String) -> String:
+	var phase := trip_phase(id)
+	if phase == "none":
+		return activity
+	return "Trading (%s)" % phase
 
 func _spawn_agent(agent: Dictionary) -> void:
 	var visual := BuildingAssets.make_person(str(agent.get("sex", "Female")))
@@ -308,6 +357,8 @@ func _spawn_agent(agent: Dictionary) -> void:
 		_set_agent_animation(id, IDLE_ANIMATION)
 
 	_agent_facts[id] = _agent_facts_from(agent)
+	_agent_activity[id] = activity
+	label.text = _label_text_for(id, activity)
 	area.position = _resolve_agent_position(id)
 	add_child(area)
 	_agent_nodes[id] = area
@@ -315,14 +366,16 @@ func _spawn_agent(agent: Dictionary) -> void:
 
 func _update_agent(id: int, agent: Dictionary) -> void:
 	_agent_facts[id] = _agent_facts_from(agent)
+	_agent_activity[id] = str(agent.get("currentActivity", "Idle"))
 	if _agent_labels.has(id):
-		_agent_labels[id].text = str(agent.get("currentActivity", "Idle"))
+		_agent_labels[id].text = _label_text_for(id, _agent_activity[id])
 
 func _spawn_settlement(settlement: Dictionary) -> void:
 	var id := int(settlement.get("id", 0))
 	var active := bool(settlement.get("active", true))
 	var area := _make_pickable_area("settlement", id, BuildingAssets.make_settlement_marker(active), Vector3(2.0, 4.0, 2.0))
 	area.set_meta("active", active)
+	area.set_meta("region_id", int(settlement.get("regionId", 0)))
 	area.position = _grounded_position(settlement)
 	add_child(area)
 	_settlement_nodes[id] = area
@@ -472,7 +525,13 @@ func _resolve_agent_position(id: int) -> Vector3:
 	if facts.is_empty():
 		return Vector3.ZERO
 	var flat: Vector2 = facts["home"] + _crowd_offset_for_person(id)
-	if facts["target_kind"] != "Home":
+	var phase := trip_phase(id)
+	if phase != "none":
+		# On a trade trip (#78): the road, never the home slot or a work spot.
+		var trip: Dictionary = facts["trip"]
+		var stop: Vector2 = trip["destination"] if phase == "outbound" else trip["origin"]
+		flat = stop + _crowd_offset_for_person(id)
+	elif facts["target_kind"] != "Home":
 		var away_ticks: int = facts["depart_tick"]
 		var back_ticks: int = facts["return_depart_tick"]
 		if _estimated_tick >= float(away_ticks) and _estimated_tick < float(back_ticks):
@@ -493,6 +552,8 @@ func _advance_agents(delta: float) -> void:
 	for id in _agent_nodes.keys():
 		var node: Node3D = _agent_nodes[id]
 		var goal := _resolve_agent_position(id)
+		if _agent_facts.get(id, {}).get("trip") != null and _agent_labels.has(id):
+			_agent_labels[id].text = _label_text_for(id, _agent_activity.get(id, "Idle"))
 		var current := Vector2(node.position.x, node.position.z)
 		var goal_flat := Vector2(goal.x, goal.z)
 		var next := goal_flat
@@ -539,7 +600,24 @@ func _route_to(id: int, from: Vector2, to: Vector2) -> PackedVector2Array:
 	var facts: Dictionary = _agent_facts.get(id, {})
 	if _village_dressing == null or facts.is_empty() or not _village_dressing.has_method("route"):
 		return PackedVector2Array([from, to])
-	return _village_dressing.route(int(facts["region_id"]), from, to)
+	var region_id := int(facts["region_id"])
+	if is_away_on_trip(id):
+		# Tracks are drawn per region, so a trip inside one region follows them
+		# and a trip across regions has no track to follow: straight line.
+		region_id = _trip_region(facts["trip"])
+		if region_id < 0:
+			return PackedVector2Array([from, to])
+	return _village_dressing.route(region_id, from, to)
+
+## The region both of a trip's settlements share, or -1 if they differ or are
+## unknown.
+func _trip_region(trip: Dictionary) -> int:
+	var origin = _settlement_nodes.get(int(trip["origin_id"]))
+	var destination = _settlement_nodes.get(int(trip["destination_id"]))
+	if origin == null or destination == null:
+		return -1
+	var region := int(origin.get_meta("region_id", -1))
+	return region if region == int(destination.get_meta("region_id", -2)) else -1
 
 ## Walks `step` units along the route from `from`, turning corners as it goes,
 ## and returns where that ends up. The route keeps its own progress.
