@@ -525,6 +525,26 @@ func _test_economy_panel_renders() -> void:
 	_assert_eq(text.find("Farmers: 40") >= 0, true, "expected job line")
 	_assert_eq(text.find("Quarriers: 0") >= 0, true, "missing job reads zero")
 	_assert_eq(text.find("Inequality: 0.35") >= 0, true, "expected inequality")
+	_assert_eq(text.find("Trade: no data") >= 0, true, "missing trade block reads no data")
+	panel.show_view_model("settlement_economy", 3, {
+		"active": true, "tier": "Town",
+		"trade": {"coin": 1234567, "merchants": 2, "pricesMillicoin": {"Food": 2500, "Wood": 20000, "Stone": 5000, "Timber": 160000, "BasicTool": 80}},
+	})
+	text = panel._content.text
+	_assert_eq(text.find("Coin: 1,234,567") >= 0, true, "coin is grouped")
+	_assert_eq(text.find("Merchants: 2") >= 0, true, "merchant count shown")
+	_assert_eq(text.find("Food: 2.50 coin/unit") >= 0, true, "fractional price in coin per unit")
+	_assert_eq(text.find("Wood: 20 coin/unit") >= 0, true, "whole price drops decimals")
+	_assert_eq(text.find("Timber: 160 coin/unit") >= 0, true, "timber price")
+	_assert_eq(text.find("BasicTool: 0.08 coin/unit") >= 0, true, "sub-coin price")
+	_assert_eq(text.find("Trips:") < 0, true, "no trip section without trip data")
+	panel.show_view_model("settlement_economy", 3, {
+		"trade": {"coin": 5, "merchants": 1, "pricesMillicoin": null,
+			"trips": [{"merchantId": 9, "destination": 4, "resource": "Wood", "amount": 30, "phase": "Outbound"}]},
+	})
+	text = panel._content.text
+	_assert_eq(text.find("Prices: none (abandoned)") >= 0, true, "null prices read none")
+	_assert_eq(text.find("Trips:") >= 0 and text.find("Wood") >= 0, true, "trip hook renders supplied trips")
 	panel.queue_free()
 
 func _test_orbit_camera_frames_a_wide_area() -> void:

@@ -80,6 +80,11 @@ struct SettlementEconomyView {
     std::uint64_t craft_workers{};
     std::uint64_t merchants{};
     std::uint64_t unallocated_workers{};
+    // Trade (ADR 0003): the commons' coin and the five derived prices in milli-coin
+    // per unit. Prices are recomputed from state for the view, never stored; they
+    // are absent for an abandoned settlement.
+    std::int64_t coin{};
+    std::optional<SettlementPrices> prices{};
     std::int64_t min_household_wealth{};
     std::int64_t median_household_wealth{};
     std::int64_t max_household_wealth{};

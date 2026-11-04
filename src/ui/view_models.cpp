@@ -93,6 +93,28 @@ void write_building_summary(std::ostringstream& out, const BuildingSummaryView& 
     }
 }
 
+constexpr std::array<std::pair<ResourceType, std::string_view>, 5> kPriceLabels{{
+    {ResourceType::Food, "Food"},
+    {ResourceType::Wood, "Wood"},
+    {ResourceType::Stone, "Stone"},
+    {ResourceType::Timber, "Timber"},
+    {ResourceType::BasicTool, "BasicTool"},
+}};
+
+void write_prices(std::ostringstream& out, const std::optional<SettlementPrices>& prices) {
+    if (!prices.has_value()) {
+        out << "null";
+        return;
+    }
+    out << "{";
+    bool first = true;
+    for (const auto& [resource, label] : kPriceLabels) {
+        out << (first ? "" : ",") << "\"" << label << "\":" << prices->of(resource);
+        first = false;
+    }
+    out << "}";
+}
+
 void write_settlement_economy(std::ostringstream& out, const SettlementEconomyView& view) {
     out << "\"active\":" << (view.active ? "true" : "false")
         << ",\"tier\":\"" << detail::settlement_tier_label(view.tier) << "\""
@@ -116,6 +138,12 @@ void write_settlement_economy(std::ostringstream& out, const SettlementEconomyVi
         << ",\"Merchant\":" << view.merchants
         << ",\"Unallocated\":" << view.unallocated_workers
         << "}"
+        << ",\"trade\":{"
+        << "\"coin\":" << view.coin
+        << ",\"merchants\":" << view.merchants
+        << ",\"pricesMillicoin\":";
+    write_prices(out, view.prices);
+    out << "}"
         << ",\"wealth\":{"
         << "\"min\":" << view.min_household_wealth
         << ",\"median\":" << view.median_household_wealth
@@ -186,7 +214,7 @@ std::uint32_t view_model_version(const ViewModelKind kind) noexcept {
         case ViewModelKind::DemoFocus:
             return 1U;
         case ViewModelKind::SettlementEconomy:
-            return 2U;
+            return 3U;
     }
     return 0U;
 }
@@ -273,6 +301,8 @@ std::optional<SettlementEconomyView> build_settlement_economy(const SimulationCo
         .craft_workers = summary_it->craft_workers,
         .merchants = summary_it->merchants,
         .unallocated_workers = summary_it->unallocated_workers,
+        .coin = settlement->coin,
+        .prices = controller.simulation().settlement_prices(settlement_id),
         .min_household_wealth = settlement->last_min_household_wealth,
         .median_household_wealth = settlement->last_median_household_wealth,
         .max_household_wealth = settlement->last_max_household_wealth,
