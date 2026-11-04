@@ -6655,6 +6655,9 @@ void Simulation::process_merchant_recruitment(const std::uint64_t demographic_ye
                 if (memory.merchant_id != merchant->id) {
                     continue;
                 }
+                if (!remembered_price_is_current(memory.seen_at, state_.time)) {
+                    continue;
+                }
                 remembered_prices[memory.settlement_id].millicoin[static_cast<std::size_t>(memory.resource)] =
                     memory.price_millicoin;
             }
@@ -6696,20 +6699,42 @@ void Simulation::process_merchant_recruitment(const std::uint64_t demographic_ye
         std::vector<SettlementId> known{settlement_id};
         known.insert(known.end(), neighbour_ids.begin(), neighbour_ids.end());
         for (const auto known_id : known) {
-            const auto known_prices = prices.at(known_id);
-            for (std::size_t resource = 0; resource < known_prices.millicoin.size(); ++resource) {
-                state_.merchant_price_memory.push_back(MerchantPriceMemory{
-                    .merchant_id = chosen->id,
-                    .settlement_id = known_id,
-                    .resource = static_cast<ResourceType>(resource),
-                    .price_millicoin = known_prices.millicoin[resource],
-                    .seen_at = state_.time,
-                });
-            }
+            remember_settlement_prices(chosen->id, known_id, prices.at(known_id));
         }
     }
 
     prune_merchant_memory();
+}
+
+void Simulation::remember_settlement_prices(
+    const PersonId merchant_id, const SettlementId settlement_id, const SettlementPrices& prices) {
+    std::erase_if(state_.merchant_price_memory, [&](const MerchantPriceMemory& memory) {
+        return memory.merchant_id == merchant_id && memory.settlement_id == settlement_id;
+    });
+    for (std::size_t resource = 0; resource < prices.millicoin.size(); ++resource) {
+        state_.merchant_price_memory.push_back(MerchantPriceMemory{
+            .merchant_id = merchant_id,
+            .settlement_id = settlement_id,
+            .resource = static_cast<ResourceType>(resource),
+            .price_millicoin = prices.millicoin[resource],
+            .seen_at = state_.time,
+        });
+    }
+}
+
+bool Simulation::merchant_observes_settlement_prices(const PersonId merchant_id, const SettlementId settlement_id) {
+    const auto person = std::find_if(
+        state_.people.begin(), state_.people.end(), [&](const Person& candidate) { return candidate.id == merchant_id; });
+    if (person == state_.people.end() || !person->alive || person->occupation != Occupation::Merchant) {
+        return false;
+    }
+    const auto current = settlement_prices(settlement_id);
+    if (!current.has_value()) {
+        return false;
+    }
+    remember_settlement_prices(merchant_id, settlement_id, *current);
+    prune_merchant_memory();
+    return true;
 }
 
 // A merchant who is gone, dead or no longer a merchant keeps no memory, and the

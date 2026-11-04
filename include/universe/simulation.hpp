@@ -721,6 +721,12 @@ public:
     // need (ADR 0003). Computed from canonical state, never stored. Empty for an
     // unknown or inactive settlement.
     [[nodiscard]] std::optional<SettlementPrices> settlement_prices(SettlementId settlement_id) const;
+    // A merchant sees a settlement's current prices and remembers them with the
+    // time (ADR 0003, #73). This is the one way a merchant learns a price after
+    // being trained: trips call it on arrival. Returns false, changing nothing,
+    // for a person who is not a living merchant or a settlement that is unknown
+    // or inactive.
+    bool merchant_observes_settlement_prices(PersonId merchant_id, SettlementId settlement_id);
     [[nodiscard]] SimulationTime time() const noexcept;
     [[nodiscard]] std::span<const AgentMemory> agent_memories() const noexcept;
     [[nodiscard]] std::vector<AgentMemory> memories_for_person(PersonId person_id) const;
@@ -821,6 +827,7 @@ private:
     void process_occupation_reassignment(std::uint64_t demographic_year);
     void process_merchant_recruitment(std::uint64_t demographic_year);
     void prune_merchant_memory();
+    void remember_settlement_prices(PersonId merchant_id, SettlementId settlement_id, const SettlementPrices& prices);
     void process_household_access_allocation();
     void process_household_stabilization_transfers();
     void process_local_exchange(std::uint64_t demographic_year);

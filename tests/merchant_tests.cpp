@@ -372,6 +372,205 @@ void test_snapshot_rejects_corrupt_merchant_memory() {
     expect_failure(too_many, universe::SnapshotErrorCode::TruncatedData, "a row count beyond the payload must be rejected");
 }
 
+// ---- Remembered prices (#73) ----
+
+void test_remembered_price_staleness_boundary() {
+    const universe::SimulationTime now{universe::days(2'000).ticks};
+    const auto at_age = [&](const std::int64_t age_days) {
+        return universe::SimulationTime{now.ticks - universe::days(age_days).ticks};
+    };
+    require(universe::remembered_price_is_current(now, now), "a price seen just now is current");
+    require(
+        universe::remembered_price_is_current(at_age(universe::kMerchantMemoryStaleDays), now),
+        "a price exactly at the staleness limit is still current");
+    require(
+        !universe::remembered_price_is_current(at_age(universe::kMerchantMemoryStaleDays + 1), now),
+        "a price past the staleness limit is not current");
+    require(
+        !universe::remembered_price_is_current(universe::SimulationTime{now.ticks + 1}, now),
+        "a price dated in the future is never current");
+    require(
+        universe::kMerchantMemoryStaleDays > 365,
+        "the limit must outlast the yearly decision or every merchant would retire on its first review");
+}
+
+// Rewrites every remembered row of a saved world through `edit(row) -> (price, seen_at)`.
+template <typename Edit>
+std::vector<std::byte> with_edited_memory(const universe::Simulation& source, Edit edit) {
+    auto bytes = source.save_snapshot();
+    const auto& rows = source.state().merchant_price_memory;
+    const auto section_start = bytes.size() - snapshot_test::merchant_section_size(source.state());
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        const auto [price, seen_at] = edit(rows[i]);
+        const auto offset = section_start + snapshot_test::kCountSize + (i * snapshot_test::kMerchantMemoryRowSize);
+        snapshot_test::write_u64_at(bytes, offset + 17U, static_cast<std::uint64_t>(price));
+        snapshot_test::write_u64_at(bytes, offset + 25U, static_cast<std::uint64_t>(seen_at.ticks));
+    }
+    refresh_hash(bytes);
+    return bytes;
+}
+
+std::vector<universe::PersonId> merchant_ids(const universe::WorldState& state) {
+    std::vector<universe::PersonId> ids;
+    for (const auto* merchant : merchants_in(state)) {
+        ids.push_back(merchant->id);
+    }
+    return ids;
+}
+
+// Counts how many of `original` are still merchants.
+std::size_t still_merchants(const universe::WorldState& state, const std::vector<universe::PersonId>& original) {
+    const auto now = merchant_ids(state);
+    return static_cast<std::size_t>(std::count_if(original.begin(), original.end(), [&now](const universe::PersonId id) {
+        return std::find(now.begin(), now.end(), id) != now.end();
+    }));
+}
+
+void load_world(const std::vector<std::byte>& bytes, universe::Simulation& destination) {
+    require(universe::Simulation::load_snapshot(bytes, destination).ok, "the edited snapshot must load");
+}
+
+// The merchant decides from what it remembers: remembered prices with no gap
+// retire it even though the settlements' current prices still show one.
+void test_a_merchant_acts_on_remembered_prices_not_current_ones() {
+    const auto seed = seed_with_a_merchant();
+    require(seed.has_value(), "a world with a merchant is needed");
+    universe::Simulation source{default_layout_config(*seed)};
+    source.run_years(6);
+    const auto original = merchant_ids(source.state());
+
+    // Control: freshly seen memory that shows a huge gap from home to every other
+    // settlement keeps at least one merchant at the next yearly review. (Rows are
+    // refreshed here because a merchant trained years ago holds stale rows.)
+    universe::Simulation control{universe::SimulationConfig{.seed = 999U, .initial_population = 10U}};
+    load_world(
+        with_edited_memory(
+            source,
+            [&](const universe::MerchantPriceMemory& row) {
+                const auto* household = household_of(source.state(), row.merchant_id);
+                const auto base = universe::base_price_millicoin(row.resource);
+                const bool is_home = household != nullptr && household->settlement_id == row.settlement_id;
+                return std::pair{is_home ? base / 4 : base * 4, source.time()};
+            }),
+        control);
+    control.run_years(1);
+    require(still_merchants(control.state(), original) > 0U, "control: a merchant whose memory shows a gap keeps trading");
+
+    // Flatten the remembered prices per resource (no gap anywhere in memory), fresh in time.
+    std::array<std::int64_t, 5> flat{};
+    std::array<bool, 5> seen{};
+    for (const auto& row : source.state().merchant_price_memory) {
+        const auto index = static_cast<std::size_t>(row.resource);
+        if (!seen[index]) {
+            flat[index] = row.price_millicoin;
+            seen[index] = true;
+        }
+    }
+    universe::Simulation flat_world{universe::SimulationConfig{.seed = 999U, .initial_population = 10U}};
+    load_world(
+        with_edited_memory(
+            source,
+            [&](const universe::MerchantPriceMemory& row) {
+                return std::pair{flat[static_cast<std::size_t>(row.resource)], source.time()};
+            }),
+        flat_world);
+    flat_world.run_years(1);
+    require(
+        still_merchants(flat_world.state(), original) == 0U,
+        "merchants who remember no gap retire, whatever the current prices are");
+    require_merchant_invariants(flat_world);
+}
+
+void test_a_stale_remembered_price_is_not_treated_as_current() {
+    const auto seed = seed_with_a_merchant();
+    require(seed.has_value(), "a world with a merchant is needed");
+    universe::Simulation source{default_layout_config(*seed)};
+    source.run_years(6);
+    const auto original = merchant_ids(source.state());
+
+    // Same prices as before, but seen long ago: past the staleness limit.
+    universe::Simulation stale_world{universe::SimulationConfig{.seed = 999U, .initial_population = 10U}};
+    load_world(
+        with_edited_memory(
+            source,
+            [](const universe::MerchantPriceMemory& row) {
+                return std::pair{row.price_millicoin, universe::SimulationTime{0}};
+            }),
+        stale_world);
+    stale_world.run_years(1);
+    require(
+        still_merchants(stale_world.state(), original) == 0U,
+        "merchants whose remembered prices are all stale act as if they knew nothing and retire");
+    require_merchant_invariants(stale_world);
+}
+
+void test_observing_a_settlement_updates_memory_with_its_prices_and_the_time() {
+    const auto seed = seed_with_a_merchant();
+    require(seed.has_value(), "a world with a merchant is needed");
+    universe::Simulation sim{default_layout_config(*seed)};
+    sim.run_years(6);
+    const auto merchant_id = sim.state().merchant_price_memory.front().merchant_id;
+    const auto settlement_id = sim.state().merchant_price_memory.front().settlement_id;
+
+    // Time passes (and prices may drift) out of the merchant's sight.
+    sim.advance(universe::days(40));
+    const auto before = sim.state().merchant_price_memory;
+    require(before.front().seen_at < sim.time(), "the memory predates now, so it is what the merchant last saw");
+
+    require(sim.merchant_observes_settlement_prices(merchant_id, settlement_id), "a living merchant can observe a settlement");
+    const auto current = sim.settlement_prices(settlement_id);
+    require(current.has_value(), "the observed settlement has prices");
+    std::size_t refreshed = 0;
+    for (const auto& row : sim.state().merchant_price_memory) {
+        if (row.merchant_id == merchant_id && row.settlement_id == settlement_id) {
+            require(row.price_millicoin == current->of(row.resource), "arrival stores the destination's current price");
+            require(row.seen_at == sim.time(), "arrival stores the time it was seen");
+            ++refreshed;
+        }
+    }
+    require(refreshed == 5U, "all five prices of the observed settlement are remembered, with no duplicates");
+    require(sim.state().merchant_price_memory.size() == before.size(), "observing a known settlement replaces its rows");
+    require_merchant_invariants(sim);
+
+    // Rows for other settlements are untouched.
+    for (const auto& row : before) {
+        if (row.merchant_id == merchant_id && row.settlement_id != settlement_id) {
+            require(
+                std::find(sim.state().merchant_price_memory.begin(), sim.state().merchant_price_memory.end(), row) !=
+                    sim.state().merchant_price_memory.end(),
+                "memory of other settlements is unchanged");
+        }
+    }
+
+    // And the updated memory survives save and load.
+    universe::Simulation restored{universe::SimulationConfig{.seed = 999U, .initial_population = 10U}};
+    load_world(sim.save_snapshot(), restored);
+    require(restored.state().merchant_price_memory == sim.state().merchant_price_memory, "observed prices must survive reload");
+}
+
+void test_only_a_living_merchant_can_observe_a_known_settlement() {
+    const auto seed = seed_with_a_merchant();
+    require(seed.has_value(), "a world with a merchant is needed");
+    universe::Simulation sim{default_layout_config(*seed)};
+    sim.run_years(6);
+    const auto snapshot_before = sim.save_snapshot();
+    const auto merchant_id = sim.state().merchant_price_memory.front().merchant_id;
+    const auto settlement_id = sim.state().merchant_price_memory.front().settlement_id;
+
+    require(!sim.merchant_observes_settlement_prices(0xFFFFFFULL, settlement_id), "an unknown person cannot observe");
+    require(!sim.merchant_observes_settlement_prices(merchant_id, 0xFFFFFFULL), "an unknown settlement cannot be observed");
+    universe::PersonId non_merchant = 0;
+    for (const auto& person : sim.state().people) {
+        if (person.alive && person.occupation != universe::Occupation::Merchant) {
+            non_merchant = person.id;
+            break;
+        }
+    }
+    require(non_merchant != 0U, "a non-merchant exists");
+    require(!sim.merchant_observes_settlement_prices(non_merchant, settlement_id), "a non-merchant keeps no price memory");
+    require(sim.save_snapshot() == snapshot_before, "a refused observation changes nothing");
+}
+
 }  // namespace
 
 int main() {
@@ -390,6 +589,11 @@ int main() {
     test_a_v27_snapshot_loads_with_no_remembered_prices();
     test_an_older_snapshot_cannot_carry_a_merchant();
     test_snapshot_rejects_corrupt_merchant_memory();
+    test_remembered_price_staleness_boundary();
+    test_a_merchant_acts_on_remembered_prices_not_current_ones();
+    test_a_stale_remembered_price_is_not_treated_as_current();
+    test_observing_a_settlement_updates_memory_with_its_prices_and_the_time();
+    test_only_a_living_merchant_can_observe_a_known_settlement();
     std::cout << "merchant tests passed\n";
     return 0;
 }
