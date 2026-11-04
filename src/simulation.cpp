@@ -6605,7 +6605,7 @@ void Simulation::process_merchant_recruitment(const std::uint64_t demographic_ye
                 }
             }
         }
-        const bool trade_pays = margin_clears_threshold(best);
+        const bool current_trade_pays = margin_clears_threshold(best);
 
         std::vector<Person*> merchants;
         std::vector<Person*> candidates;
@@ -6644,14 +6644,46 @@ void Simulation::process_merchant_recruitment(const std::uint64_t demographic_ye
             merchants.pop_back();
         }
 
-        const auto action = decide_merchant_action(
-            trade_pays, merchants.size(), eligible_adults, candidates.size(), settlement->days_under_food_strain > 0U);
-        if (action == MerchantAction::Retire) {
-            for (auto* merchant : merchants) {
+        // Each existing merchant acts only on its own remembered prices. The
+        // current derived prices above are used only to decide whether the
+        // settlement should appoint a new merchant; they must not make an
+        // existing merchant react to information it has not observed.
+        std::unordered_map<SettlementId, SettlementPrices> remembered_prices;
+        for (auto* merchant : merchants) {
+            remembered_prices.clear();
+            for (const auto& memory : state_.merchant_price_memory) {
+                if (memory.merchant_id != merchant->id) {
+                    continue;
+                }
+                remembered_prices[memory.settlement_id].millicoin[static_cast<std::size_t>(memory.resource)] =
+                    memory.price_millicoin;
+            }
+
+            bool remembered_trade_pays = false;
+            const auto remembered_home = remembered_prices.find(settlement_id);
+            if (remembered_home != remembered_prices.end() && has_trading_partner) {
+                for (const auto& [other_id, other_prices] : remembered_prices) {
+                    const auto* other = find_settlement(other_id);
+                    if (other_id == settlement_id || other == nullptr || !other->active ||
+                        !within_days_of_walking(
+                            settlement->position_x, settlement->position_z, other->position_x, other->position_z,
+                            kDaysWalkKnownNeighbours)) {
+                        continue;
+                    }
+                    if (margin_clears_threshold(best_margin(remembered_home->second, other_prices, holds))) {
+                        remembered_trade_pays = true;
+                        break;
+                    }
+                }
+            }
+            if (settlement->days_under_food_strain > 0U || !remembered_trade_pays) {
                 merchant->occupation = Occupation::None;
             }
-            continue;
         }
+        std::erase_if(merchants, [](const Person* merchant) { return merchant->occupation != Occupation::Merchant; });
+
+        const auto action = decide_merchant_action(
+            current_trade_pays, merchants.size(), eligible_adults, candidates.size(), settlement->days_under_food_strain > 0U);
         if (action != MerchantAction::Appoint) {
             continue;
         }
@@ -8517,11 +8549,12 @@ void Simulation::process_construction(const std::uint64_t demographic_year) {
                     continue;
                 }
 
-                // Unassigned adults are the labour construction draws on. A merchant is
-                // one of them until trips exist: it does no assigned work, so it counts
-                // as unallocated rather than as allocated labour. (A merchant away on a
-                // trip will be left out when trips are built.)
-                const bool is_unassigned = person.occupation == Occupation::None || person.occupation == Occupation::Merchant;
+                // Merchants do no construction work, whether or not trips have
+                // been implemented yet.
+                if (person.occupation == Occupation::Merchant) {
+                    continue;
+                }
+                const bool is_unassigned = person.occupation == Occupation::None;
                 auto& labour_pool = is_unassigned ? unallocated_labour_capacity : allocated_labour_capacity;
                 if (!checked_add_i64(labour_pool, productive_effort_for_person(person), labour_pool)) {
                     throw std::overflow_error("Construction labour capacity overflow");
