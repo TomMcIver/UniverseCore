@@ -153,6 +153,10 @@ struct UiState {
             return "OccupationChanged";
         case EventType::HouseholdRelocated:
             return "HouseholdRelocated";
+        case EventType::TradeDeparted:
+            return "TradeDeparted";
+        case EventType::TradeCompleted:
+            return "TradeCompleted";
     }
     return "Unknown";
 }

@@ -34,6 +34,12 @@ inline constexpr std::int64_t kMerchantMarginScale = 1'000;
 inline constexpr std::uint64_t kMerchantMinimumEligibleAdults = 12;
 inline constexpr std::uint64_t kMaxMerchantsPerSettlement = 2;
 
+// A remembered price older than this is stale: the merchant no longer treats it
+// as current and acts as if it knew nothing of that settlement. It is longer
+// than a year so a merchant trained at one yearly boundary still trusts what it
+// saw there at the next. First value, calibrated by #76.
+inline constexpr std::int64_t kMerchantMemoryStaleDays = 500;
+
 // What a merchant last saw of one settlement's price for one resource.
 struct MerchantPriceMemory {
     std::uint64_t merchant_id{};
@@ -44,6 +50,10 @@ struct MerchantPriceMemory {
 
     [[nodiscard]] bool operator==(const MerchantPriceMemory& other) const = default;
 };
+
+// Whether a price seen at `seen_at` is still current at `now`. A price dated in
+// the future is never current.
+[[nodiscard]] bool remembered_price_is_current(SimulationTime seen_at, SimulationTime now) noexcept;
 
 struct PriceMargin {
     ResourceType resource{ResourceType::Food};
