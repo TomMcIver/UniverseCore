@@ -269,6 +269,7 @@ constexpr std::uint16_t kMaxFacingDegreesExclusive = 360U;
 constexpr std::uint16_t kViabilitySectionSchemaVersion = 26U;
 constexpr std::uint16_t kCoinSectionSchemaVersion = 27U;
 constexpr std::uint16_t kMerchantMemorySchemaVersion = 28U;
+constexpr std::uint16_t kTradeTripSchemaVersion = 29U;
 
 // Reads the schema v26 section: one record per settlement in ascending id
 // order, carrying the days it has spent below the viable size and under food
@@ -501,6 +502,79 @@ constexpr std::uint16_t kMerchantMemorySchemaVersion = 28U;
     }
     if (active_settlement_count < 2U && !merchants_per_settlement.empty()) {
         return load_error(SnapshotErrorCode::InvalidState, "Snapshot has merchants in a world with fewer than two active settlements");
+    }
+    return SnapshotLoadResult{.ok = true, .code = SnapshotErrorCode::None, .message = {}};
+}
+
+// Reads the schema v29 section, last in the payload: trips in progress, one
+// record per merchant in strictly ascending merchant order. Every trip names a
+// living merchant and two different known settlements, carries a positive cargo
+// and non-negative coin and goods, and has a timeline that runs forward from a
+// departure no later than now. Only an outbound trip may have nothing carried
+// home, and a returning trip never carries more goods than it left with.
+[[nodiscard]] SnapshotLoadResult read_v29_trade_trip_section(SnapshotReader& reader, WorldState& state) {
+    std::uint64_t trip_count = 0;
+    if (!reader.read_u64(trip_count)) {
+        return load_error(SnapshotErrorCode::TruncatedData, "Snapshot trade trip section is truncated");
+    }
+    if (trip_count > reader.remaining() / 82U) {
+        return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot trade trip section has invalid length");
+    }
+
+    std::unordered_map<PersonId, const Person*> person_by_id;
+    person_by_id.reserve(state.people.size());
+    for (const auto& person : state.people) {
+        person_by_id.emplace(person.id, &person);
+    }
+    std::unordered_set<SettlementId> settlement_ids;
+    for (const auto& settlement : state.settlements) {
+        settlement_ids.insert(settlement.id);
+    }
+
+    state.merchant_trips.clear();
+    for (std::uint64_t i = 0; i < trip_count; ++i) {
+        MerchantTrip trip{};
+        std::uint8_t resource_raw = 0;
+        std::uint8_t phase_raw = 0;
+        if (!reader.read_u64(trip.merchant_id) || !reader.read_u64(trip.origin_settlement_id) ||
+            !reader.read_u64(trip.destination_settlement_id) || !reader.read_u8(resource_raw) ||
+            !reader.read_i64(trip.cargo_units) || !reader.read_i64(trip.coin_outlay) || !reader.read_i64(trip.coin_carried) ||
+            !reader.read_i64(trip.unsold_units) || !reader.read_i64(trip.departed_at.ticks) ||
+            !reader.read_i64(trip.arrives_at.ticks) || !reader.read_i64(trip.returns_at.ticks) || !reader.read_u8(phase_raw)) {
+            return load_error(SnapshotErrorCode::TruncatedData, "Snapshot trade trip record is truncated");
+        }
+        if (resource_raw > static_cast<std::uint8_t>(ResourceType::BasicTool) ||
+            phase_raw > static_cast<std::uint8_t>(TripPhase::Returning)) {
+            return load_error(SnapshotErrorCode::InvalidEnum, "Snapshot trade trip names an unknown resource or phase");
+        }
+        trip.resource = static_cast<ResourceType>(resource_raw);
+        trip.phase = static_cast<TripPhase>(phase_raw);
+
+        if (!state.merchant_trips.empty() && !(state.merchant_trips.back().merchant_id < trip.merchant_id)) {
+            return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot trade trips must be in strictly ascending merchant order");
+        }
+        const auto person_it = person_by_id.find(trip.merchant_id);
+        if (person_it == person_by_id.end() || !person_it->second->alive || person_it->second->occupation != Occupation::Merchant) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot trade trip must belong to a living merchant");
+        }
+        if (!settlement_ids.contains(trip.origin_settlement_id) || !settlement_ids.contains(trip.destination_settlement_id)) {
+            return load_error(SnapshotErrorCode::InvalidReference, "Snapshot trade trip references unknown settlement");
+        }
+        if (trip.origin_settlement_id == trip.destination_settlement_id) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot trade trip must run between two settlements");
+        }
+        if (trip.cargo_units <= 0 || trip.coin_outlay < 0 || trip.coin_carried < 0 || trip.unsold_units < 0 ||
+            trip.unsold_units > trip.cargo_units) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot trade trip cargo or coin is invalid");
+        }
+        if (trip.phase == TripPhase::Outbound && (trip.coin_carried != 0 || trip.unsold_units != 0)) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot outbound trade trip carries nothing home");
+        }
+        if (trip.departed_at.ticks < 0 || trip.departed_at.ticks > state.time.ticks || !(trip.departed_at < trip.arrives_at) ||
+            !(trip.arrives_at < trip.returns_at)) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot trade trip timeline is invalid");
+        }
+        state.merchant_trips.push_back(trip);
     }
     return SnapshotLoadResult{.ok = true, .code = SnapshotErrorCode::None, .message = {}};
 }
@@ -905,6 +979,17 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
             for (const auto member_id : payload_data->member_ids) {
                 payload.write_u64(member_id);
             }
+        } else if (event->type == EventType::TradeDeparted || event->type == EventType::TradeCompleted) {
+            const auto* payload_data = std::get_if<TradeEventPayload>(&event->payload);
+            if (payload_data == nullptr) {
+                throw std::invalid_argument("Trade event payload mismatch");
+            }
+            payload.write_u64(payload_data->merchant_id);
+            payload.write_u64(payload_data->origin_settlement_id);
+            payload.write_u64(payload_data->destination_settlement_id);
+            payload.write_u8(static_cast<std::uint8_t>(payload_data->resource));
+            payload.write_i64(payload_data->cargo_units);
+            payload.write_i64(payload_data->coin_profit);
         } else {
             throw std::invalid_argument("Unknown event type");
         }
@@ -1364,6 +1449,24 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
         payload.write_i64(memory.seen_at.ticks);
     }
 
+    // Schema v29 section, last in the payload: trips in progress, in the state's
+    // ascending merchant id order (one 82-byte record per trip).
+    payload.write_u64(static_cast<std::uint64_t>(simulation.state_.merchant_trips.size()));
+    for (const auto& trip : simulation.state_.merchant_trips) {
+        payload.write_u64(trip.merchant_id);
+        payload.write_u64(trip.origin_settlement_id);
+        payload.write_u64(trip.destination_settlement_id);
+        payload.write_u8(static_cast<std::uint8_t>(trip.resource));
+        payload.write_i64(trip.cargo_units);
+        payload.write_i64(trip.coin_outlay);
+        payload.write_i64(trip.coin_carried);
+        payload.write_i64(trip.unsold_units);
+        payload.write_i64(trip.departed_at.ticks);
+        payload.write_i64(trip.arrives_at.ticks);
+        payload.write_i64(trip.returns_at.ticks);
+        payload.write_u8(static_cast<std::uint8_t>(trip.phase));
+    }
+
     auto payload_bytes = payload.take();
     const auto payload_hash = fnv1a64(payload_bytes);
 
@@ -1407,6 +1510,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     const bool has_viability_section = version >= kViabilitySectionSchemaVersion;
     const bool has_coin_section = version >= kCoinSectionSchemaVersion;
     const bool has_merchant_memory_section = version >= kMerchantMemorySchemaVersion;
+    const bool has_trade_trip_section = version >= kTradeTripSchemaVersion;
 
     if (reserved != 0U) {
         return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot reserved header field must be zero");
@@ -1823,7 +1927,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
 
         const auto max_event_type = is_v24_migration
             ? static_cast<std::uint8_t>(EventType::SettlementMerged)
-            : static_cast<std::uint8_t>(EventType::HouseholdRelocated);
+            : static_cast<std::uint8_t>(has_trade_trip_section ? EventType::TradeCompleted : EventType::HouseholdRelocated);
         if (type_raw > max_event_type) {
             return load_error(SnapshotErrorCode::InvalidEnum, "Snapshot event type is invalid");
         }
@@ -1945,6 +2049,22 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
                 }
                 payload_data.member_ids.push_back(member_id);
             }
+            event.payload = payload_data;
+        } else if (event.type == EventType::TradeDeparted || event.type == EventType::TradeCompleted) {
+            TradeEventPayload payload_data{};
+            std::uint8_t resource_raw = 0;
+            if (!payload_reader.read_u64(payload_data.merchant_id) ||
+                !payload_reader.read_u64(payload_data.origin_settlement_id) ||
+                !payload_reader.read_u64(payload_data.destination_settlement_id) ||
+                !payload_reader.read_u8(resource_raw) ||
+                !payload_reader.read_i64(payload_data.cargo_units) ||
+                !payload_reader.read_i64(payload_data.coin_profit)) {
+                return load_error(SnapshotErrorCode::TruncatedData, "Snapshot trade event payload is truncated");
+            }
+            if (resource_raw > static_cast<std::uint8_t>(ResourceType::BasicTool)) {
+                return load_error(SnapshotErrorCode::InvalidEnum, "Snapshot trade event resource is invalid");
+            }
+            payload_data.resource = static_cast<ResourceType>(resource_raw);
             event.payload = payload_data;
         }
 
@@ -2259,9 +2379,8 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         if (tool_wear_work_units >= kToolWearWorkUnitsPerBreak) {
             return load_error(SnapshotErrorCode::InvalidState, "Snapshot tool wear remainder is out of canonical range");
         }
-        if (cumulative_basic_tool_broken > cumulative_basic_tool_produced) {
-            return load_error(SnapshotErrorCode::InvalidState, "Snapshot broken tools cannot exceed cumulative production");
-        }
+        // Tools now travel between settlements (ADR 0003), so one settlement may
+        // break more tools than it made; the world-wide check below still holds.
 
         auto* settlement = settlement_it->second;
         settlement->materials.wood.value = wood;
@@ -3111,6 +3230,14 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         }
     }
 
+    // Snapshots before v29 carry no trips: every merchant is at home.
+    if (has_trade_trip_section) {
+        const auto trip_result = read_v29_trade_trip_section(payload_reader, restored_state);
+        if (!trip_result.ok) {
+            return trip_result;
+        }
+    }
+
     if (!payload_reader.fully_consumed()) {
         return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot payload has trailing undecoded bytes");
     }
@@ -3750,6 +3877,24 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
                     return load_error(SnapshotErrorCode::InvalidReference, "Snapshot household relocated members must be known and ascending");
                 }
                 previous_member_id = member_id;
+            }
+        } else if (event.type == EventType::TradeDeparted || event.type == EventType::TradeCompleted) {
+            if (!std::holds_alternative<TradeEventPayload>(event.payload)) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot event payload does not match trade type");
+            }
+            const auto& payload_data = std::get<TradeEventPayload>(event.payload);
+            if (!person_by_id.contains(payload_data.merchant_id)) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot trade event references unknown merchant");
+            }
+            if (!settlement_by_id.contains(payload_data.origin_settlement_id) ||
+                !settlement_by_id.contains(payload_data.destination_settlement_id)) {
+                return load_error(SnapshotErrorCode::InvalidReference, "Snapshot trade event references unknown settlement");
+            }
+            if (payload_data.origin_settlement_id == payload_data.destination_settlement_id) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot trade event must name two settlements");
+            }
+            if (payload_data.cargo_units <= 0) {
+                return load_error(SnapshotErrorCode::InvalidState, "Snapshot trade event cargo must be positive");
             }
         }
     }

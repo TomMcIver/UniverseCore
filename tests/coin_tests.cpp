@@ -194,8 +194,10 @@ void test_snapshot_rejects_corrupt_coin_sections() {
         universe::SnapshotErrorCode::InvalidState, "a world coin total that overflows must be rejected");
     require_load_fails_with(
         corrupt([&](auto& b) {
-            // Cut the merchant section off, then four more bytes out of the coin section.
-            b.resize(b.size() - snapshot_test::merchant_section_size(source.state()) - 4U);
+            // Cut the trip and merchant sections off, then four more bytes out of the coin section.
+            b.resize(
+                b.size() - snapshot_test::trade_trip_section_size(source.state()) -
+                snapshot_test::merchant_section_size(source.state()) - 4U);
         }),
         universe::SnapshotErrorCode::TruncatedData, "a truncated coin section must be rejected");
 }

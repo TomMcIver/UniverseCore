@@ -394,6 +394,11 @@ Current implementation status:
   - A row must belong to a living merchant, name a known settlement, hold a price between the floor and ceiling of its resource, and not be dated after the simulation time.
   - v24-v27 snapshots migrate with no remembered prices. `Occupation::Merchant` (value 6) is accepted wherever an occupation is read.
   - Merchants are trained and retired once a year inside the occupation bracket (`process_merchant_recruitment`), so each change is recorded by the existing occupation-changed event.
+- snapshot schema v29 adds trade trips (ADR 0003): one record per merchant currently away:
+  - The section is last in the payload, after the merchant memory: a count, then one 82-byte record per trip (merchant id u64, origin settlement u64, destination settlement u64, resource u8, cargo units i64, coin outlay i64, coin carried i64, unsold units i64, departed at i64, arrives at i64, returns at i64, phase u8 where 0 is outbound and 1 returning), in strictly ascending merchant id order.
+  - A trip must belong to a living merchant, join two different known settlements, carry a positive cargo with non-negative coin and goods (unsold no more than the cargo), carry nothing home while outbound, and have a departure no later than now with arrival after departure and return after arrival.
+  - v24-v28 snapshots migrate with every merchant at home. Event types 9 (`TradeDeparted`) and 10 (`TradeCompleted`) share one payload (merchant, origin, destination, resource byte, cargo units, coin profit) and are rejected in files older than v29.
+  - Trips advance once a day with the food period (`Simulation::process_trade_period`, `src/simulation_trade.cpp`); the pure arithmetic (reach, load, profit, split) is in `trade_trip.hpp`.
 
 Settlement prices (ADR 0003, `trade_pricing.hpp`, `Simulation::settlement_prices`):
 

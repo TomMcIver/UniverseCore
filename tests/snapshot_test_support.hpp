@@ -29,9 +29,17 @@ inline std::size_t merchant_section_size(const universe::WorldState& state) {
     return kCountSize + (state.merchant_price_memory.size() * kMerchantMemoryRowSize);
 }
 
-// Everything after the aggregate demography totals: coin, then merchant memory.
+// Size of the schema v29 trade trip section, which is last in the payload: a
+// count and one 82-byte record per trip in progress.
+inline constexpr std::size_t kTradeTripRecordSize = 82U;
+inline std::size_t trade_trip_section_size(const universe::WorldState& state) {
+    return kCountSize + (state.merchant_trips.size() * kTradeTripRecordSize);
+}
+
+// Everything after the aggregate demography totals: coin, merchant memory, then
+// trade trips.
 inline std::size_t trailing_sections_size(const universe::WorldState& state) {
-    return coin_section_size(state) + merchant_section_size(state);
+    return coin_section_size(state) + merchant_section_size(state) + trade_trip_section_size(state);
 }
 
 inline void write_u64_at(std::vector<std::byte>& bytes, const std::size_t offset, const std::uint64_t value) {
@@ -58,14 +66,19 @@ inline std::vector<std::byte> truncate_to_version(
     return bytes;
 }
 
-// Rewrites a current (v28) snapshot as v27 by removing the merchant memory section.
-inline std::vector<std::byte> downgrade_to_v27(const std::vector<std::byte>& v28_bytes, const universe::WorldState& state) {
-    return truncate_to_version(v28_bytes, merchant_section_size(state), 27U);
+// Rewrites a current (v29) snapshot as v28 by removing the trade trip section.
+inline std::vector<std::byte> downgrade_to_v28(const std::vector<std::byte>& v29_bytes, const universe::WorldState& state) {
+    return truncate_to_version(v29_bytes, trade_trip_section_size(state), 28U);
 }
 
-// Rewrites a current (v28) snapshot as v26 by removing the merchant and coin sections.
-inline std::vector<std::byte> downgrade_to_v26(const std::vector<std::byte>& v28_bytes, const universe::WorldState& state) {
-    return truncate_to_version(v28_bytes, trailing_sections_size(state), 26U);
+// Rewrites a current (v29) snapshot as v27 by removing the trip and merchant memory sections.
+inline std::vector<std::byte> downgrade_to_v27(const std::vector<std::byte>& v29_bytes, const universe::WorldState& state) {
+    return truncate_to_version(v29_bytes, trade_trip_section_size(state) + merchant_section_size(state), 27U);
+}
+
+// Rewrites a current (v29) snapshot as v26 by removing the trip, merchant and coin sections.
+inline std::vector<std::byte> downgrade_to_v26(const std::vector<std::byte>& v29_bytes, const universe::WorldState& state) {
+    return truncate_to_version(v29_bytes, trailing_sections_size(state), 26U);
 }
 
 }  // namespace snapshot_test

@@ -11,7 +11,7 @@ namespace universe::ui {
 
 namespace {
 
-constexpr std::array<std::pair<LifeEntryKind, std::string_view>, 11> kEntryKindLabels{{
+constexpr std::array<std::pair<LifeEntryKind, std::string_view>, 13> kEntryKindLabels{{
     {LifeEntryKind::Born, "Born"},
     {LifeEntryKind::HadChild, "HadChild"},
     {LifeEntryKind::Died, "Died"},
@@ -23,6 +23,8 @@ constexpr std::array<std::pair<LifeEntryKind, std::string_view>, 11> kEntryKindL
     {LifeEntryKind::Taught, "Taught"},
     {LifeEntryKind::AuthoredRecord, "AuthoredRecord"},
     {LifeEntryKind::ReadRecord, "ReadRecord"},
+    {LifeEntryKind::TradeDeparted, "TradeDeparted"},
+    {LifeEntryKind::TradeCompleted, "TradeCompleted"},
 }};
 
 [[nodiscard]] std::string job_name(const Occupation occupation) {
@@ -43,6 +45,22 @@ constexpr std::array<std::pair<LifeEntryKind, std::string_view>, 11> kEntryKindL
             return "merchant";
     }
     return "unknown job";
+}
+
+[[nodiscard]] std::string resource_name(const ResourceType resource) {
+    switch (resource) {
+        case ResourceType::Food:
+            return "food";
+        case ResourceType::Wood:
+            return "wood";
+        case ResourceType::Stone:
+            return "stone";
+        case ResourceType::Timber:
+            return "timber";
+        case ResourceType::BasicTool:
+            return "tools";
+    }
+    return "goods";
 }
 
 [[nodiscard]] std::string person_name(const PersonId id) {
@@ -112,6 +130,16 @@ void collect_event_entries(const SimulationController& controller, const Simulat
                 "Household moved from " + settlement_name(controller, moved->from_settlement_id) + " to " +
                     settlement_name(controller, moved->to_settlement_id));
         }
+    } else if (const auto* trade = std::get_if<TradeEventPayload>(&event.payload)) {
+        if (trade->merchant_id == person_id) {
+            const auto departed = event.type == EventType::TradeDeparted;
+            add(departed ? LifeEntryKind::TradeDeparted : LifeEntryKind::TradeCompleted, std::nullopt,
+                departed ? "Set out from " + settlement_name(controller, trade->origin_settlement_id) + " for " +
+                        settlement_name(controller, trade->destination_settlement_id) + " with " +
+                        std::to_string(trade->cargo_units) + " " + resource_name(trade->resource)
+                         : "Came home from " + settlement_name(controller, trade->destination_settlement_id) +
+                        " with a profit of " + std::to_string(trade->coin_profit) + " coin");
+        }
     } else if (const auto* discovery = std::get_if<DiscoveryMadeEventPayload>(&event.payload)) {
         if (discovery->discoverer_id == person_id) {
             add(LifeEntryKind::MadeDiscovery, std::nullopt,
@@ -178,7 +206,8 @@ void collect_knowledge_entries(const SimulationController& controller, const Per
 
 [[nodiscard]] bool counts_as_life_event(const LifeEntryKind kind) noexcept {
     return kind != LifeEntryKind::LearnedFrom && kind != LifeEntryKind::Taught &&
-        kind != LifeEntryKind::AuthoredRecord && kind != LifeEntryKind::ReadRecord;
+        kind != LifeEntryKind::AuthoredRecord && kind != LifeEntryKind::ReadRecord &&
+        kind != LifeEntryKind::TradeDeparted && kind != LifeEntryKind::TradeCompleted;
 }
 
 }  // namespace
@@ -324,6 +353,16 @@ std::string describe_event(const SimulationController& controller, const Simulat
     if (const auto* moved = std::get_if<HouseholdRelocatedEventPayload>(&event.payload)) {
         return "Household " + std::to_string(moved->household_id) + " moved from " +
             settlement_name(controller, moved->from_settlement_id) + " to " + settlement_name(controller, moved->to_settlement_id);
+    }
+    if (const auto* trade = std::get_if<TradeEventPayload>(&event.payload)) {
+        if (event.type == EventType::TradeDeparted) {
+            return person_name(trade->merchant_id) + " set out from " + settlement_name(controller, trade->origin_settlement_id) +
+                " for " + settlement_name(controller, trade->destination_settlement_id) + " with " +
+                std::to_string(trade->cargo_units) + " " + resource_name(trade->resource);
+        }
+        return person_name(trade->merchant_id) + " came home to " + settlement_name(controller, trade->origin_settlement_id) +
+            " from " + settlement_name(controller, trade->destination_settlement_id) + " with a profit of " +
+            std::to_string(trade->coin_profit) + " coin";
     }
     return "Something happened";
 }
