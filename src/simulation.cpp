@@ -2277,7 +2277,9 @@ void Simulation::process_demography_period(const std::uint64_t demographic_year)
         occupations_before.emplace(person.id, person.occupation);
     }
     process_occupation_reassignment(demographic_year);
-    process_merchant_recruitment(demographic_year);
+    if (config_.trade_enabled) {
+        process_merchant_recruitment(demographic_year);
+    }
     // A merchant who died or merged away this year ends their trip now, so the
     // trip table never names someone who is gone.
     resolve_orphaned_trips();
@@ -2568,6 +2570,12 @@ std::unordered_set<PersonId> Simulation::collect_canonized_person_ids() const {
             const auto& payload = std::get<InstitutionFoundedEventPayload>(event.payload);
             canonized.insert(payload.founder_id);
         }
+    }
+
+    // A merchant on a trip carries cargo and coin the world must keep, so they
+    // stay resident through a demote and promote cycle, trip intact.
+    for (const auto& trip : state_.merchant_trips) {
+        canonized.insert(trip.merchant_id);
     }
 
     canonized.erase(0U);

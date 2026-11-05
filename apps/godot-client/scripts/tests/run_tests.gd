@@ -162,7 +162,11 @@ func _initialize() -> void:
 	_run_test("world_view clock runs a day per two minutes at 1x", Callable(self, "_test_world_view_clock_runs_a_day_per_two_minutes_at_1x"))
 	_run_test("world_view never walks a Home-kind agent", Callable(self, "_test_world_view_home_kind_agent_never_walks"))
 	_run_test("world_view snaps instead of walking above the high-speed threshold", Callable(self, "_test_world_view_high_speed_snaps_instead_of_walking"))
-	_run_test("world_view resolves a Field target from VillageDressing", Callable(self, "_test_world_view_field_target_resolved_from_village_dressing"))
+	_run_test("world_view draws a merchant on the road between settlements", Callable(self, "_test_world_view_merchant_travels_between_settlements"))
+	_run_test("world_view marks a travelling merchant as away and never at home", Callable(self, "_test_world_view_merchant_is_away_while_travelling"))
+	_run_test("world_view merchant trip follows tracks within a region and goes straight across regions", Callable(self, "_test_world_view_merchant_trip_routes"))
+	_run_test("world_view merchant snaps between stops at high speed", Callable(self, "_test_world_view_merchant_trip_snaps_at_high_speed"))
+	_run_test("world_view resolves a Field target from VillageDressing",Callable(self, "_test_world_view_field_target_resolved_from_village_dressing"))
 	_run_test("world_view updates an agent's activity label on a delta update", Callable(self, "_test_world_view_activity_label_updates_on_delta"))
 	_run_test("world_view preserves agent node identity across a delta upsert", Callable(self, "_test_world_view_upsert_preserves_node_identity"))
 
@@ -525,6 +529,30 @@ func _test_economy_panel_renders() -> void:
 	_assert_eq(text.find("Farmers: 40") >= 0, true, "expected job line")
 	_assert_eq(text.find("Quarriers: 0") >= 0, true, "missing job reads zero")
 	_assert_eq(text.find("Inequality: 0.35") >= 0, true, "expected inequality")
+	_assert_eq(text.find("Trade: no data") >= 0, true, "missing trade block reads no data")
+	panel.show_view_model("settlement_economy", 3, {
+		"active": true, "tier": "Town",
+		"trade": {"coin": 1234567, "merchants": 2, "pricesMillicoin": {"Food": 2500, "Wood": 20000, "Stone": 5000, "Timber": 160000, "BasicTool": 80}},
+	})
+	text = panel._content.text
+	_assert_eq(text.find("Coin: 1,234,567") >= 0, true, "coin is grouped")
+	_assert_eq(text.find("Merchants: 2") >= 0, true, "merchant count shown")
+	_assert_eq(text.find("Food: 2.50 coin/unit") >= 0, true, "fractional price in coin per unit")
+	_assert_eq(text.find("Wood: 20 coin/unit") >= 0, true, "whole price drops decimals")
+	_assert_eq(text.find("Timber: 160 coin/unit") >= 0, true, "timber price")
+	_assert_eq(text.find("BasicTool: 0.08 coin/unit") >= 0, true, "sub-coin price")
+	_assert_eq(text.find("Trips:") < 0, true, "no trip section without trip data")
+	panel.show_view_model("settlement_economy", 3, {
+		"trade": {"coin": 5, "merchants": 1, "pricesMillicoin": null,
+			"trips": [{"merchantId": 9, "origin": 3, "destination": 4, "resource": "Wood", "cargoUnits": 1030, "phase": "Outbound", "expectedProfit": 12},
+				{"merchantId": 11, "origin": 4, "destination": 3, "resource": "Food", "cargoUnits": 5, "phase": "Returning", "expectedProfit": 2}]},
+	})
+	text = panel._content.text
+	_assert_eq(text.find("Prices: none (abandoned)") >= 0, true, "null prices read none")
+	_assert_eq(text.find("Trips:") >= 0, true, "trip section shown")
+	_assert_eq(text.find("Merchant 9: 1,030 wood, settlement 3 to 4 (heading out), expected profit 12 coin") >= 0, true, "outbound trip line")
+	_assert_eq(text.find("Merchant 11: 5 food, settlement 4 to 3 (coming home), expected profit 2 coin") >= 0, true, "returning trip line")
+	_assert_eq(panel.supported_version("settlement_economy"), 4, "panel speaks view model v4")
 	panel.queue_free()
 
 func _test_orbit_camera_frames_a_wide_area() -> void:
@@ -1000,6 +1028,131 @@ func _test_world_view_high_speed_snaps_instead_of_walking() -> void:
 	var at_work := Vector2(node.position.x, node.position.z).distance_to(Vector2(40.0, 0.0)) < 12.0
 	var at_home := absf(node.position.x) < 5.0
 	_assert_eq(at_work or at_home, true, "at a speed above the walking-visible threshold, an agent must snap to home or the target, never a mid-walk point")
+	view.queue_free()
+
+## A merchant at home in settlement 1 (centre 0,0) on a trip to settlement 2
+## (centre 200,0): out from tick 1000, arriving at 5000, back home by 9000.
+func _merchant_trip_view(origin_region: int = 1, destination_region: int = 1) -> WorldView:
+	var view := WorldView.new()
+	root.add_child(view)
+	view.apply_snapshot({
+		"agents": [{
+			"id": 5, "sex": "Male", "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+			"householdId": 1, "regionId": origin_region,
+			"currentActivity": "Idle", "targetKind": "Home", "occupation": "Merchant",
+			"trip": {
+				"originId": 1, "destinationId": 2,
+				"origin": {"x": 0.0, "z": 0.0}, "destination": {"x": 200.0, "z": 0.0},
+				"departTick": 1000, "arriveTick": 5000, "returnTick": 9000,
+			},
+		}],
+		"settlements": [
+			{"id": 1, "regionId": origin_region, "active": true, "position": {"x": 0.0, "y": 0.0, "z": 0.0}},
+			{"id": 2, "regionId": destination_region, "active": true, "position": {"x": 200.0, "y": 0.0, "z": 0.0}},
+		],
+		"buildings": [],
+	})
+	return view
+
+func _flat(node: Node3D) -> Vector2:
+	return Vector2(node.position.x, node.position.z)
+
+func _test_world_view_merchant_travels_between_settlements() -> void:
+	var view := _merchant_trip_view()
+	view.set_simulation_playback(false, 1)
+	var node: Node3D = view.agent_node(5)
+
+	view.set_tick(500)
+	view._process(0.0)
+	_assert_eq(view.trip_phase(5), "none", "before departure the merchant is not on a trip")
+	_assert_eq(_flat(node).distance_to(Vector2.ZERO) < 3.0, true, "before departure the merchant stands at home")
+
+	view.set_tick(2000)
+	for _frame in range(40):  # 40 s at 1.3 units/s: about 52 units along the road
+		view.set_tick(2000)
+		view._process(1.0)
+	_assert_eq(view.trip_phase(5), "outbound", "after departure the merchant is outbound")
+	var mid := _flat(node)
+	_assert_eq(mid.x > 20.0 and mid.x < 150.0, true, "an outbound merchant is on the road between the settlements, at x=%s" % mid.x)
+
+	view.set_tick(4000)
+	for _frame in range(200):  # long enough to cover the 200 units
+		view.set_tick(4000)
+		view._process(1.0)
+	_assert_eq(_flat(node).distance_to(Vector2(200.0, 0.0)) < 3.0, true, "the merchant reaches the destination settlement")
+
+	view.set_tick(6000)  # past the arrival tick: heading back to the origin
+	_assert_eq(view.trip_phase(5), "returning", "after the arrival tick the merchant is returning")
+	for _frame in range(40):
+		view.set_tick(6000)
+		view._process(1.0)
+	_assert_eq(_flat(node).x < 190.0, true, "a returning merchant walks back toward the origin")
+	for _frame in range(200):
+		view.set_tick(6000)
+		view._process(1.0)
+	_assert_eq(_flat(node).distance_to(Vector2.ZERO) < 3.0, true, "the merchant is back at the origin settlement")
+
+	view.set_tick(9500)  # trip over
+	_assert_eq(view.trip_phase(5), "none", "after the return tick the trip is over")
+	view.queue_free()
+
+func _test_world_view_merchant_is_away_while_travelling() -> void:
+	var view := _merchant_trip_view()
+	view.set_simulation_playback(false, 1)
+	view.set_tick(500)
+	_assert_eq(view.is_away_on_trip(5), false, "a merchant before departure is not away")
+	_assert_eq(view.agent_label(5).text, "Idle", "a merchant at home keeps its ordinary label")
+	view.set_tick(2000)
+	view._process(1.0)
+	_assert_eq(view.is_away_on_trip(5), true, "a merchant on a trip is away")
+	_assert_eq(view.agent_label(5).text, "Trading (outbound)", "a travelling merchant is marked as trading")
+	_assert_eq(view._resolve_agent_position(5).x > 100.0, true, "an away merchant's goal is the destination, never their home slot")
+	view.set_tick(6000)
+	view._process(0.0)
+	_assert_eq(view.agent_label(5).text, "Trading (returning)", "the mark follows the trip phase between server messages")
+	# A delta that drops the trip puts the merchant back to normal.
+	view.apply_delta({
+		"addedAgents": [], "removedAgentIds": [],
+		"updatedAgents": [{"id": 5, "sex": "Male", "position": {"x": 0.0, "y": 0.0, "z": 0.0}, "currentActivity": "Idle", "targetKind": "Home", "trip": null}],
+		"addedSettlements": [], "updatedSettlements": [], "removedSettlementIds": [],
+		"addedBuildings": [], "updatedBuildings": [], "removedBuildingIds": [],
+	})
+	_assert_eq(view.is_away_on_trip(5), false, "a merchant whose trip ended is no longer away")
+	_assert_eq(view.agent_label(5).text, "Idle", "the trading mark clears when the trip ends")
+	view.queue_free()
+
+func _test_world_view_merchant_trip_routes() -> void:
+	# Within one region the road follows the drawn tracks...
+	var same := _merchant_trip_view(1, 1)
+	var dressing := FakeRoutingDressing.new()
+	root.add_child(dressing)
+	same.set_village_dressing(dressing)
+	same.set_simulation_playback(false, 1)
+	same.set_tick(2000)
+	same._process(1.0)
+	_assert_eq(same.walking_route_counts()["routed"], 1, "a trip inside one region follows the track route")
+	same.queue_free()
+	# ...across regions there is no track, so the walk is a straight line.
+	var across := _merchant_trip_view(1, 2)
+	across.set_village_dressing(dressing)
+	across.set_simulation_playback(false, 1)
+	across.set_tick(2000)
+	across._process(1.0)
+	_assert_eq(across.walking_route_counts()["walking"], 1, "a cross-region merchant is walking")
+	_assert_eq(across.walking_route_counts()["routed"], 0, "a trip across regions is a straight line")
+	across.queue_free()
+	dressing.queue_free()
+
+func _test_world_view_merchant_trip_snaps_at_high_speed() -> void:
+	var view := _merchant_trip_view()
+	view.set_simulation_playback(false, view.WALKING_VISIBLE_MAX_SPEED + 1)
+	var node: Node3D = view.agent_node(5)
+	view.set_tick(2000)
+	view._process(0.0)
+	_assert_eq(_flat(node).distance_to(Vector2(200.0, 0.0)) < 3.0, true, "above the walking-visible speed an outbound merchant snaps to the destination")
+	view.set_tick(6000)
+	view._process(0.0)
+	_assert_eq(_flat(node).distance_to(Vector2.ZERO) < 3.0, true, "and a returning merchant snaps to the origin")
 	view.queue_free()
 
 func _test_world_view_field_target_resolved_from_village_dressing() -> void:

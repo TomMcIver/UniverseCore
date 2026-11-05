@@ -411,7 +411,7 @@ void test_save_and_load_mid_trip_continues_identically() {
     require(source.save_snapshot() == restored.save_snapshot(), "a reloaded world finishes the trip exactly as the original does");
 }
 
-void test_demoting_every_region_ends_trips_without_losing_coin() {
+void test_demoting_every_region_keeps_trips_without_losing_coin() {
     const auto seed = seed_with_a_trip();
     require(seed.has_value(), "a world must schedule a trip");
     universe::Simulation sim{default_layout_config(*seed)};
@@ -425,8 +425,8 @@ void test_demoting_every_region_ends_trips_without_losing_coin() {
     for (const auto region_id : regions) {
         sim.demote_region_to_settlement_aggregate(region_id);
     }
-    require(sim.state().merchant_trips.empty(), "folded merchants end their trips");
-    require(total_coin(sim.state()) == coin, "ending a trip never changes total coin");
+    require(!sim.state().merchant_trips.empty(), "a merchant on a trip stays resident, trip intact (#74)");
+    require(total_coin(sim.state()) == coin, "demotion never changes total coin");
     universe::Simulation restored{universe::SimulationConfig{.seed = 999U, .initial_population = 10U}};
     require(universe::Simulation::load_snapshot(sim.save_snapshot(), restored).ok, "a demoted world saves and loads");
 }
@@ -545,7 +545,7 @@ int main() {
     test_equivalent_time_advance_schedules_give_identical_worlds_with_trade();
     test_same_seed_same_trips();
     test_save_and_load_mid_trip_continues_identically();
-    test_demoting_every_region_ends_trips_without_losing_coin();
+    test_demoting_every_region_keeps_trips_without_losing_coin();
     test_a_v28_snapshot_loads_with_every_merchant_at_home();
     test_an_older_snapshot_cannot_carry_trade_events();
     test_snapshot_rejects_corrupt_trips();

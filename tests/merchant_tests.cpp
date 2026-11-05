@@ -289,8 +289,13 @@ void test_demoting_regions_drops_the_memory_of_the_merchants_it_folds() {
     for (const auto region_id : region_ids) {
         sim.demote_region_to_settlement_aggregate(region_id);
     }
-    require(sim.state().merchant_price_memory.empty(), "folded merchants keep no remembered prices");
-    require(merchants_in(sim.state()).empty(), "no living merchant remains once everyone is folded");
+    // A merchant on a trip stays resident (#74), so only that merchant keeps memory.
+    for (const auto& row : sim.state().merchant_price_memory) {
+        require(sim.is_merchant_away(row.merchant_id), "folded merchants keep no remembered prices");
+    }
+    for (const auto* merchant : merchants_in(sim.state())) {
+        require(sim.is_merchant_away(merchant->id), "only a merchant on a trip stays resident through folding");
+    }
 
     universe::Simulation restored{universe::SimulationConfig{.seed = 999U, .initial_population = 10U}};
     require(universe::Simulation::load_snapshot(sim.save_snapshot(), restored).ok, "a world demoted with merchants must save and load");

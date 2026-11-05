@@ -9,6 +9,7 @@
 // involved: choices are the best expected profit, ties to the lowest settlement
 // then resource id.
 #include "universe/simulation.hpp"
+#include "universe/trade_trip_endings.hpp"
 
 #include <algorithm>
 #include <stdexcept>
@@ -46,6 +47,31 @@ void add_coin(std::int64_t& balance, const std::int64_t amount, const char* what
     return std::lower_bound(trips.begin(), trips.end(), merchant_id, [](const MerchantTrip& trip, const PersonId id) {
         return trip.merchant_id < id;
     });
+}
+
+// The active settlement that inherits a lost settlement's goods and coin: its
+// absorber (read from the merge records in the event journal, following chains)
+// or else the nearest active settlement. Empty only when none is active.
+[[nodiscard]] std::optional<SettlementId> heir_of(const WorldState& state, const SettlementId lost_id) {
+    std::vector<TripSite> sites;
+    sites.reserve(state.settlements.size());
+    for (const auto& settlement : state.settlements) {
+        sites.push_back(TripSite{
+            .settlement_id = settlement.id,
+            .x = settlement.position_x,
+            .z = settlement.position_z,
+            .active = settlement.active,
+        });
+    }
+    std::vector<AbsorptionLink> links;
+    for (const auto& event : state.event_log) {
+        if (event.type == EventType::SettlementMerged) {
+            const auto& merged = std::get<SettlementMergedEventPayload>(event.payload);
+            links.push_back(AbsorptionLink{
+                .absorbed_id = merged.absorbed_settlement_id, .survivor_id = merged.survivor_settlement_id});
+        }
+    }
+    return resolve_receiving_settlement(lost_id, sites, links);
 }
 
 }  // namespace
@@ -116,16 +142,19 @@ void Simulation::remember_prices(const PersonId merchant_id, const SettlementId 
 
 // Cargo and coin go back to the origin commons. Goods already sold stay sold.
 void Simulation::abandon_trip(const MerchantTrip& trip) {
-    auto* origin = find_settlement_mutable(trip.origin_settlement_id);
-    if (origin == nullptr) {
+    // A lost origin (extinct, or absorbed) hands everything to its heir; with no
+    // active settlement at all it stays with the origin so nothing vanishes.
+    const auto heir = heir_of(state_, trip.origin_settlement_id);
+    auto* receiver = find_settlement_mutable(heir.value_or(trip.origin_settlement_id));
+    if (receiver == nullptr) {
         return;
     }
     if (trip.phase == TripPhase::Outbound) {
-        credit_settlement_stock(*origin, trip.resource, trip.cargo_units);
+        credit_settlement_stock(*receiver, trip.resource, trip.cargo_units);
         return;
     }
-    credit_settlement_stock(*origin, trip.resource, trip.unsold_units);
-    add_coin(origin->coin, trip.coin_carried, "Settlement coin overflow while abandoning a trip");
+    credit_settlement_stock(*receiver, trip.resource, trip.unsold_units);
+    add_coin(receiver->coin, trip.coin_carried, "Settlement coin overflow while abandoning a trip");
 }
 
 void Simulation::settle_trade_stock() {
@@ -176,10 +205,12 @@ void Simulation::process_trade_period() {
                 ? settlement_prices(trip.destination_settlement_id)
                 : std::optional<SettlementPrices>{};
             if (!destination_prices.has_value()) {
-                abandon_trip(trip);
-                state_.merchant_trips.erase(state_.merchant_trips.begin() + static_cast<std::ptrdiff_t>(index));
-                continue;
-            }
+                // The destination is gone: nothing is sold and the merchant walks
+                // the whole cargo home.
+                trip.coin_carried = 0;
+                trip.unsold_units = trip.cargo_units;
+                trip.phase = TripPhase::Returning;
+            } else {
             // The destination pays what its commons can: what it cannot pay for
             // stays on the cart and goes home.
             const auto price = destination_prices->of(trip.resource);
@@ -191,12 +222,21 @@ void Simulation::process_trade_period() {
             trip.unsold_units = trip.cargo_units - sold;
             trip.phase = TripPhase::Returning;
             remember_prices(trip.merchant_id, trip.destination_settlement_id, *destination_prices);
+            }
         }
 
         if (trip.phase == TripPhase::Returning && state_.time >= trip.returns_at) {
             auto* origin = find_settlement_mutable(trip.origin_settlement_id);
             if (origin == nullptr) {
                 throw std::logic_error("Trade trip origin settlement is missing");
+            }
+            // Home may be gone by the time the merchant is back: the goods and
+            // the commons share go to its heir (absorber, else nearest active).
+            Settlement* receiver = origin;
+            if (!origin->active) {
+                if (const auto heir = heir_of(state_, origin->id); heir.has_value()) {
+                    receiver = find_settlement_mutable(*heir);
+                }
             }
             const auto proceeds = split_trade_proceeds(trip.coin_carried, trip.coin_outlay);
             Household* merchant_household = nullptr;
@@ -212,11 +252,11 @@ void Simulation::process_trade_period() {
             }
             if (merchant_household != nullptr) {
                 add_coin(merchant_household->coin, proceeds.household_share, "Household coin overflow while settling a trade");
-                add_coin(origin->coin, proceeds.commons_return, "Settlement coin overflow while settling a trade");
+                add_coin(receiver->coin, proceeds.commons_return, "Settlement coin overflow while settling a trade");
             } else {
-                add_coin(origin->coin, proceeds.household_share + proceeds.commons_return, "Settlement coin overflow while settling a trade");
+                add_coin(receiver->coin, proceeds.household_share + proceeds.commons_return, "Settlement coin overflow while settling a trade");
             }
-            credit_settlement_stock(*origin, trip.resource, trip.unsold_units);
+            credit_settlement_stock(*receiver, trip.resource, trip.unsold_units);
             if (origin->active) {
                 if (const auto home_prices = settlement_prices(trip.origin_settlement_id); home_prices.has_value()) {
                     remember_prices(trip.merchant_id, trip.origin_settlement_id, *home_prices);
