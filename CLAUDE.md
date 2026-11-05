@@ -27,7 +27,7 @@ podman run --rm -v "${PWD}:/workspace" -w /workspace universecore-dev ./scripts/
 - On Windows, `scripts/container-test-volume.ps1` and `.sh` keep the build dir in a named Podman volume. `UNIVERSECORE_TEST_SUITE` selects `all|fast|integration|long`.
 - Tests are plain executables (no framework), one per file in `tests/`. Each is registered in `CMakeLists.txt` with a ctest label of `fast`, `integration` or `long`. **A new test file needs a manual `add_executable`/`add_test`/`set_tests_properties` block there.**
 - The SDL3 + ImGui inspector (`universe_ui`) is off by default (`-DUNIVERSECORE_BUILD_UI=ON`). See the `container-ui-*.sh` scripts.
-- `.github/workflows/ci.yml` builds natively on Linux, macOS and Windows with plain CMake. It does not use Podman.
+- There is no GitHub Actions CI. The local Podman suite is the only gate, so run it before merging.
 - Generated `*.ucore` snapshots are runtime outputs and must not be committed.
 
 Web client (`apps/web-client`): `npm run bridge` (WebSocket bridge), `npm run dev`, `npm test` (vitest), `npm run build`. See `docs/PLAYCANVAS_WEB_CLIENT.md`.
