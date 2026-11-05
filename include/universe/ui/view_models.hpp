@@ -4,6 +4,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "universe/ui/simulation_controller.hpp"
 
@@ -59,6 +60,19 @@ struct BuildingSummaryView {
     std::optional<SimulationTime> completed_at{};
 };
 
+// A merchant trip in progress that starts or ends at a settlement (ADR 0003).
+// Presentation only: read from canonical trips and the recorded departure event.
+struct TradeTripView {
+    PersonId merchant_id{};
+    SettlementId origin_settlement_id{};
+    SettlementId destination_settlement_id{};
+    ResourceType resource{ResourceType::Food};
+    std::int64_t cargo_units{};
+    TripPhase phase{TripPhase::Outbound};
+    // Profit expected at departure, taken from the TradeDeparted event.
+    std::int64_t expected_profit{};
+};
+
 // Food totals are cumulative since world start, summed over the settlement's households.
 struct SettlementEconomyView {
     SettlementId id{};
@@ -85,6 +99,8 @@ struct SettlementEconomyView {
     // are absent for an abandoned settlement.
     std::int64_t coin{};
     std::optional<SettlementPrices> prices{};
+    // Trips in progress to or from this settlement, ordered by merchant id.
+    std::vector<TradeTripView> trips{};
     std::int64_t min_household_wealth{};
     std::int64_t median_household_wealth{};
     std::int64_t max_household_wealth{};

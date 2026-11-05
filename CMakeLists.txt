@@ -177,6 +177,11 @@ if(UNIVERSECORE_BUILD_TESTS)
     add_test(NAME universe_ui_protocol_tests COMMAND universe_ui_protocol_tests)
     set_tests_properties(universe_ui_protocol_tests PROPERTIES LABELS "fast")
 
+    add_executable(universe_trade_view_tests tests/trade_view_tests.cpp)
+    target_link_libraries(universe_trade_view_tests PRIVATE universe_ui_support)
+    add_test(NAME universe_trade_view_tests COMMAND universe_trade_view_tests)
+    set_tests_properties(universe_trade_view_tests PROPERTIES LABELS "fast")
+
     add_executable(universe_core_tests_integration tests/integration_tests.cpp)
     target_link_libraries(universe_core_tests_integration PRIVATE universe_core)
     add_test(NAME universe_core_tests_integration COMMAND universe_core_tests_integration)

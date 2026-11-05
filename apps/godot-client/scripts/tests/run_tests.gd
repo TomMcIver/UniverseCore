@@ -540,11 +540,15 @@ func _test_economy_panel_renders() -> void:
 	_assert_eq(text.find("Trips:") < 0, true, "no trip section without trip data")
 	panel.show_view_model("settlement_economy", 3, {
 		"trade": {"coin": 5, "merchants": 1, "pricesMillicoin": null,
-			"trips": [{"merchantId": 9, "destination": 4, "resource": "Wood", "amount": 30, "phase": "Outbound"}]},
+			"trips": [{"merchantId": 9, "origin": 3, "destination": 4, "resource": "Wood", "cargoUnits": 1030, "phase": "Outbound", "expectedProfit": 12},
+				{"merchantId": 11, "origin": 4, "destination": 3, "resource": "Food", "cargoUnits": 5, "phase": "Returning", "expectedProfit": 2}]},
 	})
 	text = panel._content.text
 	_assert_eq(text.find("Prices: none (abandoned)") >= 0, true, "null prices read none")
-	_assert_eq(text.find("Trips:") >= 0 and text.find("Wood") >= 0, true, "trip hook renders supplied trips")
+	_assert_eq(text.find("Trips:") >= 0, true, "trip section shown")
+	_assert_eq(text.find("Merchant 9: 1,030 wood, settlement 3 to 4 (heading out), expected profit 12 coin") >= 0, true, "outbound trip line")
+	_assert_eq(text.find("Merchant 11: 5 food, settlement 4 to 3 (coming home), expected profit 2 coin") >= 0, true, "returning trip line")
+	_assert_eq(panel.supported_version("settlement_economy"), 4, "panel speaks view model v4")
 	panel.queue_free()
 
 func _test_orbit_camera_frames_a_wide_area() -> void:

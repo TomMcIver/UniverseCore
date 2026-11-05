@@ -191,13 +191,13 @@ bool test_settlement_economy_view_model_matches_canonical_state() {
         std::to_string(prices.of(universe::ResourceType::Wood)) + ",\"Stone\":" +
         std::to_string(prices.of(universe::ResourceType::Stone)) + ",\"Timber\":" +
         std::to_string(prices.of(universe::ResourceType::Timber)) + ",\"BasicTool\":" +
-        std::to_string(prices.of(universe::ResourceType::BasicTool)) + "}}";
+        std::to_string(prices.of(universe::ResourceType::BasicTool)) + "},\"trips\":[";
     // Presentation state is derived, never stored: building the view twice agrees.
     const auto again = universe::ui::build_settlement_economy(controller, summary_it->id);
     if (!again.has_value() || again->coin != view->coin || !(*again->prices == prices)) {
         return false;
     }
-    if (!contains(message, expected_trade) || !contains(message, "\"version\":3")) {
+    if (!contains(message, expected_trade) || !contains(message, "\"version\":4")) {
         std::cerr << "missing trade block in economy message\n";
         return false;
     }

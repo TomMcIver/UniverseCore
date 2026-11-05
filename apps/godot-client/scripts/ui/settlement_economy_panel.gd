@@ -36,7 +36,7 @@ func view_model_kinds() -> Dictionary:
 	return {"settlement_economy": PackedStringArray(["settlement"])}
 
 func supported_version(_kind: String) -> int:
-	return 3
+	return 4
 
 func show_view_model(_kind: String, entity_id: int, data: Dictionary) -> void:
 	var food: Dictionary = data.get("food", {})
@@ -83,8 +83,7 @@ func _trade_lines(trade: Variant) -> PackedStringArray:
 	lines.append_array(_trip_lines(trade.get("trips", null)))
 	return lines
 
-## Hook for merchant trips (#72). C++ does not emit "trips" yet; once it does,
-## each entry is rendered here and nothing else in the panel changes.
+## Active merchant trips to or from this settlement (ADR 0003, #72/#77).
 func _trip_lines(trips: Variant) -> PackedStringArray:
 	var lines := PackedStringArray()
 	if typeof(trips) != TYPE_ARRAY or (trips as Array).is_empty():
@@ -93,9 +92,11 @@ func _trip_lines(trips: Variant) -> PackedStringArray:
 	for trip in trips:
 		if typeof(trip) != TYPE_DICTIONARY:
 			continue
-		lines.append("    Merchant %d to settlement %d: %s %s (%s)" % [
-			int(trip.get("merchantId", 0)), int(trip.get("destination", 0)),
-			_grouped(int(trip.get("amount", 0))), str(trip.get("resource", "")), str(trip.get("phase", ""))])
+		var phase := "heading out" if str(trip.get("phase", "")) == "Outbound" else "coming home"
+		lines.append("    Merchant %d: %s %s, settlement %d to %d (%s), expected profit %s coin" % [
+			int(trip.get("merchantId", 0)), _grouped(int(trip.get("cargoUnits", 0))),
+			str(trip.get("resource", "")).to_lower(), int(trip.get("origin", 0)),
+			int(trip.get("destination", 0)), phase, _grouped(int(trip.get("expectedProfit", 0)))])
 	return lines
 
 ## 2500 -> "2.50", 20000 -> "20", 80 -> "0.08"; whole coin drops the decimals.
