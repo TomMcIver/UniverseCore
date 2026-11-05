@@ -20,6 +20,13 @@ std::int64_t margin_permille(const std::int64_t origin_price, const std::int64_t
     return scaled / origin_price;
 }
 
+bool remembered_price_is_current(const SimulationTime seen_at, const SimulationTime now) noexcept {
+    if (seen_at > now) {
+        return false;
+    }
+    return (now - seen_at).ticks <= days(kMerchantMemoryStaleDays).ticks;
+}
+
 std::optional<PriceMargin> best_margin(
     const SettlementPrices& origin,
     const SettlementPrices& destination,
