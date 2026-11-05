@@ -11,6 +11,7 @@
 
 #include "universe/resources.hpp"
 #include "universe/time.hpp"
+#include "universe/trade_tuning.hpp"
 
 #include <cstdint>
 #include <optional>
@@ -19,14 +20,14 @@ namespace universe {
 
 // Travel and load. First values, calibrated by #76.
 inline constexpr std::int64_t kTradeMaxOneWayDays = 3;
-inline constexpr std::int64_t kBaseCargoUnits = 50;
+inline constexpr std::int64_t kBaseCargoUnits = UNIVERSE_TRADE_BASE_CARGO_UNITS;
 inline constexpr std::int64_t kCargoMultiplierScale = 1'000;
 // A commons never sends more than this share of one stock in a single trip, so
 // a cheap-looking margin cannot empty a settlement.
-inline constexpr std::int64_t kMaxCargoShareOfStockPercent = 25;
+inline constexpr std::int64_t kMaxCargoShareOfStockPercent = UNIVERSE_TRADE_STOCK_CAP_PERCENT;
 // The merchant's household keeps this share of a realised profit; the commons
 // keeps the rest (parts per thousand).
-inline constexpr std::int64_t kMerchantProfitSharePermille = 200;
+inline constexpr std::int64_t kMerchantProfitSharePermille = UNIVERSE_TRADE_PROFIT_SHARE_PERMILLE;
 inline constexpr std::int64_t kProfitShareScale = 1'000;
 // A trip is scheduled only if it is expected to earn at least this much coin.
 inline constexpr std::int64_t kMinimumTripProfitCoin = 1;

@@ -2277,7 +2277,9 @@ void Simulation::process_demography_period(const std::uint64_t demographic_year)
         occupations_before.emplace(person.id, person.occupation);
     }
     process_occupation_reassignment(demographic_year);
-    process_merchant_recruitment(demographic_year);
+    if (config_.trade_enabled) {
+        process_merchant_recruitment(demographic_year);
+    }
     // A merchant who died or merged away this year ends their trip now, so the
     // trip table never names someone who is gone.
     resolve_orphaned_trips();

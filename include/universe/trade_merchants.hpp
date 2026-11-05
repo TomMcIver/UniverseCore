@@ -10,6 +10,7 @@
 #include "universe/resources.hpp"
 #include "universe/time.hpp"
 #include "universe/trade_pricing.hpp"
+#include "universe/trade_tuning.hpp"
 
 #include <array>
 #include <cstdint>
@@ -26,19 +27,19 @@ inline constexpr std::int64_t kDaysWalkKnownNeighbours = 1;
 // A margin is (destination price - origin price) / origin price, in parts per
 // thousand. A settlement trains a merchant when the best margin it knows of
 // reaches this, and a merchant retires when none does.
-inline constexpr std::int64_t kMerchantProfitThresholdPermille = 500;
+inline constexpr std::int64_t kMerchantProfitThresholdPermille = UNIVERSE_TRADE_MARGIN_THRESHOLD_PERMILLE;
 inline constexpr std::int64_t kMerchantMarginScale = 1'000;
 
 // A settlement needs this many eligible adults before it can spare one, and
 // never has more merchants than this bound.
 inline constexpr std::uint64_t kMerchantMinimumEligibleAdults = 12;
-inline constexpr std::uint64_t kMaxMerchantsPerSettlement = 2;
+inline constexpr std::uint64_t kMaxMerchantsPerSettlement = UNIVERSE_TRADE_MAX_MERCHANTS_PER_SETTLEMENT;
 
 // A remembered price older than this is stale: the merchant no longer treats it
 // as current and acts as if it knew nothing of that settlement. It is longer
 // than a year so a merchant trained at one yearly boundary still trusts what it
 // saw there at the next. First value, calibrated by #76.
-inline constexpr std::int64_t kMerchantMemoryStaleDays = 500;
+inline constexpr std::int64_t kMerchantMemoryStaleDays = UNIVERSE_TRADE_STALE_DAYS;
 
 // What a merchant last saw of one settlement's price for one resource.
 struct MerchantPriceMemory {
