@@ -158,6 +158,7 @@ func _initialize() -> void:
 	_run_test("world_view villagers walk at a natural pace", Callable(self, "_test_world_view_villagers_walk_at_a_natural_pace"))
 	_run_test("world_view walking pace scales with playback speed", Callable(self, "_test_world_view_walking_pace_scales_with_playback_speed"))
 	_run_test("world_view villagers play walk and idle animations", Callable(self, "_test_world_view_villagers_play_walk_and_idle_animations"))
+	_run_test("world_view idle animation stays at normal speed while walk scales", Callable(self, "_test_world_view_idle_animation_ignores_playback_speed"))
 	_run_test("world_view paused world holds villagers and clock", Callable(self, "_test_world_view_paused_world_holds_villagers_and_clock"))
 	_run_test("world_view clock runs a day per two minutes at 1x", Callable(self, "_test_world_view_clock_runs_a_day_per_two_minutes_at_1x"))
 	_run_test("world_view never walks a Home-kind agent", Callable(self, "_test_world_view_home_kind_agent_never_walks"))
@@ -968,6 +969,25 @@ func _test_world_view_villagers_play_walk_and_idle_animations() -> void:
 	for _frame in range(120):  # 120 s at 1.3 units/s covers the 100 units
 		view._process(1.0)
 	_assert_eq(animator.current_animation, "idle", "a villager that has arrived must go back to idle")
+	view.queue_free()
+
+func _test_world_view_idle_animation_ignores_playback_speed() -> void:
+	# Only the walk clip speeds up with playback speed; a standing villager
+	# must not swing its arms at 8x.
+	var view := _far_worker_view()
+	view.set_simulation_playback(false, 8)
+	var animator: AnimationPlayer = view._agent_animators.get(11)
+	view._process(0.001)
+	_assert_eq(animator.current_animation, "idle", "a villager at home must be idle")
+	_assert_eq(animator.speed_scale, 1.0, "idle must play at normal speed at 8x")
+	view.set_tick(500)
+	view._process(0.1)
+	_assert_eq(animator.current_animation, "walk", "a villager on the move must walk")
+	_assert_eq(animator.speed_scale, 8.0, "walk must scale with playback speed")
+	view.set_simulation_playback(false, 4)
+	view._process(0.1)
+	_assert_eq(animator.current_animation, "walk", "still walking after a speed change")
+	_assert_eq(animator.speed_scale, 4.0, "walk speed must follow a playback speed change")
 	view.queue_free()
 
 func _test_world_view_paused_world_holds_villagers_and_clock() -> void:
