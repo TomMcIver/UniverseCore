@@ -8,6 +8,7 @@
 #include <iostream>
 #include <limits>
 #include <optional>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <variant>
@@ -497,8 +498,8 @@ bool test_villager_movement_target_is_job_appropriate() {
 bool test_merchant_trip_presentation_follows_trip_window() {
     // Ticket #78 (ADR 0001/0003): a merchant's trip is canonical; where the
     // client draws them is presentation derived from the trip's settlements
-    // and times. Facts are injected here because the canonical MerchantTrip
-    // (#72) is not on this branch yet.
+    // and times. Facts are injected here to pin exact ticks; the canonical MerchantTrip
+    // adapter is covered separately.
     universe::ui::SimulationController controller{universe::SimulationConfig{.seed = 42, .initial_population = 200}};
     const auto settlements = controller.settlements();
     if (settlements.size() < 2U || controller.people().empty()) {
@@ -548,6 +549,39 @@ bool test_merchant_trip_presentation_follows_trip_window() {
     }
     // Pure function of state plus tick: repeated calls agree.
     return during == universe::ui::build_agent_presentations(controller, 4000, trips);
+}
+
+bool test_trade_trip_facts_map_canonical_trips() {
+    // Adapter from canonical MerchantTrip (#72) to presentation facts (#78).
+    universe::MerchantTrip trip{};
+    trip.merchant_id = 11;
+    trip.origin_settlement_id = 2;
+    trip.destination_settlement_id = 3;
+    trip.departed_at = universe::SimulationTime{1000};
+    trip.arrives_at = universe::SimulationTime{5000};
+    trip.returns_at = universe::SimulationTime{9000};
+    const std::vector<universe::MerchantTrip> trips{trip};
+    const auto facts = universe::ui::trade_trip_facts(std::span<const universe::MerchantTrip>{trips});
+    if (facts.size() != 1U) {
+        return false;
+    }
+    const auto& fact = facts.front();
+    if (fact.merchant != 11U || fact.origin != 2U || fact.destination != 3U || fact.depart_tick != 1000 ||
+        fact.arrive_tick != 5000 || fact.return_tick != 9000) {
+        return false;
+    }
+    // A fresh world has no trips, so nobody is drawn travelling.
+    universe::ui::SimulationController controller{universe::SimulationConfig{.seed = 42, .initial_population = 50}};
+    const auto none = universe::ui::trade_trip_facts(controller);
+    if (!none.empty()) {
+        return false;
+    }
+    for (const auto& [id, presentation] : universe::ui::build_agent_presentations(controller, 100, none)) {
+        if (presentation.trip.has_value()) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool test_merchant_trip_with_unknown_settlement_is_ignored() {
@@ -900,6 +934,7 @@ int main() {
         {"villager_movement_target_is_job_appropriate", test_villager_movement_target_is_job_appropriate},
         {"merchant_trip_presentation_follows_trip_window", test_merchant_trip_presentation_follows_trip_window},
         {"merchant_trip_with_unknown_settlement_is_ignored", test_merchant_trip_with_unknown_settlement_is_ignored},
+        {"trade_trip_facts_map_canonical_trips", test_trade_trip_facts_map_canonical_trips},
         {"agent_json_carries_trip_only_when_travelling", test_agent_json_carries_trip_only_when_travelling},
         {"dead_and_demoted_people_absent_from_snapshot", test_dead_and_demoted_people_absent_from_snapshot},
         {"determinism_with_observer_idle", test_determinism_with_observer_idle},

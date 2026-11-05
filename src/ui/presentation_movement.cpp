@@ -100,6 +100,26 @@ struct SettlementFacts {
 
 }  // namespace
 
+std::vector<TradeTripFacts> trade_trip_facts(const std::span<const MerchantTrip> trips) {
+    std::vector<TradeTripFacts> facts;
+    facts.reserve(trips.size());
+    for (const auto& trip : trips) {
+        facts.push_back(TradeTripFacts{
+            .merchant = trip.merchant_id,
+            .origin = trip.origin_settlement_id,
+            .destination = trip.destination_settlement_id,
+            .depart_tick = trip.departed_at.ticks,
+            .arrive_tick = trip.arrives_at.ticks,
+            .return_tick = trip.returns_at.ticks,
+        });
+    }
+    return facts;
+}
+
+std::vector<TradeTripFacts> trade_trip_facts(const SimulationController& controller) {
+    return trade_trip_facts(std::span<const MerchantTrip>{controller.simulation().state().merchant_trips});
+}
+
 std::unordered_map<PersonId, AgentPresentation> build_agent_presentations(
     const SimulationController& controller,
     const std::int64_t tick,

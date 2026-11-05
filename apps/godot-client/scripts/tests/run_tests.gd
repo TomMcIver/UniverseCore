@@ -1045,6 +1045,7 @@ func _test_world_view_merchant_travels_between_settlements() -> void:
 
 	view.set_tick(2000)
 	for _frame in range(40):  # 40 s at 1.3 units/s: about 52 units along the road
+		view.set_tick(2000)
 		view._process(1.0)
 	_assert_eq(view.trip_phase(5), "outbound", "after departure the merchant is outbound")
 	var mid := _flat(node)
@@ -1052,15 +1053,18 @@ func _test_world_view_merchant_travels_between_settlements() -> void:
 
 	view.set_tick(4000)
 	for _frame in range(200):  # long enough to cover the 200 units
+		view.set_tick(4000)
 		view._process(1.0)
 	_assert_eq(_flat(node).distance_to(Vector2(200.0, 0.0)) < 3.0, true, "the merchant reaches the destination settlement")
 
 	view.set_tick(6000)  # past the arrival tick: heading back to the origin
 	_assert_eq(view.trip_phase(5), "returning", "after the arrival tick the merchant is returning")
 	for _frame in range(40):
+		view.set_tick(6000)
 		view._process(1.0)
 	_assert_eq(_flat(node).x < 190.0, true, "a returning merchant walks back toward the origin")
 	for _frame in range(200):
+		view.set_tick(6000)
 		view._process(1.0)
 	_assert_eq(_flat(node).distance_to(Vector2.ZERO) < 3.0, true, "the merchant is back at the origin settlement")
 

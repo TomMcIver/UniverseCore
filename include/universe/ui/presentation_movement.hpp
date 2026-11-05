@@ -4,6 +4,7 @@
 #include <optional>
 #include <span>
 #include <unordered_map>
+#include <vector>
 
 #include "universe/ui/simulation_controller.hpp"
 
@@ -90,6 +91,13 @@ struct AgentPresentation {
 
     [[nodiscard]] bool operator==(const AgentPresentation& other) const = default;
 };
+
+// Maps canonical trips (WorldState::merchant_trips, ADR 0003) to the facts
+// presentation needs. Pure and deterministic; never serialized. Outbound runs
+// depart..arrive toward the destination, Returning arrive..return toward home.
+// Ticks are simulation seconds.
+[[nodiscard]] std::vector<TradeTripFacts> trade_trip_facts(std::span<const MerchantTrip> trips);
+[[nodiscard]] std::vector<TradeTripFacts> trade_trip_facts(const SimulationController& controller);
 
 [[nodiscard]] std::unordered_map<PersonId, AgentPresentation> build_agent_presentations(
     const SimulationController& controller,

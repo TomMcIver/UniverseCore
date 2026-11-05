@@ -158,7 +158,9 @@ WorldSnapshotView build_world_snapshot(const SimulationController& controller) {
     snapshot.year = summary.year;
     snapshot.population = summary.population;
 
-    const auto presentation = build_agent_presentations(controller, static_cast<std::int64_t>(snapshot.tick));
+    const auto trip_facts = trade_trip_facts(controller);
+    const auto presentation =
+        build_agent_presentations(controller, static_cast<std::int64_t>(snapshot.tick), trip_facts);
 
     // Ticket #24/#25/#38: Region and Settlement now carry real canonical
     // (x, z) positions derived deterministically in UniverseCore itself
