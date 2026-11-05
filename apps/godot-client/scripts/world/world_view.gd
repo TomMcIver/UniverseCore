@@ -268,7 +268,8 @@ func _upsert_building(building: Dictionary) -> void:
 func _building_look_key(building: Dictionary) -> String:
 	var step := int(floor(float(building.get("progress", 1.0)) * float(CONSTRUCTION_VISUAL_STEPS)))
 	var pos := UniverseProtocol.position_from(building)
-	return "%s|%s|%d|%.2f|%.2f" % [building.get("type", ""), building.get("state", ""), step, pos.x, pos.z]
+	var stage := BuildingAssets.construction_stage(str(building.get("state", "Complete")), float(building.get("progress", 1.0)))
+	return "%s|%s|%s|%d|%.2f|%.2f" % [building.get("type", ""), building.get("state", ""), stage, step, pos.x, pos.z]
 
 func _remove_building(id: int) -> void:
 	if _building_nodes.has(id):
