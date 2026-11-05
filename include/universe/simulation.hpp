@@ -12,6 +12,7 @@
 #include "universe/resources.hpp"
 #include "universe/trade_merchants.hpp"
 #include "universe/trade_pricing.hpp"
+#include "universe/trade_trip.hpp"
 #include "universe/seed.hpp"
 #include "universe/snapshot.hpp"
 #include "universe/time.hpp"
@@ -358,6 +359,9 @@ enum class EventType : std::uint8_t {
     SettlementMerged = 6,
     OccupationChanged = 7,
     HouseholdRelocated = 8,
+    // A merchant leaves with cargo / returns and settles a trade (ADR 0003).
+    TradeDeparted = 9,
+    TradeCompleted = 10,
 };
 
 struct BirthEventPayload {
@@ -439,6 +443,21 @@ struct HouseholdRelocatedEventPayload {
     [[nodiscard]] bool operator==(const HouseholdRelocatedEventPayload& other) const = default;
 };
 
+// Payload of TradeDeparted and TradeCompleted (ADR 0003). `coin_profit` is the
+// profit expected at departure and the realised profit (revenue minus outlay,
+// possibly negative) at completion. `cargo_units` is the load taken from the
+// origin commons.
+struct TradeEventPayload {
+    PersonId merchant_id{};
+    SettlementId origin_settlement_id{};
+    SettlementId destination_settlement_id{};
+    ResourceType resource{ResourceType::Food};
+    std::int64_t cargo_units{};
+    std::int64_t coin_profit{};
+
+    [[nodiscard]] bool operator==(const TradeEventPayload& other) const = default;
+};
+
 using SimulationEventPayload = std::variant<
     BirthEventPayload,
     DeathEventPayload,
@@ -448,7 +467,8 @@ using SimulationEventPayload = std::variant<
     InstitutionFoundedEventPayload,
     SettlementMergedEventPayload,
     OccupationChangedEventPayload,
-    HouseholdRelocatedEventPayload>;
+    HouseholdRelocatedEventPayload,
+    TradeEventPayload>;
 
 struct SimulationEvent {
     EventId id{};
@@ -698,6 +718,9 @@ struct WorldState {
     // What each merchant last saw of settlement prices (ADR 0003), sorted by
     // (merchant, settlement, resource). A merchant reasons only from these.
     std::vector<MerchantPriceMemory> merchant_price_memory{};
+    // Trips in progress (ADR 0003), sorted by merchant id, one per merchant. A
+    // merchant with a trip here is away: it does no settlement work.
+    std::vector<MerchantTrip> merchant_trips{};
     std::vector<Person> people{};
     std::vector<Household> households{};
     std::vector<RegionEnvironmentState> regions{};
@@ -721,6 +744,14 @@ public:
     // need (ADR 0003). Computed from canonical state, never stored. Empty for an
     // unknown or inactive settlement.
     [[nodiscard]] std::optional<SettlementPrices> settlement_prices(SettlementId settlement_id) const;
+    // A merchant sees a settlement's current prices and remembers them with the
+    // time (ADR 0003, #73). Trips write the same rows through the same private
+    // writer on each arrival. Returns false, changing nothing, for a person who
+    // is not a living merchant or a settlement that is unknown or inactive.
+    bool merchant_observes_settlement_prices(PersonId merchant_id, SettlementId settlement_id);
+    // Whether the merchant is on a trip (ADR 0003), and that trip.
+    [[nodiscard]] bool is_merchant_away(PersonId person_id) const noexcept;
+    [[nodiscard]] std::optional<MerchantTrip> trip_for_merchant(PersonId person_id) const;
     [[nodiscard]] SimulationTime time() const noexcept;
     [[nodiscard]] std::span<const AgentMemory> agent_memories() const noexcept;
     [[nodiscard]] std::vector<AgentMemory> memories_for_person(PersonId person_id) const;
@@ -821,6 +852,19 @@ private:
     void process_occupation_reassignment(std::uint64_t demographic_year);
     void process_merchant_recruitment(std::uint64_t demographic_year);
     void prune_merchant_memory();
+    // Trade trips (ADR 0003, src/simulation_trade.cpp). Run once a day with the
+    // food period: resolve arrivals and returns, then send idle merchants out.
+    void process_trade_period();
+    // Ends the trip of any merchant who is gone, dead or no longer a merchant,
+    // returning cargo and coin to the origin commons.
+    void resolve_orphaned_trips();
+    // Re-partitions the commons stock among households and refreshes the derived
+    // totals after goods moved, so the world is always one a snapshot can describe.
+    void settle_trade_stock();
+    void abandon_trip(const MerchantTrip& trip);
+    void remember_prices(PersonId merchant_id, SettlementId settlement_id, const SettlementPrices& prices);
+    void credit_settlement_stock(Settlement& settlement, ResourceType resource, std::int64_t units);
+    EventId emit_trade_event(EventType type, const MerchantTrip& trip, std::int64_t coin_profit);
     void process_household_access_allocation();
     void process_household_stabilization_transfers();
     void process_local_exchange(std::uint64_t demographic_year);
@@ -1036,6 +1080,7 @@ private:
     std::unordered_map<MemoryId, std::size_t> record_access_index_by_memory_{};
 
     friend class SnapshotCodec;
+    friend struct SimulationTestAccess;
 };
 
 }  // namespace universe

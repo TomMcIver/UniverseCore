@@ -287,6 +287,7 @@ int main() {
 
         universe::Simulation resumed{universe::SimulationConfig{.seed = 999U, .initial_population = 10U}};
         const auto load_result = universe::Simulation::load_snapshot(mid_bytes, resumed);
+        if (!load_result.ok) { std::cerr << "load error: " << load_result.message << '\n'; }
         require(load_result.ok, "midpoint snapshot must load");
         resumed.run_years(250);
 

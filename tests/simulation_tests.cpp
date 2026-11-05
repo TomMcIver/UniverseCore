@@ -465,7 +465,15 @@ void verify_resource_invariants(const universe::WorldState& state, const std::in
     require(total_food_produced == state.total_food_produced, "produced food aggregate must match household totals");
     require(total_food_consumed == state.total_food_consumed, "consumed food aggregate must match household totals");
     require(total_unmet_food == state.total_unmet_food, "unmet food aggregate must match household totals");
-    const auto total_inferred_initial_food = state.total_food_stored + state.total_food_consumed - state.total_food_produced;
+    // Food a merchant is carrying is in no stock but still exists (ADR 0003).
+    std::int64_t food_in_transit = 0;
+    for (const auto& trip : state.merchant_trips) {
+        if (trip.resource == universe::ResourceType::Food) {
+            food_in_transit += trip.phase == universe::TripPhase::Outbound ? trip.cargo_units : trip.unsold_units;
+        }
+    }
+    const auto total_inferred_initial_food =
+        state.total_food_stored + food_in_transit + state.total_food_consumed - state.total_food_produced;
     require(
         total_inferred_initial_food == expected_initial_food_units * static_cast<std::int64_t>(state.households.size()),
         "food accounting should preserve canonical world-level inventory conservation");
@@ -1556,6 +1564,9 @@ EventSectionInfo locate_event_section(const universe::WorldState& state) {
             cursor += 24U;
         } else if (type == universe::EventType::OccupationChanged) {
             cursor += 10U;
+        } else if (type == universe::EventType::TradeDeparted || type == universe::EventType::TradeCompleted) {
+            // merchant, origin, destination (u64 each), resource (u8), cargo and coin profit (i64 each).
+            cursor += 41U;
         } else if (type == universe::EventType::HouseholdRelocated) {
             const auto& payload = std::get<universe::HouseholdRelocatedEventPayload>(event->payload);
             cursor += 32U + (payload.member_ids.size() * 8U);

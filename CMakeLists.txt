@@ -13,6 +13,8 @@ add_library(universe_core
     src/trade_merchants.cpp
     src/trade_pricing.cpp
     src/trade_trip_endings.cpp
+    src/trade_trip.cpp
+    src/simulation_trade.cpp
     src/simulation.cpp
     src/snapshot.cpp
     src/demo_scenario.cpp
@@ -149,6 +151,15 @@ if(UNIVERSECORE_BUILD_TESTS)
     target_link_libraries(universe_trade_trip_endings_tests PRIVATE universe_core)
     add_test(NAME universe_trade_trip_endings_tests COMMAND universe_trade_trip_endings_tests)
     set_tests_properties(universe_trade_trip_endings_tests PROPERTIES LABELS "fast")
+    add_executable(universe_trade_trip_tests tests/trade_trip_tests.cpp)
+    target_link_libraries(universe_trade_trip_tests PRIVATE universe_core)
+    add_test(NAME universe_trade_trip_tests COMMAND universe_trade_trip_tests)
+    set_tests_properties(universe_trade_trip_tests PROPERTIES LABELS "fast")
+
+    add_executable(universe_trade_trip_ending_world_tests tests/trade_trip_ending_world_tests.cpp)
+    target_link_libraries(universe_trade_trip_ending_world_tests PRIVATE universe_core)
+    add_test(NAME universe_trade_trip_ending_world_tests COMMAND universe_trade_trip_ending_world_tests)
+    set_tests_properties(universe_trade_trip_ending_world_tests PROPERTIES LABELS "integration")
 
     add_executable(universe_merchant_tests tests/merchant_tests.cpp)
     target_link_libraries(universe_merchant_tests PRIVATE universe_core)
