@@ -5,6 +5,7 @@
 #include <limits>
 #include <sstream>
 #include <utility>
+#include <variant>
 
 #include "protocol_text.hpp"
 #include "universe/ui/life_history.hpp"
@@ -93,6 +94,87 @@ void write_building_summary(std::ostringstream& out, const BuildingSummaryView& 
     }
 }
 
+constexpr std::array<std::pair<ResourceType, std::string_view>, 5> kPriceLabels{{
+    {ResourceType::Food, "Food"},
+    {ResourceType::Wood, "Wood"},
+    {ResourceType::Stone, "Stone"},
+    {ResourceType::Timber, "Timber"},
+    {ResourceType::BasicTool, "BasicTool"},
+}};
+
+[[nodiscard]] std::string_view resource_label(const ResourceType resource) noexcept {
+    for (const auto& [candidate, label] : kPriceLabels) {
+        if (candidate == resource) {
+            return label;
+        }
+    }
+    return "Unknown";
+}
+
+void write_prices(std::ostringstream& out, const std::optional<SettlementPrices>& prices) {
+    if (!prices.has_value()) {
+        out << "null";
+        return;
+    }
+    out << "{";
+    bool first = true;
+    for (const auto& [resource, label] : kPriceLabels) {
+        out << (first ? "" : ",") << "\"" << label << "\":" << prices->of(resource);
+        first = false;
+    }
+    out << "}";
+}
+
+// The profit a merchant expected, as recorded when the trip set out.
+[[nodiscard]] std::int64_t expected_profit_of(const SimulationController& controller, const MerchantTrip& trip) {
+    const auto events = controller.events();
+    for (auto it = events.rbegin(); it != events.rend(); ++it) {
+        if (it->type != EventType::TradeDeparted || it->timestamp.ticks != trip.departed_at.ticks) {
+            continue;
+        }
+        const auto& payload = std::get<TradeEventPayload>(it->payload);
+        if (payload.merchant_id == trip.merchant_id) {
+            return payload.coin_profit;
+        }
+    }
+    return 0;
+}
+
+[[nodiscard]] std::vector<TradeTripView> build_trip_views(const SimulationController& controller, const SettlementId settlement_id) {
+    std::vector<TradeTripView> trips;
+    for (const auto& trip : controller.simulation().state().merchant_trips) {
+        if (trip.origin_settlement_id != settlement_id && trip.destination_settlement_id != settlement_id) {
+            continue;
+        }
+        trips.push_back(TradeTripView{
+            .merchant_id = trip.merchant_id,
+            .origin_settlement_id = trip.origin_settlement_id,
+            .destination_settlement_id = trip.destination_settlement_id,
+            .resource = trip.resource,
+            .cargo_units = trip.cargo_units,
+            .phase = trip.phase,
+            .expected_profit = expected_profit_of(controller, trip),
+        });
+    }
+    return trips;
+}
+
+void write_trips(std::ostringstream& out, const std::vector<TradeTripView>& trips) {
+    out << "[";
+    bool first = true;
+    for (const auto& trip : trips) {
+        out << (first ? "" : ",") << "{\"merchantId\":" << trip.merchant_id
+            << ",\"origin\":" << trip.origin_settlement_id
+            << ",\"destination\":" << trip.destination_settlement_id
+            << ",\"resource\":\"" << resource_label(trip.resource) << "\""
+            << ",\"cargoUnits\":" << trip.cargo_units
+            << ",\"phase\":\"" << (trip.phase == TripPhase::Outbound ? "Outbound" : "Returning") << "\""
+            << ",\"expectedProfit\":" << trip.expected_profit << "}";
+        first = false;
+    }
+    out << "]";
+}
+
 void write_settlement_economy(std::ostringstream& out, const SettlementEconomyView& view) {
     out << "\"active\":" << (view.active ? "true" : "false")
         << ",\"tier\":\"" << detail::settlement_tier_label(view.tier) << "\""
@@ -116,6 +198,14 @@ void write_settlement_economy(std::ostringstream& out, const SettlementEconomyVi
         << ",\"Merchant\":" << view.merchants
         << ",\"Unallocated\":" << view.unallocated_workers
         << "}"
+        << ",\"trade\":{"
+        << "\"coin\":" << view.coin
+        << ",\"merchants\":" << view.merchants
+        << ",\"pricesMillicoin\":";
+    write_prices(out, view.prices);
+    out << ",\"trips\":";
+    write_trips(out, view.trips);
+    out << "}"
         << ",\"wealth\":{"
         << "\"min\":" << view.min_household_wealth
         << ",\"median\":" << view.median_household_wealth
@@ -186,7 +276,7 @@ std::uint32_t view_model_version(const ViewModelKind kind) noexcept {
         case ViewModelKind::DemoFocus:
             return 1U;
         case ViewModelKind::SettlementEconomy:
-            return 2U;
+            return 4U;
     }
     return 0U;
 }
@@ -273,11 +363,15 @@ std::optional<SettlementEconomyView> build_settlement_economy(const SimulationCo
         .craft_workers = summary_it->craft_workers,
         .merchants = summary_it->merchants,
         .unallocated_workers = summary_it->unallocated_workers,
+        .coin = settlement->coin,
+        .prices = controller.simulation().settlement_prices(settlement_id),
         .min_household_wealth = settlement->last_min_household_wealth,
         .median_household_wealth = settlement->last_median_household_wealth,
         .max_household_wealth = settlement->last_max_household_wealth,
         .inequality_per_10k = ratio_per_10k(settlement->last_inequality_numerator, settlement->last_inequality_denominator),
     };
+
+    view.trips = build_trip_views(controller, settlement_id);
 
     for (const auto& household : controller.households()) {
         if (household.settlement_id == settlement_id) {

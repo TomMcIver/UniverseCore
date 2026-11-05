@@ -178,6 +178,29 @@ bool test_settlement_economy_view_model_matches_canonical_state() {
 
     const auto message = universe::ui::make_view_model_message(
         2U, controller, universe::ui::ViewModelKind::SettlementEconomy, summary_it->id);
+    const auto expected_prices = controller.simulation().settlement_prices(summary_it->id);
+    if (view->coin != settlement->coin || !view->prices.has_value() || !expected_prices.has_value() ||
+        !(*view->prices == *expected_prices)) {
+        std::cerr << "economy view coin/prices differ from canonical state\n";
+        return false;
+    }
+    const auto& prices = *view->prices;
+    const auto expected_trade = std::string("\"trade\":{\"coin\":") + std::to_string(settlement->coin) +
+        ",\"merchants\":" + std::to_string(summary_it->merchants) + ",\"pricesMillicoin\":{\"Food\":" +
+        std::to_string(prices.of(universe::ResourceType::Food)) + ",\"Wood\":" +
+        std::to_string(prices.of(universe::ResourceType::Wood)) + ",\"Stone\":" +
+        std::to_string(prices.of(universe::ResourceType::Stone)) + ",\"Timber\":" +
+        std::to_string(prices.of(universe::ResourceType::Timber)) + ",\"BasicTool\":" +
+        std::to_string(prices.of(universe::ResourceType::BasicTool)) + "},\"trips\":[";
+    // Presentation state is derived, never stored: building the view twice agrees.
+    const auto again = universe::ui::build_settlement_economy(controller, summary_it->id);
+    if (!again.has_value() || again->coin != view->coin || !(*again->prices == prices)) {
+        return false;
+    }
+    if (!contains(message, expected_trade) || !contains(message, "\"version\":4")) {
+        std::cerr << "missing trade block in economy message\n";
+        return false;
+    }
     return contains(message, "\"kind\":\"settlement_economy\"") &&
         contains(message, "\"tier\":\"") &&
         contains(message, "\"food\":{") &&
