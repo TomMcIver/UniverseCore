@@ -159,7 +159,7 @@ if(UNIVERSECORE_BUILD_TESTS)
     add_executable(universe_trade_determinism_tests tests/trade_determinism_tests.cpp)
     target_link_libraries(universe_trade_determinism_tests PRIVATE universe_core)
     add_test(NAME universe_trade_determinism_tests COMMAND universe_trade_determinism_tests)
-    set_tests_properties(universe_trade_determinism_tests PROPERTIES LABELS "fast")
+    set_tests_properties(universe_trade_determinism_tests PROPERTIES LABELS "integration")
 
     add_executable(universe_settlement_distribution_tests tests/settlement_distribution_tests.cpp)
     target_link_libraries(universe_settlement_distribution_tests PRIVATE universe_core)
