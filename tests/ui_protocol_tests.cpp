@@ -8,9 +8,11 @@
 #include <iostream>
 #include <limits>
 #include <optional>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <variant>
+#include <vector>
 
 namespace {
 
@@ -516,6 +518,121 @@ bool test_villager_movement_target_is_job_appropriate() {
     return saw_field_unset && saw_non_field_set;
 }
 
+bool test_merchant_trip_presentation_follows_trip_window() {
+    // Ticket #78 (ADR 0001/0003): a merchant's trip is canonical; where the
+    // client draws them is presentation derived from the trip's settlements
+    // and times. Facts are injected here to pin exact ticks; the canonical MerchantTrip
+    // adapter is covered separately.
+    universe::ui::SimulationController controller{universe::SimulationConfig{.seed = 42, .initial_population = 200}};
+    const auto settlements = controller.settlements();
+    if (settlements.size() < 2U || controller.people().empty()) {
+        return false;
+    }
+    const auto& origin = settlements[0];
+    const auto& destination = settlements[1];
+    const auto merchant = controller.people().front().id;
+    const universe::ui::TradeTripFacts trip{
+        .merchant = merchant,
+        .origin = origin.id,
+        .destination = destination.id,
+        .depart_tick = 1000,
+        .arrive_tick = 5000,
+        .return_tick = 9000,
+    };
+    const std::vector<universe::ui::TradeTripFacts> trips{trip};
+
+    // Before departure and after return: no trip, so the merchant is home.
+    for (const std::int64_t tick : {std::int64_t{0}, std::int64_t{999}, std::int64_t{9000}, std::int64_t{20000}}) {
+        const auto presentations = universe::ui::build_agent_presentations(controller, tick, trips);
+        if (presentations.at(merchant).trip.has_value()) {
+            return false;
+        }
+    }
+    for (const std::int64_t tick : {std::int64_t{1000}, std::int64_t{4999}, std::int64_t{5000}, std::int64_t{8999}}) {
+        const auto presentations = universe::ui::build_agent_presentations(controller, tick, trips);
+        const auto& shown = presentations.at(merchant).trip;
+        if (!shown.has_value() || shown->origin_id != origin.id || shown->destination_id != destination.id ||
+            shown->depart_tick != 1000 || shown->arrive_tick != 5000 || shown->return_tick != 9000) {
+            return false;
+        }
+        const universe::ui::PresentationPoint expected_origin{
+            static_cast<float>(origin.position_x), static_cast<float>(origin.position_z)};
+        const universe::ui::PresentationPoint expected_destination{
+            static_cast<float>(destination.position_x), static_cast<float>(destination.position_z)};
+        if (!(shown->origin == expected_origin) || !(shown->destination == expected_destination)) {
+            return false;
+        }
+    }
+    // Other people never get a trip.
+    const auto during = universe::ui::build_agent_presentations(controller, 4000, trips);
+    for (const auto& [id, presentation] : during) {
+        if (id != merchant && presentation.trip.has_value()) {
+            return false;
+        }
+    }
+    // Pure function of state plus tick: repeated calls agree.
+    return during == universe::ui::build_agent_presentations(controller, 4000, trips);
+}
+
+bool test_trade_trip_facts_map_canonical_trips() {
+    // Adapter from canonical MerchantTrip (#72) to presentation facts (#78).
+    universe::MerchantTrip trip{};
+    trip.merchant_id = 11;
+    trip.origin_settlement_id = 2;
+    trip.destination_settlement_id = 3;
+    trip.departed_at = universe::SimulationTime{1000};
+    trip.arrives_at = universe::SimulationTime{5000};
+    trip.returns_at = universe::SimulationTime{9000};
+    const std::vector<universe::MerchantTrip> trips{trip};
+    const auto facts = universe::ui::trade_trip_facts(std::span<const universe::MerchantTrip>{trips});
+    if (facts.size() != 1U) {
+        return false;
+    }
+    const auto& fact = facts.front();
+    if (fact.merchant != 11U || fact.origin != 2U || fact.destination != 3U || fact.depart_tick != 1000 ||
+        fact.arrive_tick != 5000 || fact.return_tick != 9000) {
+        return false;
+    }
+    // A fresh world has no trips, so nobody is drawn travelling.
+    universe::ui::SimulationController controller{universe::SimulationConfig{.seed = 42, .initial_population = 50}};
+    const auto none = universe::ui::trade_trip_facts(controller);
+    if (!none.empty()) {
+        return false;
+    }
+    for (const auto& [id, presentation] : universe::ui::build_agent_presentations(controller, 100, none)) {
+        if (presentation.trip.has_value()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool test_merchant_trip_with_unknown_settlement_is_ignored() {
+    universe::ui::SimulationController controller{universe::SimulationConfig{.seed = 42, .initial_population = 200}};
+    const auto merchant = controller.people().front().id;
+    const std::vector<universe::ui::TradeTripFacts> trips{universe::ui::TradeTripFacts{
+        .merchant = merchant, .origin = 999999U, .destination = 999998U, .depart_tick = 0, .arrive_tick = 10, .return_tick = 20}};
+    const auto presentations = universe::ui::build_agent_presentations(controller, 5, trips);
+    return !presentations.at(merchant).trip.has_value();
+}
+
+bool test_agent_json_carries_trip_only_when_travelling() {
+    universe::ui::AgentRenderView agent{};
+    agent.id = 7;
+    universe::ui::WorldSnapshotView snapshot{};
+    snapshot.agents.push_back(agent);
+    const auto home = universe::ui::make_snapshot_message(1U, snapshot, true);
+    if (home.find("\"trip\":null") == std::string::npos) {
+        return false;
+    }
+    snapshot.agents[0].trip = universe::ui::TripPresentation{
+        .origin_id = 1, .destination_id = 2, .origin = {10.0F, 20.0F}, .destination = {30.0F, 40.0F},
+        .depart_tick = 100, .arrive_tick = 200, .return_tick = 300};
+    const auto away = universe::ui::make_snapshot_message(1U, snapshot, true);
+    return away.find("\"trip\":{\"originId\":1,\"destinationId\":2") != std::string::npos &&
+           away.find("\"departTick\":100,\"arriveTick\":200,\"returnTick\":300") != std::string::npos;
+}
+
 bool test_dead_and_demoted_people_absent_from_snapshot() {
     // A snapshot must never contain a dead person, and demotion into a
     // population-group cohort (which sets alive=false, not a real death)
@@ -838,6 +955,10 @@ int main() {
         {"snapshot_forwards_real_canonical_positions", test_snapshot_forwards_real_canonical_positions},
         {"snapshot_message_includes_current_activity", test_snapshot_message_includes_current_activity},
         {"villager_movement_target_is_job_appropriate", test_villager_movement_target_is_job_appropriate},
+        {"merchant_trip_presentation_follows_trip_window", test_merchant_trip_presentation_follows_trip_window},
+        {"merchant_trip_with_unknown_settlement_is_ignored", test_merchant_trip_with_unknown_settlement_is_ignored},
+        {"trade_trip_facts_map_canonical_trips", test_trade_trip_facts_map_canonical_trips},
+        {"agent_json_carries_trip_only_when_travelling", test_agent_json_carries_trip_only_when_travelling},
         {"dead_and_demoted_people_absent_from_snapshot", test_dead_and_demoted_people_absent_from_snapshot},
         {"determinism_with_observer_idle", test_determinism_with_observer_idle},
         {"life_history_records_birth_for_child_and_parents", test_life_history_records_birth_for_child_and_parents},

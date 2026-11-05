@@ -29,6 +29,8 @@ struct AgentRenderView {
     std::optional<PresentationPoint> target{};
     std::int64_t depart_tick{};
     std::int64_t return_depart_tick{};
+    // Present only while a merchant is on a trade trip (#78).
+    std::optional<TripPresentation> trip{};
 };
 
 struct SettlementRenderView {

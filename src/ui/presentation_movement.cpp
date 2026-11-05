@@ -100,9 +100,30 @@ struct SettlementFacts {
 
 }  // namespace
 
+std::vector<TradeTripFacts> trade_trip_facts(const std::span<const MerchantTrip> trips) {
+    std::vector<TradeTripFacts> facts;
+    facts.reserve(trips.size());
+    for (const auto& trip : trips) {
+        facts.push_back(TradeTripFacts{
+            .merchant = trip.merchant_id,
+            .origin = trip.origin_settlement_id,
+            .destination = trip.destination_settlement_id,
+            .depart_tick = trip.departed_at.ticks,
+            .arrive_tick = trip.arrives_at.ticks,
+            .return_tick = trip.returns_at.ticks,
+        });
+    }
+    return facts;
+}
+
+std::vector<TradeTripFacts> trade_trip_facts(const SimulationController& controller) {
+    return trade_trip_facts(std::span<const MerchantTrip>{controller.simulation().state().merchant_trips});
+}
+
 std::unordered_map<PersonId, AgentPresentation> build_agent_presentations(
     const SimulationController& controller,
-    const std::int64_t tick) {
+    const std::int64_t tick,
+    const std::span<const TradeTripFacts> trips) {
     std::unordered_map<HouseholdId, const Household*> household_by_id;
     for (const auto& household : controller.households()) {
         household_by_id.emplace(household.id, &household);
@@ -190,6 +211,31 @@ std::unordered_map<PersonId, AgentPresentation> build_agent_presentations(
         }
 
         presentations.emplace(person.id, presentation);
+    }
+
+    // Merchants on a trip (#78): attach the trip to the merchant's
+    // presentation while the trip window is open. Unknown settlements or an
+    // unplaced merchant are skipped rather than invented.
+    for (const auto& trip : trips) {
+        if (tick < trip.depart_tick || tick >= trip.return_tick) {
+            continue;
+        }
+        const auto person_it = presentations.find(trip.merchant);
+        const auto origin_it = facts_by_settlement.find(trip.origin);
+        const auto destination_it = facts_by_settlement.find(trip.destination);
+        if (person_it == presentations.end() || origin_it == facts_by_settlement.end() ||
+            destination_it == facts_by_settlement.end()) {
+            continue;
+        }
+        person_it->second.trip = TripPresentation{
+            .origin_id = trip.origin,
+            .destination_id = trip.destination,
+            .origin = origin_it->second.centre,
+            .destination = destination_it->second.centre,
+            .depart_tick = trip.depart_tick,
+            .arrive_tick = trip.arrive_tick,
+            .return_tick = trip.return_tick,
+        };
     }
     return presentations;
 }
