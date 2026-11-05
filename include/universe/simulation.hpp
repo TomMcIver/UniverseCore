@@ -639,6 +639,10 @@ struct SimulationConfig {
     std::uint32_t stone_resource_scale_percent{100};
     std::uint32_t wood_regeneration_scale_percent{100};
     std::uint32_t material_crafting_scale_percent{100};
+    // False trains no merchants, so no trade happens. A calibration switch for the
+    // no-trade comparison (ADR 0003, #76); it only shapes how a world runs and is
+    // not saved.
+    bool trade_enabled{true};
 };
 
 struct WorldState {

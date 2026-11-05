@@ -58,3 +58,79 @@ A canonical state change, so snapshot schema impact must be evaluated and versio
   - **Snapshot v29.** A trailing section after the merchant memory: a count and one 82-byte record per trip in ascending merchant order (see ARCHITECTURE). v24-v28 migrate with no trips; event type bytes 9 and 10 are rejected in files older than v29.
   - **Calibration.** Base load, the quarter-of-stock limit, the 20 percent share and the one-coin profit floor are first values for the sweep in #76. A merchant eats at home and still counts as an unassigned adult in the worker totals while away.
 - **Household coin on promotion.** Demotion folds a household's coin into its settlement commons, and promotion does not hand it back. Total coin is conserved and trade is unaffected, because only a commons funds cargo. A household's coin matters only as a share of realised profit, so this is revisited when households start to spend.
+
+## Calibration (#76)
+
+Measured with `universe_trade_calibration` (`scripts/run-trade-calibration.ps1`; about 10 minutes for 64 seeds of both layouts, each seed run twice). 20 years, 200 people, seeds 1-64, from the single-settlement start and the default layout, stepped one day at a time (equivalent to any other schedule). Each seed runs once with trade and once with `SimulationConfig::trade_enabled = false` (no merchant is ever trained), so the comparison is paired. The constants were swept one at a time with `scripts/container-trade-sweep.sh` (each variant is a separate compile with `-DUNIVERSE_TRADE_*`, see `include/universe/trade_tuning.hpp`), 16 seeds of both layouts per variant. No production build sets those macros.
+
+### Result: trade as built moves almost nothing, and no constant can fix that
+
+| Measure (64 seeds, 20 years) | Single-settlement start | Default layout |
+|---|---|---|
+| Seeds that ever sent a trip | 21 / 64 | 48 / 64 |
+| Trips departed / completed (all seeds) | 82,872 / 82,845 | 192,532 / 192,461 |
+| Trips per seed, median / p90 / max | 0 / 5,110 / 9,855 | 911 / 9,860 / 14,600 |
+| Most trips by one merchant (max over seeds) | 5,110 | 6,205 |
+| Completed trips that sold nothing | 82,845 (100%) | 192,247 (99.89%) |
+| Completed trips that made a profit | 0 | 154 (0.08%) |
+| Coin that realised sales moved (all seeds) | 0 | 113,580 |
+| Coin outlay of all trips (all seeds) | 20,997,388 | 47,429,015 |
+| Expected profit at departure vs realised (all seeds) | +298,986,169 vs -20,997,388 | +685,017,751 vs -47,315,435 |
+| Active settlements holding no coin at the end (summed over seeds) | 184 | 28 |
+| Final population with trade / without (sum over seeds) | 14,535 / 14,535 | 15,482 / 15,438 |
+| Seeds whose population fell below 90% of the no-trade run | 0 | 0 |
+| Worst per-seed population ratio, trade / no-trade | 1.000 | 1.000 |
+| Person-days under food stress, trade / no-trade (sum) | 1,627,764 / 1,623,052 | 1,349,303 / 1,365,048 |
+| Mean price gap over all settlement pairs and goods, trade / no-trade | 2,516 / 2,566 permille | 2,728 / 2,774 permille |
+| Peak merchants per seed, median / p90 / max | 2 / 4 / 5 | 1 / 3 / 5 |
+| Widest price gap between two settlements | 15,000 permille on almost every seed | same |
+| Final population per seed, median / min / max | 283 / 0 / 337 | 248 / 111 / 332 |
+
+"Realised profit" counts a trip with no sale as a loss of its whole outlay even though the unsold goods return home, so the negative totals are the accounting of failed trips, not destroyed value; the coin and goods do come back. Ten single-settlement seeds end extinct (the non-arable starts of ADR 0002, not a trade effect).
+
+Invariants held on all 128 runs, checked on every simulated day (not only at year ends): total coin (settlements, households and coin carried on trips) never changed; every trip's cargo and unsold goods stayed consistent and no stock went negative; each merchant had at most one trip and was alive and a merchant while away; every price stayed inside 0.25x-4x; trips completed plus trips in flight never exceeded trips departed; with trade disabled there was no merchant and no trip. The test compares repeated runs for determinism. There is no global goods ledger (production and consumption move the same stocks), so goods are checked at the trip level only.
+
+### Why: a destination's coin runs out and the merchant cannot see it
+
+A traced run (default layout, seed 1) shows the loop. A merchant leaves daily on a one-day round trip, carrying 50 wood from a settlement where wood is at the price floor to one where it is at the ceiling. The first trips sell and net coin. The destination had 1,000 coin and pays 960 of it in a few trips, leaving 40. From then on `units_affordable` returns zero, nothing sells, the cargo comes home, and the merchant leaves again the next day on the same remembered price. Remembered prices record what the price was, not whether the buyer could pay, and a failed sale refreshes the memory with the same high price, so the loop never ends. Coin is a conserved fixed supply and only moves where the merchant sells, so the trade drains the buyer once and then idles.
+
+What the numbers show:
+
+- **Trade has no measurable effect on outcomes.** Final population is identical with and without trade on the single-settlement start and within 0.3% on the default layout (it can differ only through the few real sales). No survivable seed is reduced below its no-trade outcome, so that acceptance criterion is met trivially. This is a weakness of the mechanism, not a success: trade is decided on sound prices but is not happening.
+- **Price spread does not converge.** The mean pairwise gap with trade is within 2% of the no-trade gap, and the widest gap is the full 15,000 permille everywhere. The expectation that arbitrage fades as prices converge is not met.
+- **The profit threshold never filters.** Prices saturate at the 4x ceiling and 0.25x floor, so the best margin is 15,000 permille on almost every seed. Thresholds of 250, 500, 1,000 and 3,000 permille give identical results.
+- **Most settlements have no way to pay.** Settlements founded by fission start with no commons coin (coin is created only at world creation), and the single-settlement start ends with 184 coinless active settlements over 64 seeds. A buyer needs coin to buy, so the settlements that most need goods are the least able to take them.
+- **Merchant counts are small and uneven**, 0-5 per seed; 43 single-settlement seeds never send a trip.
+
+### Parameter sweep (16 seeds, default layout)
+
+Each row changes one constant; the baseline is the shipped value. "With profit" counts completed trips that earned coin.
+
+| Constant | Value | Trips departed | Trips with profit | Final population vs no-trade |
+|---|---|---|---|---|
+| (baseline) | 500 permille, 2 merchants, load 50, cap 25%, share 200 permille, stale 500 days | 62,349 | 39 | 4,135 / 4,135 |
+| Margin threshold | 250, 1,000, 3,000 permille | 62,349 | 39 | same |
+| Merchant bound | 1 | 43,229 | 39 | same |
+| Merchant bound | 4 | 70,556 | 39 | same |
+| Base cargo load | 25 / 100 / 200 | 62,349 | 41 / 39 / 33 | same |
+| Stock cap | 10% | 53,340 | 30 | same |
+| Stock cap | 50% | 62,421 | 25 | same |
+| Profit share | 0 / 500 permille | 62,349 | 39 | same |
+| Staleness | 200 / 1,000 days | 62,349 | 39 | same |
+
+Readings: the threshold, profit share and staleness do nothing here; the merchant bound and the load only scale how much futile travel and cargo go back and forth; a larger stock cap does not help. In the single-settlement layout trips departed are 24,993 at baseline and unchanged by the margin, load, share and 1,000-day settings; the bound moves them to 16,117 (1) and 35,605 (4), the stock cap to 24,933 (10%) and 25,221 (50%), and 200-day staleness to 24,323. Population equals the no-trade population in every variant on both layouts, and the mean pairwise price gap stays between 2,469 and 2,483 permille against 2,512 without trade. Invariants held in every variant.
+
+### Decision
+
+**No constant is changed.** The sweep shows none of them changes outcomes, because the binding problem is structural (a buyer's coin, and a merchant's blindness to it), not a mis-set number. Tuning a constant to hide that would be wrong. The shipped values stay as harmless first values: the bound of two merchants and the 50-unit load cap how much futile travel there is, not how much trade. The demo scenario, its test and the snapshot schema (v29) are unchanged.
+
+Added with the harness, none of which changes an existing world: `SimulationConfig::trade_enabled` (default true, not saved, for the no-trade comparison) and the compile-time overrides in `trade_tuning.hpp` (defaults equal the previous constants).
+
+### Recommended follow-up (not done here)
+
+Make trade actually move goods and coin, then recalibrate with this harness:
+
+1. **Remember the buyer's means.** Record in the merchant's memory whether the destination could pay (or its coin) when last seen, and have `evaluate_trip` cap expected revenue at what the destination can afford. A trip that sold nothing must lower or drop the remembered price rather than refresh it, so the loop ends.
+2. **Give settlements founded by fission coin.** A fission should hand the new settlement its share of the founder's commons coin (a conserved transfer) so it can buy. This changes world outcomes, so it needs a fresh look at `scenarios/demo.json`, `tests/demo_scenario_tests.cpp` and `universe_demo_seed_search`.
+3. **Let coin flow both ways.** A one-way flow from buyers to sellers ends when buyers run out; sellers should spend, or trips should carry goods in both directions.
+4. After 1-3, rerun the 64-seed pair and the sweep. The margin threshold only becomes selective once prices stop sitting at the ceiling and floor, which may also need a wider cover target.
