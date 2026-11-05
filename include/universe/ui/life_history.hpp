@@ -23,6 +23,8 @@ enum class LifeEntryKind : std::uint8_t {
     Taught = 8,
     AuthoredRecord = 9,
     ReadRecord = 10,
+    TradeDeparted = 11,
+    TradeCompleted = 12,
 };
 
 struct LifeHistoryEntry {
