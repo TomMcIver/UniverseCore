@@ -638,13 +638,13 @@ func _follow_route(route: Dictionary, from: Vector2, step: float) -> Vector2:
 	return position
 
 ## Plays the villager's walk or idle animation from the model's own clips. The
-## walk plays faster with playback speed, up to the speed at which walking stops
+## walk plays faster with playback speed (idle always plays at normal speed), up to the speed at which walking stops
 ## being drawn.
 func _set_agent_animation(id: int, animation: String) -> void:
 	var animator: AnimationPlayer = _agent_animators.get(id)
 	if animator == null or not animator.has_animation(animation):
 		return
-	animator.speed_scale = float(mini(_playback_speed, WALKING_VISIBLE_MAX_SPEED))
+	animator.speed_scale = float(mini(_playback_speed, WALKING_VISIBLE_MAX_SPEED)) if animation == WALK_ANIMATION else 1.0
 	if animator.current_animation != animation:
 		# glTF clips import as one-shots; a villager walks or stands for as long
 		# as it takes, so both clips must loop.
