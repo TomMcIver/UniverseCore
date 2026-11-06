@@ -4,15 +4,24 @@ Headless simulation core for a procedural, physically grounded civilization-to-m
 
 The project deliberately starts without Unreal Engine. The initial objective is to prove deterministic world generation, population dynamics, persistent history, simulation level-of-detail, and AI-agent integration independently of rendering.
 
-## Browser renderer MVP
+## Clients
 
-An initial PlayCanvas + TypeScript web client vertical slice is available as a renderer/inspection layer over native C++ simulation.
+Two presentation clients consume the simulation through the view-model protocol and a localhost WebSocket bridge: the Godot 4.7 client (`apps/godot-client`, the current main client, with the demo in `docs/demo/README.md`) and an earlier PlayCanvas + TypeScript web client (`apps/web-client`). Both are renderer/inspection layers over the native C++ simulation.
 
 See `docs/PLAYCANVAS_WEB_CLIENT.md` for architecture, run commands, protocol, and extension rules.
 
 ## Current milestone
 
-**Milestone 3 complete: deterministic economy and settlement growth foundation (stopping before Milestone 4)**
+**Milestones 0-4 complete (kernel, settlements, history and knowledge, economy, simulation LOD), plus a playable demo slice and a conserved-coin trade system.** See `ROADMAP.md` for status, including what is unfinished: migration between settlements, Milestone 5 AI cognition, and trade that moves little (#91). The feature list below was written at Milestone 3 and is not exhaustive.
+
+Beyond that list:
+
+- Simulation LOD: cohorts, individual/cohort promotion and demotion, settlement aggregate execution (`universe_lod_benchmark`)
+- Settlement tier and merging, settlement fission under pressure and absorption of small settlements, and a single-settlement start (ADR 0002)
+- Canonical household positions, person daily schedules and activities, life events and building placement (ADR 0001); person positions shown by clients are presentation state
+- Conserved coin, prices derived from days of cover, merchants, remembered prices and trade trips (ADR 0003). Trips sell, but trade volume is small and price convergence weak (follow-up #91)
+- Committed demo scenario (`scenarios/demo.json`, seed 39)
+- Snapshot schema v30 (v24 and later migrate on load)
 
 - C++23
 - Cross-platform CMake build
@@ -58,16 +67,15 @@ See `docs/PLAYCANVAS_WEB_CLIENT.md` for architecture, run commands, protocol, an
 - Optional SDL3 + Dear ImGui simulation inspector (`UNIVERSECORE_BUILD_UI=ON`)
 - UI command/query adapter over canonical simulation state
 - UI smoke test validating deterministic advance/save/load behavior
-- Snapshot schema v16 with deterministic typed-event/material/environment/inventory/tool-durability/agent-memory/agent-knowledge/knowledge-transmission/record/institution/economy/building persistence/validation
+- Snapshot schema v16 (current schema is v30, see the list above) with deterministic typed-event/material/environment/inventory/tool-durability/agent-memory/agent-knowledge/knowledge-transmission/record/institution/economy/building persistence/validation
 - Reproducibility tests
 - No engine dependency
 
-Current M3A modelling limitations (intentional):
+Modelling limitations as of Milestone 3A (some since addressed, as noted):
 
 - aggregate material quantities rather than item-instance objects
 - settlement-level inventories only
-- no price system or market-clearing exchange logic yet
-- no inter-settlement trade or market layer
+- local exchange within a settlement has no price system (inter-settlement prices and merchant trade came later, see ADR 0003)
 - no strategic building planning/priority policies beyond deterministic baseline heuristics
 - no technology gating for these material chains
 - generic `BasicTool` abstraction (non-specialized tooling taxonomy)

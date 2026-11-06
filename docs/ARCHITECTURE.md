@@ -17,7 +17,7 @@ UniverseCore (portable C++)
 
         ↓ adapter boundary
 
-Presentation Runtime (future: Unreal Engine)
+Presentation Runtime (current: Godot and web clients over a WebSocket bridge; Unreal deferred)
 ├── rendering
 ├── animation
 ├── input
@@ -412,14 +412,6 @@ Settlement prices (ADR 0003, `trade_pricing.hpp`, `Simulation::settlement_prices
 - No need is the floor price; no stock against a need is the ceiling. A demoted region approximates workers from the aggregate eligible-worker share until level-of-detail trade handling (#74).
 - Thirty-day cover, the thirty-day horizon and the 0.25x-4x range are first values, calibrated by #76.
 
-Settlement prices (ADR 0003, `trade_pricing.hpp`, `Simulation::settlement_prices`):
-
-- A price is derived from state on demand and never stored, so it needs no snapshot field and a reload prices identically.
-- price = base x multiplier. The base is the household wealth value of the resource times ten coin, in milli-coin per unit (food 10, wood 20, stone 20, timber 40, tool 80 coin). The multiplier is thirty days of target cover divided by actual days of cover, clamped to 0.25x-4x, in integer arithmetic.
-- Stock is the commons plus detailed households' holdings, plus the aggregate ledger for food in a demoted region. Daily need is the people's food requirement (detailed members and cohorts), outstanding construction and crafting demand spread over thirty days for wood, stone and timber, and one tool-wear break per twenty-four worker-days for tools.
-- No need is the floor price; no stock against a need is the ceiling. A demoted region approximates workers from the aggregate eligible-worker share until level-of-detail trade handling (#74).
-- Thirty-day cover, the thirty-day horizon and the 0.25x-4x range are first values, calibrated by #76.
-
 Snapshot invariants:
 
 - snapshots are canonical simulation state, not debug dumps or raw memory images
@@ -440,7 +432,9 @@ Introduce parallelism only after systems and ownership boundaries stabilize. Pre
 
 ## Unreal integration
 
-Unreal is intentionally deferred.
+Unreal is intentionally deferred. The presentation clients actually built are the Godot 4.7 client (`apps/godot-client`, the current main client) and a PlayCanvas/TypeScript web client (`apps/web-client`). Both consume read-only view models from `SimulationController` over the `universe_ui_bridge` line protocol, wrapped as a localhost WebSocket by `apps/web-client/server/ws-bridge.mjs`.
+
+If Unreal is introduced later:
 
 When introduced, use a narrow adapter layer:
 

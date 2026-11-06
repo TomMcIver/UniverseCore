@@ -1,14 +1,14 @@
 {
   "project": "UniverseCore",
-  "as_of": "2026-09-29",
-  "current_phase": "Milestone 4 simulation LOD (complete)",
-  "current_task": "Integrated demo panels, construction allocation, and route-based villager movement verified on feat/demo-final-integration",
-  "next_task": "Review and run the combined Bronze Age demo interactively",
+  "as_of": "2026-11-06",
+  "current_phase": "Milestone 4 simulation LOD (complete); post-M4 settlement dynamics, Godot demo and conserved-coin trade merged",
+  "current_task": "Trade follow-up #91: give trade volume a reason to exist (seller coin sinks, a second good, finer trade tick); trips sell after #86 but volume is small and price convergence weak",
+  "next_task": "Owner to choose among: finish trade (#91), migration between settlements, Milestone 5 AI cognition, player continuity, performance work, construction builders walking to sites (see ROADMAP.md \"What is next\")",
   "build": {
     "canonical_workflow": "podman scripts/container-test.sh",
-    "last_verified": "2026-09-29",
+    "last_verified": "2026-11-06",
     "status": "passing",
-    "notes": "Combined integration branch passed the Podman Release build and all 8 CTest groups, Godot 72/72 tests, and web client 5/5 tests plus production build. Results: build/test-runs/2026-09-29-final."
+    "notes": "Everything merged to main through 9c32202 (#86, #90) passed the canonical Podman workflow. Earlier combined demo integration: Podman Release build and all 8 CTest groups, Godot 72/72 tests, web client 5/5 tests plus production build (build/test-runs/2026-09-29-final). Snapshot schema is v30."
   },
   "progress": {
     "simulation_foundation_percent": 100,
@@ -97,8 +97,26 @@
       "percent": 100
     },
     {
+      "id": "S1",
+      "name": "Settlement tier, merging, fission and absorption (ADR 0002)",
+      "status": "complete",
+      "percent": 100
+    },
+    {
+      "id": "DEMO",
+      "name": "Godot demo slice (panels, route movement, avatar descent, construction visuals)",
+      "status": "complete",
+      "percent": 100
+    },
+    {
+      "id": "TRADE",
+      "name": "Conserved-coin trade epic #68 (ADR 0003); follow-up #91 open",
+      "status": "active",
+      "percent": 70
+    },
+    {
       "id": "UE",
-      "name": "Unreal Integration",
+      "name": "Unreal Integration (deferred; Godot client is the main client)",
       "status": "future",
       "percent": 0
     }
@@ -142,13 +160,27 @@
       "Snapshot schema v19 and validation",
       "Canonical Podman build/test workflow",
       "Development dashboard + deployment workflow",
-      "Combined Bronze Age demo integration verification"
+      "Combined Bronze Age demo integration verification",
+      "Snapshot schema v20-v26 (canonical positions, life events, building placement, settlement pressure counters)",
+      "Settlement tier and merging (#30-#33)",
+      "Settlement fission, absorption and single-settlement start (#61-#66, ADR 0002)",
+      "Committed demo scenario seed 39 and seed search (#51)",
+      "Typed view-model protocol and panel registry (#52)",
+      "Godot client demo: route-based villager movement (#56), economy/time/life-history panels (#54), player avatar and descent (#57), demo village look (#55), staged construction visuals (#85), idle animation speed (#84)",
+      "Trade epic #68 slices: coin endowment (#69), prices from days of cover (#70), merchants (#71), trade trips (#72), remembered prices (#73), safe endings (#74), determinism (#75), calibration (#76), economy panel (#77), drawn merchants (#78), trips that sell (#86)",
+      "Snapshot schema v27-v30 (coin, merchant memory, trade trips, remembered coin)"
     ],
-    "active": [],
+    "active": [
+      "Trade follow-up #91 (open)"
+    ],
     "planned": [
       "Milestone 1 migration implementation (designed/deferred)",
       "Milestone 1 long-horizon viability extension (deferred follow-up)",
-      "Milestone 6 Unreal bridge"
+      "Milestone 5 AI cognition (not started)",
+      "Player continuity, time model, alien worlds, multiverse (vision pillars with no milestone yet)",
+      "Performance work: jump pacing, delta size, hot paths (performance suite PR pending)",
+      "Construction builders walking to sites",
+      "Unreal bridge (deferred; superseded for now by the Godot client)"
     ]
   },
   "invariants": [
@@ -159,6 +191,54 @@
     "Snapshots serialize canonical deterministic state only."
   ],
   "recent_verified_commits": [
+    {
+      "hash": "9c32202",
+      "date": "2026-11-06",
+      "summary": "Trade trips that sell, buyer coin memory and fission coin (#86, #90)",
+      "verified": true
+    },
+    {
+      "hash": "3bb8836",
+      "date": "2026-11-06",
+      "summary": "Idle animation speed (#84) and staged construction visuals (#85)",
+      "verified": true
+    },
+    {
+      "hash": "ed2c20b",
+      "date": "2026-11-06",
+      "summary": "Trade epic slices #74-#78: safe endings, determinism, calibration, panel, drawing",
+      "verified": true
+    },
+    {
+      "hash": "5a1a07c",
+      "date": "2026-11-05",
+      "summary": "Merchant trade trips and remembered prices (#72, #73)",
+      "verified": true
+    },
+    {
+      "hash": "5c47134",
+      "date": "2026-11-04",
+      "summary": "Merchants appear when trade pays (#71)",
+      "verified": true
+    },
+    {
+      "hash": "edf406a",
+      "date": "2026-11-04",
+      "summary": "Settlement prices from days of cover (#70)",
+      "verified": true
+    },
+    {
+      "hash": "ec80ac7",
+      "date": "2026-10-10",
+      "summary": "Conserved coin endowment on settlements and households (#69)",
+      "verified": true
+    },
+    {
+      "hash": "3d90117",
+      "date": "2026-10-07",
+      "summary": "Settlement fission and absorption, committed demo scenario, villager pace and routes (#67)",
+      "verified": true
+    },
     {
       "hash": "f8c0826",
       "date": "2026-09-29",
