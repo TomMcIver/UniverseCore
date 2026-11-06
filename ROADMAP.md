@@ -148,19 +148,64 @@ Scope notes:
 
 Exit criteria: one significant NPC can make a model-assisted decision without accessing hidden world truth or directly mutating canonical state.
 
-## Milestone 6: Unreal bridge
+## Milestone 5 progress note
 
-Only begin after Milestones 0-4 are stable enough to demonstrate a believable headless settlement.
+Milestone 5 is not started as a whole (no planner interface, inference adapter or schema validation yet). Groundwork that exists: the cognitive-state and activity/schedule model was decided under #34 and built as a deterministic person daily schedule and activity state (#37), with canonical household positions (#38). This is deterministic behaviour, not yet a planner interface.
 
-- [ ] Unreal C++ project
-- [ ] UniverseCore library adapter
-- [ ] simple generated terrain
-- [ ] visual settlement
-- [ ] local NPC realization
-- [ ] player controller
-- [ ] save/load bridge
+## Milestone 6: Presentation clients (was "Unreal bridge")
 
-Exit criteria: player can enter a settlement whose visible state is generated from UniverseCore, leave for twenty simulated years, return, and see the resulting coherent world.
+Status: **demo slice delivered on Godot and a web client; Unreal not started and no longer the planned first client**
+
+The project built presentation clients over a view-model protocol instead of an Unreal bridge. The no-Unreal native client direction is tracked in #8-#14 (engine comparison in `docs/research/bevy-vs-godot-native-client.md`).
+
+- [x] WebSocket bridge: `universe_ui_bridge` speaks a line-delimited protocol on stdio and `apps/web-client/server/ws-bridge.mjs` exposes it on localhost (#2, #7)
+- [x] Typed view-model protocol and panel registry (#52)
+- [x] PlayCanvas/TypeScript web client (`apps/web-client`, `docs/PLAYCANVAS_WEB_CLIENT.md`)
+- [x] Godot 4.7 client (`apps/godot-client`, the current main client): connects, handles reconnects, renders terrain from environment data, assets and lighting (#15-#19)
+- [x] NPCs at canonical household positions with navmesh pathing (#39, #40), and route-based villager movement along the village's tracks for the demo (#56)
+- [x] Economy, time-advance and life-history panels (#54)
+- [x] Player avatar and descent from command view to ground view (#57)
+- [x] Demo village look and staged construction visuals (#55, #85)
+- [x] Committed demo scenario (`scenarios/demo.json`, seed 39) and seed search (#51); demo sequence evidence in `docs/demo/README.md`
+- [x] Merchants drawn travelling between settlements (#78)
+- [ ] Construction builders walking to sites (construction is drawn in stages, but villagers do not yet walk to the site)
+- [ ] Unreal C++ project and adapter (deferred; superseded for now by the Godot client)
+
+Original exit criterion: player can enter a settlement whose visible state is generated from UniverseCore, leave for twenty simulated years, return, and see the resulting coherent world. The demo sequence (command view, jump 20 years, descend to the ground view, inspect the economy and an NPC's life history) is essentially this, and `tests/demo_scenario_tests.cpp` guards the demo world. It has not been formally declared as a milestone gate.
+
+## Settlement growth, fission and trade (post-Milestone 4 work)
+
+Status: **settlement dynamics delivered; trade built but economically weak**
+
+- [x] Settlement tier (Village/Town/City) computed live, and settlement merging (#30-#33; epic #26 is still open)
+- [x] Canonical region/settlement and household positions, life events and building placement (`docs/adr/0001-building-placement-canonical-person-positions-presentation.md`; #23-#25, #35, #38, #45, #46, #53)
+- [x] Single-settlement world start for the demo scenario (#63)
+- [x] Settlement fission under pressure with minimum sizes, and absorption of settlements that stay below viable size (#61, #64, #65), calibrated across seeds (#66). See `docs/adr/0002-settlement-fission-and-consolidation.md`
+- [x] Trade epic #68 (`docs/adr/0003-settlement-trade-and-merchants.md`): conserved coin endowment (#69), prices from days of cover (#70), merchants appear when trade pays (#71), merchant trade trips (#72), remembered prices (#73), safe trip endings (#74), determinism and resume proof (#75), calibration over many seeds (#76), economy panel (#77), drawn merchants (#78), trips that sell (#86)
+- [ ] Trade volume and price convergence: after #86 trips sell, but trade volume is small and price convergence is weak (all-goods price gap about 1-2% smaller than with no trade; population within 0.3% with or without trade). Follow-up #91 (seller coin sinks, a second good, a finer trade tick) and epic #68 are open
+- [ ] People migrating between settlements (see Milestone 1)
+
+Snapshot schema is v30 (`include/universe/snapshot.hpp`; v24 and later migrate on load). Version history is in `docs/ARCHITECTURE.md`.
+
+## Gap: vision pillars not yet on the roadmap
+
+`docs/GAME_VISION.md` names pillars that have no milestone. They are listed so they are not forgotten. None has a design or a date.
+
+- Player continuity: rebirth into a household of the continuing civilization, with economic continuity explained by world mechanisms and not an unexplained bank account.
+- Time model: acceleration must not become tactical power. The vision separates real-time local simulation, coarse simulation while the player is inactive, explicit waiting or stasis, and technology-enabled subjective time. Milestone 4 has time acceleration policies, not this player-facing model.
+- Alien worlds generated from constraints (gravity, atmosphere, chemistry, geology, climate, evolution): only touched on under "Later" as procedural geology/climate/biology.
+- Multiverse without arbitrary magic: only touched on under "Later" as alternate universes.
+
+## What is next
+
+Honest candidates, in no priority order. The owner decides the order. "Design first" means a design session (a wayfinder map, as used for #20 and #26) should come before tickets.
+
+- Finish trade: #91 (coin sinks, a second good, finer tick), measured with `universe_trade_calibration`. A measured plan exists; a short design check on the second good may be enough.
+- People migrating between settlements (Milestone 1 "migration" is still unchecked; earlier design notes in `docs/MILESTONE1_MIGRATION_DEMOGRAPHIC_STABILITY_DESIGN.md`). Design first: it interacts with fission, absorption and household ownership.
+- Milestone 5 AI cognition (planner interface, inference adapter, schema validation, deterministic fallback agent). Design first.
+- Player continuity (rebirth, no unexplained bank account). Design first.
+- Performance work: jump pacing, delta size and hot paths. Measure first; the performance suite (PR pending) is the starting point.
+- Construction builders walking to sites (client and activity model).
 
 ## Later
 
