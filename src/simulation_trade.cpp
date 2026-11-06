@@ -116,8 +116,10 @@ EventId Simulation::emit_trade_event(const EventType type, const MerchantTrip& t
     });
 }
 
-// What a merchant sees on reaching a settlement: all five of its current prices.
-void Simulation::remember_prices(const PersonId merchant_id, const SettlementId settlement_id, const SettlementPrices& prices) {
+// What a merchant sees on reaching a settlement: all five of its current prices
+// and the coin its commons holds (what a buyer there can pay with).
+void Simulation::remember_prices(
+    const PersonId merchant_id, const SettlementId settlement_id, const SettlementPrices& prices, const std::int64_t settlement_coin) {
     auto& memory = state_.merchant_price_memory;
     for (std::size_t index = 0; index < prices.millicoin.size(); ++index) {
         const auto resource = static_cast<ResourceType>(index);
@@ -127,6 +129,7 @@ void Simulation::remember_prices(const PersonId merchant_id, const SettlementId 
             .resource = resource,
             .price_millicoin = prices.millicoin[index],
             .seen_at = state_.time,
+            .settlement_coin = settlement_coin,
         };
         const auto position = std::lower_bound(memory.begin(), memory.end(), row, [](const auto& lhs, const auto& rhs) {
             return std::tie(lhs.merchant_id, lhs.settlement_id, lhs.resource) <
@@ -223,7 +226,7 @@ void Simulation::process_trade_period() {
             trip.coin_carried = revenue;
             trip.unsold_units = trip.cargo_units - sold;
             trip.phase = TripPhase::Returning;
-            remember_prices(trip.merchant_id, trip.destination_settlement_id, *destination_prices);
+            remember_prices(trip.merchant_id, trip.destination_settlement_id, *destination_prices, destination->coin);
             }
         }
 
@@ -261,7 +264,7 @@ void Simulation::process_trade_period() {
             credit_settlement_stock(*receiver, trip.resource, trip.unsold_units);
             if (origin->active) {
                 if (const auto home_prices = settlement_prices(trip.origin_settlement_id); home_prices.has_value()) {
-                    remember_prices(trip.merchant_id, trip.origin_settlement_id, *home_prices);
+                    remember_prices(trip.merchant_id, trip.origin_settlement_id, *home_prices, origin->coin);
                 }
             }
             emit_trade_event(EventType::TradeCompleted, trip, trip.coin_carried - trip.coin_outlay);
@@ -354,7 +357,12 @@ void Simulation::process_trade_period() {
                 continue;
             }
             const auto offer = evaluate_trip(
-                origin_prices.of(row.resource), row.price_millicoin, stock_of(*origin, row.resource), origin->coin, capability);
+                origin_prices.of(row.resource),
+                row.price_millicoin,
+                stock_of(*origin, row.resource),
+                origin->coin,
+                capability,
+                row.settlement_coin);
             if (offer.has_value() && (!best.has_value() || offer->expected_profit > best->offer.expected_profit)) {
                 best = Choice{.row = &row, .offer = *offer, .travel = travel_ticks(distance, capability.speed_units_per_day)};
             }

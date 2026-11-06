@@ -866,7 +866,7 @@ private:
     // totals after goods moved, so the world is always one a snapshot can describe.
     void settle_trade_stock();
     void abandon_trip(const MerchantTrip& trip);
-    void remember_prices(PersonId merchant_id, SettlementId settlement_id, const SettlementPrices& prices);
+    void remember_prices(PersonId merchant_id, SettlementId settlement_id, const SettlementPrices& prices, std::int64_t settlement_coin);
     void credit_settlement_stock(Settlement& settlement, ResourceType resource, std::int64_t units);
     EventId emit_trade_event(EventType type, const MerchantTrip& trip, std::int64_t coin_profit);
     void process_household_access_allocation();

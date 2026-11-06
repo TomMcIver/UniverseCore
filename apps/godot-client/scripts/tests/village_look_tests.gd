@@ -28,6 +28,8 @@ func run() -> void:
 	_test("day_night is brightest at midday and dimmest at midnight", _test_day_night_midday_vs_midnight)
 	_test("day_night wraps correctly across multiple simulated days", _test_day_night_wraps)
 	_test("buildings show their construction state and progress (B2)", _test_building_construction_state)
+	_test("construction goes foundation, walls, roof frame, complete (#85)", _test_construction_stages)
+	_test("construction stage transitions swap the visual in WorldView (#85)", _test_world_view_stage_transitions)
 	_test("live building set uses no medieval-town pieces (fountain, watermill, stall, lantern)", _test_no_medieval_pieces)
 	_test("world_view gives buildings simplified collision on the avatar layer", _test_world_view_building_collision)
 	_test("world_view does not rebuild an unchanged building on every delta (E1)", _test_world_view_no_building_churn)
@@ -206,6 +208,50 @@ func _test_building_construction_state() -> void:
 	_eq(_count_scenes(complete_visual, "roof") > 0, true, "a finished building has its roof")
 	active_visual.free()
 	complete_visual.free()
+
+func _test_construction_stages() -> void:
+	_eq(BuildingAssets.construction_stage("Planned", 0.0), "planned")
+	_eq(BuildingAssets.construction_stage("ActiveConstruction", 0.05), "foundation")
+	_eq(BuildingAssets.construction_stage("ActiveConstruction", 0.5), "walls")
+	_eq(BuildingAssets.construction_stage("ActiveConstruction", 0.85), "roof")
+	_eq(BuildingAssets.construction_stage("Complete", 1.0), "complete")
+	var foundation := BuildingAssets.make_building("Dwelling", "ActiveConstruction", 0.05)
+	_eq(foundation.find_child("Foundation", true, false) != null, true, "foundation slab under construction")
+	_eq(_count_scenes(foundation, "wall"), 0, "no walls during the foundation stage")
+	var walls := BuildingAssets.make_building("Dwelling", "ActiveConstruction", 0.5)
+	_eq(_count_scenes(walls, "wall") > 0, true, "walls stand in the wall stage")
+	_eq(walls.find_child("Rafters", true, false) == null, true, "no rafters before the roof stage")
+	var roof := BuildingAssets.make_building("Workshop", "ActiveConstruction", 0.85)
+	_eq(roof.find_child("Rafters", true, false) != null, true, "rafters in the roof stage")
+	_eq(roof.find_child("Ridge", true, false) == null, true, "no ridge beam yet")
+	var late := BuildingAssets.make_building("Workshop", "ActiveConstruction", 0.95)
+	_eq(late.find_child("Ridge", true, false) != null, true, "ridge beam late in the roof stage")
+	_eq(_count_scenes(late, "roof"), 0, "no finished roof until complete")
+	var done := BuildingAssets.make_building("Dwelling", "Complete", 1.0)
+	_eq(done.find_child("Foundation", true, false) == null and done.find_child("Rafters", true, false) == null, true, "finished building has no scaffolding")
+	for node in [foundation, walls, roof, late, done]:
+		node.free()
+
+func _test_world_view_stage_transitions() -> void:
+	var view := WorldView.new()
+	_root().add_child(view)
+	view.apply_snapshot({"agents": [], "settlements": [_settlement(1, 0.0, 0.0)], "buildings": [_building(7, 1, 4.0, 0.0, "Dwelling", "Planned", 0.0)]})
+	var planned: Node = view._building_nodes[7]
+	view.apply_delta({"updatedBuildings": [_building(7, 1, 4.0, 0.0, "Dwelling", "Planned", 0.0)]})
+	_eq(view._building_nodes[7] == planned, true, "an unchanged planned building keeps its node")
+	view.apply_delta({"updatedBuildings": [_building(7, 1, 4.0, 0.0, "Dwelling", "ActiveConstruction", 0.02)]})
+	var foundation: Node = view._building_nodes[7]
+	_eq(foundation != planned and foundation.find_child("Foundation", true, false) != null, true, "planned -> foundation swaps the visual")
+	view.apply_delta({"updatedBuildings": [_building(7, 1, 4.0, 0.0, "Dwelling", "ActiveConstruction", 0.03)]})
+	_eq(view._building_nodes[7] == foundation, true, "progress within a stage keeps the node")
+	view.apply_delta({"updatedBuildings": [_building(7, 1, 4.0, 0.0, "Dwelling", "ActiveConstruction", 0.93)]})
+	var framed: Node = view._building_nodes[7]
+	_eq(framed.find_child("Ridge", true, false) != null, true, "late construction shows the roof frame")
+	view.apply_delta({"updatedBuildings": [_building(7, 1, 4.0, 0.0, "Dwelling", "Complete", 1.0)]})
+	var done: Node = view._building_nodes[7]
+	_eq(done != framed and done.find_child("Rafters", true, false) == null, true, "complete swaps scaffolding for the finished building")
+	_eq(view.building_count(), 1, "state changes never duplicate the building")
+	view.queue_free()
 
 func _test_no_medieval_pieces() -> void:
 	var nodes: Array = [BuildingAssets.make_settlement_marker()]

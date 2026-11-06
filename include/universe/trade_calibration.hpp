@@ -50,6 +50,8 @@ struct TradeSeedMetrics {
     std::int64_t max_price_spread_permille{};   // widest same-resource gap, over the lower price
     std::int64_t pair_gap_sum_permille{};       // all active pairs and resources, summed over year ends
     std::uint64_t pair_gap_count{};
+    std::int64_t food_gap_sum_permille{};       // the same, food only: the one good trade here can move
+    std::uint64_t food_gap_count{};
     std::int64_t total_exchange_volume{};
     // Trips (daily, from the event log and the trip table).
     std::uint64_t trips_departed{};
@@ -167,6 +169,10 @@ inline void sample_trade_year_end(const Simulation& sim, TradeSeedMetrics& metri
                 if (j > i) {
                     metrics.pair_gap_sum_permille += gap;
                     ++metrics.pair_gap_count;
+                    if (r == 0) {
+                        metrics.food_gap_sum_permille += gap;
+                        ++metrics.food_gap_count;
+                    }
                 }
             }
             if (!within_days_of_walking(from.position_x, from.position_z, to.position_x, to.position_z, kDaysWalkKnownNeighbours)) {

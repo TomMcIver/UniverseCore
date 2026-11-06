@@ -16,8 +16,9 @@ extends RefCounted
 ## settlement's centre.
 ##
 ## Construction state is shown, not faked (live-client defect B2): Planned is
-## a staked-out plot, ActiveConstruction is roofless walls at a height that
-## follows `progress`, Complete is the finished building.
+## a staked-out plot, ActiveConstruction goes through stages driven by the
+## canonical labour fraction `progress` (foundation, rising walls, roof
+## rafters), Complete is the finished building. Presentation only (ADR 0001).
 
 const WALL := preload("res://assets/buildings/wall-wood.glb")
 const WALL_DOOR := preload("res://assets/buildings/wall-wood-door.glb")
@@ -42,7 +43,15 @@ const SCALE_BY_TYPE := {"Dwelling": 3.4, "Workshop": 3.0, "FoodStore": 2.4}
 const CELLS_BY_TYPE := {"Dwelling": 1, "Workshop": 2, "FoodStore": 1}
 const WALL_HEIGHT := 1.0
 const ROOF_HEIGHT_BY_TYPE := {"Dwelling": 0.57, "Workshop": 0.57, "FoodStore": 1.11}
-const MIN_CONSTRUCTION_WALL_FRACTION := 0.25
+const MIN_CONSTRUCTION_WALL_FRACTION := 0.15
+## Construction stages by progress: below WALLS_START only the foundation
+## stands; walls rise until ROOF_START; then rafters, and a ridge beam.
+const WALLS_START := 0.12
+const ROOF_START := 0.8
+const RIDGE_START := 0.92
+const FOUNDATION_HEIGHT := 0.05
+const TIMBER_COLOR := Color(0.45, 0.3, 0.17)
+const FOUNDATION_COLOR := Color(0.5, 0.48, 0.44)
 
 ## Physics layer the player avatar collides with; picking uses Area3Ds on
 ## layer 1 with collide_with_bodies = false, so these never steal clicks.
@@ -66,6 +75,12 @@ static func make_building(building_type: String, state: String = "Complete", pro
 		_add_plot_stakes(body, cells, z_shift)
 		return root
 
+	if state != "Complete":
+		_add_foundation(body, cells)
+		if construction_stage(state, progress) == "foundation":
+			_add_timber_pile(root, kind)
+			return root
+
 	var walls := Node3D.new()
 	walls.position.z = z_shift
 	body.add_child(walls)
@@ -75,8 +90,24 @@ static func make_building(building_type: String, state: String = "Complete", pro
 		_add_dressing(root, kind)
 	else:
 		walls.scale.y = wall_fraction(state, progress)
+		if construction_stage(state, progress) == "roof":
+			_add_rafters(walls, kind, cells, progress)
 		_add_timber_pile(root, kind)
 	return root
+
+## Visual stage of a building: planned, foundation, walls, roof, complete.
+static func construction_stage(state: String, progress: float) -> String:
+	match state:
+		"Complete":
+			return "complete"
+		"Planned":
+			return "planned"
+		_:
+			if progress < WALLS_START:
+				return "foundation"
+			if progress < ROOF_START:
+				return "walls"
+			return "roof"
 
 ## Fraction of full wall height shown for a building in `state`.
 static func wall_fraction(state: String, progress: float) -> float:
@@ -86,7 +117,10 @@ static func wall_fraction(state: String, progress: float) -> float:
 		"Planned":
 			return 0.0
 		_:
-			return lerp(MIN_CONSTRUCTION_WALL_FRACTION, 1.0, clamp(progress, 0.0, 1.0))
+			if progress < WALLS_START:
+				return 0.0
+			var t: float = clamp((progress - WALLS_START) / (ROOF_START - WALLS_START), 0.0, 1.0)
+			return lerp(MIN_CONSTRUCTION_WALL_FRACTION, 1.0, t)
 
 ## World-space size (x, height, z) of a building's footprint box.
 static func footprint(building_type: String, state: String = "Complete", progress: float = 1.0) -> Vector3:
@@ -178,6 +212,46 @@ static func _add_roofs(walls: Node3D, kind: String, cells: int) -> void:
 		if cells > 1:
 			roof.rotation_degrees.y = 90.0
 		walls.add_child(roof)
+
+static func _timber_box(size: Vector3, color: Color) -> MeshInstance3D:
+	var mesh := MeshInstance3D.new()
+	var box := BoxMesh.new()
+	box.size = size
+	mesh.mesh = box
+	var material := StandardMaterial3D.new()
+	material.albedo_color = color
+	mesh.material_override = material
+	return mesh
+
+## Low stone plinth under the footprint, shown from the first labour on.
+static func _add_foundation(body: Node3D, cells: int) -> void:
+	var slab := _timber_box(Vector3(1.04, FOUNDATION_HEIGHT, 1.04 * float(cells)), FOUNDATION_COLOR)
+	slab.name = "Foundation"
+	slab.position = Vector3(0.0, FOUNDATION_HEIGHT * 0.5, 0.0)
+	body.add_child(slab)
+
+## Bare roof frame: a pair of rafters per cell and, late on, a ridge beam.
+static func _add_rafters(walls: Node3D, kind: String, cells: int, progress: float) -> void:
+	var rise := float(ROOF_HEIGHT_BY_TYPE[kind])
+	var run := 0.5
+	var length := sqrt(rise * rise + run * run)
+	var angle := atan2(rise, run)
+	var frame := Node3D.new()
+	frame.name = "Rafters"
+	frame.position.y = WALL_HEIGHT
+	walls.add_child(frame)
+	for cell in cells:
+		for z_offset in [-0.4, 0.4]:
+			for side in [-1.0, 1.0]:
+				var rafter := _timber_box(Vector3(length, 0.04, 0.04), TIMBER_COLOR)
+				rafter.position = Vector3(side * run * 0.5, rise * 0.5, float(cell) + z_offset)
+				rafter.rotation.z = -side * angle
+				frame.add_child(rafter)
+	if progress >= RIDGE_START:
+		var ridge := _timber_box(Vector3(0.05, 0.05, float(cells)), TIMBER_COLOR)
+		ridge.name = "Ridge"
+		ridge.position = Vector3(0.0, rise, 0.5 * float(cells - 1))
+		frame.add_child(ridge)
 
 static func _add_piece(parent: Node3D, scene: PackedScene, origin: Vector3, degrees: float) -> void:
 	var piece: Node3D = scene.instantiate()

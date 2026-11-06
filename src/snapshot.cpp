@@ -271,6 +271,7 @@ constexpr std::uint16_t kViabilitySectionSchemaVersion = 26U;
 constexpr std::uint16_t kCoinSectionSchemaVersion = 27U;
 constexpr std::uint16_t kMerchantMemorySchemaVersion = 28U;
 constexpr std::uint16_t kTradeTripSchemaVersion = 29U;
+constexpr std::uint16_t kTradeEconomySchemaVersion = 30U;
 
 // Reads the schema v26 section: one record per settlement in ascending id
 // order, carrying the days it has spent below the viable size and under food
@@ -576,6 +577,28 @@ constexpr std::uint16_t kTradeTripSchemaVersion = 29U;
             return load_error(SnapshotErrorCode::InvalidState, "Snapshot trade trip timeline is invalid");
         }
         state.merchant_trips.push_back(trip);
+    }
+    return SnapshotLoadResult{.ok = true, .code = SnapshotErrorCode::None, .message = {}};
+}
+
+// Reads the schema v30 section, last in the payload: the coin each merchant
+// remembers a settlement holding, one value per memory row in row order. A
+// balance is unknown (-1) or non-negative.
+[[nodiscard]] SnapshotLoadResult read_v30_trade_economy_section(SnapshotReader& reader, WorldState& state) {
+    std::uint64_t row_count = 0;
+    if (!reader.read_u64(row_count)) {
+        return load_error(SnapshotErrorCode::TruncatedData, "Snapshot trade economy section is truncated");
+    }
+    if (row_count != static_cast<std::uint64_t>(state.merchant_price_memory.size())) {
+        return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot trade economy section does not match the merchant memory");
+    }
+    for (auto& row : state.merchant_price_memory) {
+        if (!reader.read_i64(row.settlement_coin)) {
+            return load_error(SnapshotErrorCode::TruncatedData, "Snapshot merchant remembered coin is truncated");
+        }
+        if (row.settlement_coin < kCoinUnknown) {
+            return load_error(SnapshotErrorCode::InvalidState, "Snapshot merchant remembered coin is negative");
+        }
     }
     return SnapshotLoadResult{.ok = true, .code = SnapshotErrorCode::None, .message = {}};
 }
@@ -1469,6 +1492,13 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
         payload.write_u8(static_cast<std::uint8_t>(trip.phase));
     }
 
+    // Schema v30 section, last in the payload: the coin each merchant remembers a
+    // settlement holding (#86), one balance per merchant memory row in row order.
+    payload.write_u64(static_cast<std::uint64_t>(simulation.state_.merchant_price_memory.size()));
+    for (const auto& memory : simulation.state_.merchant_price_memory) {
+        payload.write_i64(memory.settlement_coin);
+    }
+
     auto payload_bytes = payload.take();
     const auto payload_hash = fnv1a64(payload_bytes);
 
@@ -1514,6 +1544,7 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
     const bool has_coin_section = version >= kCoinSectionSchemaVersion;
     const bool has_merchant_memory_section = version >= kMerchantMemorySchemaVersion;
     const bool has_trade_trip_section = version >= kTradeTripSchemaVersion;
+    const bool has_trade_economy_section = version >= kTradeEconomySchemaVersion;
 
     if (reserved != 0U) {
         return load_error(SnapshotErrorCode::InvalidStructure, "Snapshot reserved header field must be zero");
@@ -3238,6 +3269,15 @@ SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> d
         const auto trip_result = read_v29_trade_trip_section(payload_reader, restored_state);
         if (!trip_result.ok) {
             return trip_result;
+        }
+    }
+
+    // Snapshots before v30 remember no buyer coin (unknown, so the buyer is
+    // assumed able to pay) and no trip carries goods home.
+    if (has_trade_economy_section) {
+        const auto economy_result = read_v30_trade_economy_section(payload_reader, restored_state);
+        if (!economy_result.ok) {
+            return economy_result;
         }
     }
 

@@ -399,6 +399,10 @@ Current implementation status:
   - A trip must belong to a living merchant, join two different known settlements, carry a positive cargo with non-negative coin and goods (unsold no more than the cargo), carry nothing home while outbound, and have a departure no later than now with arrival after departure and return after arrival.
   - v24-v28 snapshots migrate with every merchant at home. Event types 9 (`TradeDeparted`) and 10 (`TradeCompleted`) share one payload (merchant, origin, destination, resource byte, cargo units, coin profit) and are rejected in files older than v29.
   - Trips advance once a day with the food period (`Simulation::process_trade_period`, `src/simulation_trade.cpp`); the pure arithmetic (reach, load, profit, split) is in `trade_trip.hpp`.
+- snapshot schema v30 adds the coin merchants remember of the settlements they have seen (ADR 0003, #86):
+  - The section is last in the payload, after the trips: a count equal to the number of merchant memory rows, then one i64 per row in row order, the coin that settlement's commons held when the merchant saw it. -1 means unknown; any other negative value is rejected.
+  - v24-v29 snapshots migrate with every remembered balance unknown, which a merchant treats as "the buyer can pay" until it next visits and sees the real balance.
+  - A fission-founded settlement now starts with a share of its source's commons coin, proportional to the households it takes. Total coin is unchanged (the transfer only moves coin), so this needs no field of its own.
 
 Settlement prices (ADR 0003, `trade_pricing.hpp`, `Simulation::settlement_prices`):
 

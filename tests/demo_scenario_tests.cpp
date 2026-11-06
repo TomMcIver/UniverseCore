@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <fstream>
 #include <sstream>
+#include <variant>
 
 #include <cstdlib>
 #include <iostream>
@@ -244,6 +245,22 @@ void test_committed_demo_scenario_still_delivers_visible_change() {
     require(settlements >= kMinSettlements && settlements <= kMaxSettlements,
             "the demo world must end with two to five settlements");
     require(largest >= kMinLargestSettlement, "the demo world must hold a village of at least seventy people");
+
+    // ADR 0003 / #86: the demo world must show trade working. At least one trip
+    // departs and at least one completes having sold something, so the economy
+    // panel and the merchants' life histories have something real to show.
+    std::uint64_t departed = 0;
+    std::uint64_t sold_something = 0;
+    for (const auto& event : world.state().event_log) {
+        if (event.type == universe::EventType::TradeDeparted) {
+            ++departed;
+        } else if (event.type == universe::EventType::TradeCompleted &&
+                   std::get<universe::TradeEventPayload>(event.payload).coin_profit > 0) {
+            ++sold_something;
+        }
+    }
+    require(departed > 0, "at least one trade trip must depart in the demo world");
+    require(sold_something > 0, "at least one trade trip must sell something in the demo world");
 }
 
 }  // namespace
