@@ -111,13 +111,17 @@ std::optional<TripOffer> evaluate_trip(
     const std::int64_t remembered_destination_price_millicoin,
     const std::int64_t origin_stock,
     const std::int64_t origin_coin,
-    const TradeCapability& capability) noexcept {
+    const TradeCapability& capability,
+    const std::int64_t remembered_destination_coin) noexcept {
     if (origin_price_millicoin <= 0 || remembered_destination_price_millicoin <= 0 || origin_stock <= 0) {
         return std::nullopt;
     }
     const auto sendable = (origin_stock / 100) * kMaxCargoShareOfStockPercent +
         ((origin_stock % 100) * kMaxCargoShareOfStockPercent) / 100;
-    const auto cargo = std::min({cargo_capacity_units(capability), sendable, units_affordable(origin_coin, origin_price_millicoin)});
+    auto cargo = std::min({cargo_capacity_units(capability), sendable, units_affordable(origin_coin, origin_price_millicoin)});
+    if (remembered_destination_coin != kCoinUnknown) {
+        cargo = std::min(cargo, units_affordable(remembered_destination_coin, remembered_destination_price_millicoin));
+    }
     if (cargo <= 0) {
         return std::nullopt;
     }

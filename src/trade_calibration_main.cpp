@@ -82,6 +82,8 @@ struct PairedSummary {
     std::int64_t stress_base{};
     std::int64_t gap_trade_permille{};
     std::int64_t gap_base_permille{};
+    std::int64_t food_gap_trade_permille{};
+    std::int64_t food_gap_base_permille{};
     std::uint64_t pop_trade{};
     std::uint64_t pop_base{};
     std::uint64_t profitable{};
@@ -98,6 +100,10 @@ PairedSummary summarise(const std::vector<TradeSeedMetrics>& on, const std::vect
     std::uint64_t gap_on_n = 0;
     std::int64_t gap_off_sum = 0;
     std::uint64_t gap_off_n = 0;
+    std::int64_t food_on_sum = 0;
+    std::uint64_t food_on_n = 0;
+    std::int64_t food_off_sum = 0;
+    std::uint64_t food_off_n = 0;
     for (std::size_t i = 0; i < on.size(); ++i) {
         ++s.seeds;
         s.seeds_with_trips += on[i].trips_departed > 0 ? 1U : 0U;
@@ -121,6 +127,10 @@ PairedSummary summarise(const std::vector<TradeSeedMetrics>& on, const std::vect
         gap_on_n += on[i].pair_gap_count;
         gap_off_sum += off[i].pair_gap_sum_permille;
         gap_off_n += off[i].pair_gap_count;
+        food_on_sum += on[i].food_gap_sum_permille;
+        food_on_n += on[i].food_gap_count;
+        food_off_sum += off[i].food_gap_sum_permille;
+        food_off_n += off[i].food_gap_count;
         if (off[i].final_population == 0U) {
             continue;
         }
@@ -133,6 +143,8 @@ PairedSummary summarise(const std::vector<TradeSeedMetrics>& on, const std::vect
     }
     s.gap_trade_permille = gap_on_n == 0 ? 0 : gap_on_sum / static_cast<std::int64_t>(gap_on_n);
     s.gap_base_permille = gap_off_n == 0 ? 0 : gap_off_sum / static_cast<std::int64_t>(gap_off_n);
+    s.food_gap_trade_permille = food_on_n == 0 ? 0 : food_on_sum / static_cast<std::int64_t>(food_on_n);
+    s.food_gap_base_permille = food_off_n == 0 ? 0 : food_off_sum / static_cast<std::int64_t>(food_off_n);
     return s;
 }
 
@@ -152,7 +164,8 @@ void print_summary(const char* name, const PairedSummary& s, const bool all_ok) 
               << " seeds_below_90pct=" << s.below_90pct << " seeds_below_75pct=" << s.below_75pct
               << " pop_trade=" << s.pop_trade << " pop_no_trade=" << s.pop_base << " stress_days_trade=" << s.stress_trade
               << " stress_days_no_trade=" << s.stress_base << " mean_pair_gap_trade=" << s.gap_trade_permille
-              << " mean_pair_gap_no_trade=" << s.gap_base_permille << " invariants_ok=" << all_ok << '\n';
+              << " mean_pair_gap_no_trade=" << s.gap_base_permille << " mean_food_gap_trade=" << s.food_gap_trade_permille
+              << " mean_food_gap_no_trade=" << s.food_gap_base_permille << " invariants_ok=" << all_ok << '\n';
 }
 
 }  // namespace
