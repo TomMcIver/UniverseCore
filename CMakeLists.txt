@@ -7,6 +7,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(UNIVERSECORE_BUILD_TESTS "Build UniverseCore tests" ON)
 option(UNIVERSECORE_BUILD_UI "Build SDL3 + Dear ImGui simulation inspector" OFF)
+# Performance tooling (all OFF by default, so the canonical build is unchanged).
+option(UNIVERSECORE_ENABLE_TRACY "Compile Tracy profiling zones into universe_core" OFF)
+option(UNIVERSECORE_BUILD_BENCHMARKS "Build Google Benchmark micro-benchmarks" OFF)
+option(UNIVERSECORE_PROFILE_FLAGS "Frame pointers + debug info for perf/VTune stack walking" OFF)
 
 add_library(universe_core
     src/resources.cpp
@@ -31,6 +35,31 @@ if(MSVC)
     target_compile_options(universe_core PRIVATE /W4 /permissive-)
 else()
     target_compile_options(universe_core PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+endif()
+
+if(UNIVERSECORE_PROFILE_FLAGS)
+    if(MSVC)
+        # /Zi + /DEBUG give VTune symbols; /Oy- keeps frame pointers on x86.
+        target_compile_options(universe_core PUBLIC /Zi /Oy-)
+        target_link_options(universe_core PUBLIC /DEBUG /OPT:REF /OPT:ICF)
+    else()
+        target_compile_options(universe_core PUBLIC -g -fno-omit-frame-pointer)
+    endif()
+endif()
+
+if(UNIVERSECORE_ENABLE_TRACY)
+    include(FetchContent)
+    set(TRACY_ENABLE ON CACHE BOOL "" FORCE)
+    set(TRACY_ON_DEMAND ON CACHE BOOL "" FORCE)  # no cost until a profiler connects
+    FetchContent_Declare(
+        tracy
+        GIT_REPOSITORY https://github.com/wolfpld/tracy.git
+        GIT_TAG v0.11.1
+        GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(tracy)
+    target_link_libraries(universe_core PUBLIC Tracy::TracyClient)
+    target_compile_definitions(universe_core PUBLIC UNIVERSECORE_TRACY)
 endif()
 
 add_executable(universe_sim src/main.cpp)
@@ -116,6 +145,23 @@ if(UNIVERSECORE_BUILD_UI)
             universe_imgui
             SDL3::SDL3
     )
+endif()
+
+if(UNIVERSECORE_BUILD_BENCHMARKS)
+    include(FetchContent)
+    set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+    set(BENCHMARK_ENABLE_GTEST_TESTS OFF CACHE BOOL "" FORCE)
+    set(BENCHMARK_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        googlebenchmark
+        GIT_REPOSITORY https://github.com/google/benchmark.git
+        GIT_TAG v1.9.1
+        GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(googlebenchmark)
+
+    add_executable(universe_benchmarks benchmarks/sim_benchmarks.cpp)
+    target_link_libraries(universe_benchmarks PRIVATE universe_core universe_ui_support benchmark::benchmark)
 endif()
 
 if(UNIVERSECORE_BUILD_TESTS)

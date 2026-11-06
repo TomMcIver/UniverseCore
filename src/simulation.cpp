@@ -1,4 +1,5 @@
 #include "universe/simulation.hpp"
+#include "universe/profiling.hpp"
 
 #include "universe/snapshot.hpp"
 
@@ -1132,6 +1133,7 @@ std::uint64_t Simulation::current_food_period() const noexcept {
 }
 
 void Simulation::advance(const SimulationDuration duration) {
+    UC_ZONE("Simulation::advance");
     if (duration.ticks < 0) {
         throw std::invalid_argument("Simulation duration must be non-negative");
     }
@@ -1147,6 +1149,7 @@ void Simulation::advance(const SimulationDuration duration) {
 }
 
 void Simulation::run_scheduled_systems_until(const SimulationTime target_time) {
+    UC_ZONE("run_scheduled_systems_until");
     while (true) {
         SimulationTime next_time = demography_next_run_;
         if (config_.food_system_enabled && food_next_run_ < next_time) {
@@ -1164,6 +1167,9 @@ void Simulation::run_scheduled_systems_until(const SimulationTime target_time) {
             process_food_period(current_food_period());
             process_schedule_period(current_food_period());
             process_trade_period();
+            UC_FRAME_MARK();
+            UC_PLOT("population", state_.population);
+            UC_PLOT("merchant_trips_in_flight", state_.merchant_trips.size());
 
             SimulationTime next_food_run{};
             if (!checked_add_time(food_next_run_, food_interval_, next_food_run)) {
@@ -1185,6 +1191,7 @@ void Simulation::run_scheduled_systems_until(const SimulationTime target_time) {
 }
 
 void Simulation::process_food_period(const std::uint64_t food_period) {
+    UC_ZONE("process_food_period");
     process_household_access_allocation();
 
     struct HouseholdDayState {
@@ -1858,6 +1865,7 @@ void Simulation::process_food_period(const std::uint64_t food_period) {
 // struct at all, so they are naturally excluded -- consistent with the
 // existing LOD demotion philosophy of dropping detailed-only state.
 void Simulation::process_schedule_period(const std::uint64_t food_period) {
+    UC_ZONE("process_schedule_period");
     for (auto& person : state_.people) {
         if (!person.alive) {
             continue;
@@ -2257,6 +2265,7 @@ void Simulation::process_materials_period(const std::uint64_t food_period) {
 }
 
 void Simulation::process_demography_period(const std::uint64_t demographic_year) {
+    UC_ZONE("process_demography_period");
     process_mortality(demographic_year);
     process_births(demographic_year);
     process_settlement_restructuring(demographic_year);
@@ -6581,6 +6590,7 @@ void Simulation::process_occupation_reassignment(const std::uint64_t demographic
 // This runs inside the occupation bracket, so every appointment and retirement
 // is recorded by the existing occupation-changed event.
 void Simulation::process_merchant_recruitment(const std::uint64_t demographic_year) {
+    UC_ZONE("process_merchant_recruitment");
     std::vector<SettlementId> settlement_ids;
     for (const auto& settlement : state_.settlements) {
         if (settlement.active) {
@@ -8965,6 +8975,7 @@ void Simulation::refresh_economic_aggregates() noexcept {
 }
 
 void Simulation::step_year() {
+    UC_ZONE("step_year");
     advance(DemographicCalendarAdapter::year_duration());
 }
 

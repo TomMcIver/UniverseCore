@@ -1,6 +1,7 @@
 #include "universe/snapshot.hpp"
 
 #include "universe/simulation.hpp"
+#include "universe/profiling.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -700,6 +701,7 @@ std::uint64_t snapshot_hash64(const std::span<const std::byte> data) noexcept {
 }
 
 std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
+    UC_ZONE("snapshot_serialize");
     SnapshotWriter payload;
     payload.write_u64(simulation.state_.seed);
     payload.write_i64(simulation.state_.time.ticks);
@@ -1484,6 +1486,7 @@ std::vector<std::byte> SnapshotCodec::serialize(const Simulation& simulation) {
 }
 
 SnapshotLoadResult SnapshotCodec::deserialize(const std::span<const std::byte> data, Simulation& destination) {
+    UC_ZONE("snapshot_deserialize");
     if (data.size() < kHeaderSize) {
         return load_error(SnapshotErrorCode::TruncatedData, "Snapshot header is truncated");
     }

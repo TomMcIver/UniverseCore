@@ -30,3 +30,6 @@ apps/godot-client/.godot/
 *.snapshot
 *.ucore
 *.log
+
+# Performance pipeline output
+/perf-results/

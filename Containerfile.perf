@@ -1,0 +1,13 @@
+# Profiling image: the canonical dev image plus Linux perf.
+#   podman build -t universecore-perf -f Containerfile.perf .
+#
+# perf is matched to a kernel version by Ubuntu's package, not to the Podman VM's
+# kernel, so the pipeline runs the binary directly from /usr/lib/linux-tools/*/perf
+# instead of the /usr/bin/perf wrapper (which refuses to run on a mismatched kernel).
+# Hardware counters usually are NOT exposed inside a VM (Podman machine, WSL2). The
+# pipeline detects that and records it; it never fabricates counter values.
+FROM universecore-dev
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends linux-tools-common linux-tools-generic \
+    && rm -rf /var/lib/apt/lists/*

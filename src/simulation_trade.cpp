@@ -9,6 +9,7 @@
 // involved: choices are the best expected profit, ties to the lowest settlement
 // then resource id.
 #include "universe/simulation.hpp"
+#include "universe/profiling.hpp"
 #include "universe/trade_trip_endings.hpp"
 
 #include <algorithm>
@@ -190,6 +191,7 @@ void Simulation::resolve_orphaned_trips() {
 }
 
 void Simulation::process_trade_period() {
+    UC_ZONE("process_trade_period");
     if (state_.merchant_trips.empty() && state_.merchant_price_memory.empty()) {
         return;
     }

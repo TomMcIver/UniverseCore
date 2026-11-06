@@ -702,4 +702,6 @@ func _process(delta: float) -> void:
 	# and corrected to the server's real tick via set_tick() on every message.
 	# Never trusted for anything canonical.
 	_estimated_tick += delta * float(_playback_speed) * UniverseProtocol.SIMULATION_SECONDS_PER_REAL_SECOND_AT_1X
+	var advance_started := PerfZones.begin()
 	_advance_agents(delta)
+	PerfZones.end("world_view.advance_agents", advance_started)

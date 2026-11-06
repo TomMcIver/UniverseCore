@@ -18,6 +18,7 @@ const VillageDressingScript := preload("res://scripts/world/village_dressing.gd"
 const VegetationScatterScript := preload("res://scripts/world/vegetation_scatter.gd")
 const GroundViewScript := preload("res://scripts/ground/ground_view.gd")
 const DemoCaptureScript := preload("res://scripts/tools/demo_capture.gd")
+const PerfRunScript := preload("res://scripts/tools/perf_run.gd")
 
 var _client: Node
 var _world_view: Node3D
@@ -94,6 +95,13 @@ func _ready() -> void:
 		capture.name = "DemoCapture"
 		add_child(capture)
 		capture.run(demo_capture_dir, _panels, _world_view, _ground_view)
+
+	var perf_dir := OS.get_environment("UNIVERSECORE_PERF_DIR")
+	if perf_dir != "":
+		var perf_run := PerfRunScript.new()
+		perf_run.name = "PerfRun"
+		add_child(perf_run)
+		perf_run.run(perf_dir, _panels, _world_view)
 
 	var schedule_env := OS.get_environment("UNIVERSECORE_SCREENSHOT_SCHEDULE")
 	var dir_env := OS.get_environment("UNIVERSECORE_SCREENSHOT_DIR")
@@ -358,8 +366,12 @@ func _route_connection_status(status: String) -> void:
 	_panels.route_message({"type": "connection_status", "payload": {"status": status}})
 
 func _on_message_received(message: Dictionary) -> void:
+	var apply_started := PerfZones.begin()
 	_apply_world_message(message)
+	PerfZones.end("main.apply_world_message", apply_started)
+	var route_started := PerfZones.begin()
 	_panels.route_message(message)
+	PerfZones.end("panels.route_message", route_started)
 
 func _apply_world_message(message: Dictionary) -> void:
 	var message_type := UniverseProtocol.message_type(message)
@@ -367,35 +379,55 @@ func _apply_world_message(message: Dictionary) -> void:
 
 	match message_type:
 		"initial_snapshot":
+			var terrain_cfg_started := PerfZones.begin()
 			_terrain.configure(payload.get("regions", []), payload.get("settlements", []))
+			PerfZones.end("terrain.configure", terrain_cfg_started)
+			var dressing_snap_started := PerfZones.begin()
 			_dressing.apply_snapshot(payload)
+			PerfZones.end("dressing.apply_snapshot", dressing_snap_started)
 			if not _navmeshes_baked:
 				_bake_region_navmeshes(payload.get("regions", []), payload.get("settlements", []))
 				_navmeshes_baked = true
 				_center_camera_on_settlements(payload.get("settlements", []))
+			var snapshot_started := PerfZones.begin()
 			_world_view.apply_snapshot(payload, Callable(_terrain, "get_height_at_world"))
+			PerfZones.end("world_view.apply_snapshot", snapshot_started)
 			_world_view.set_tick(int(message.get("tick", 0)))
+			var daynight_started := PerfZones.begin()
 			_apply_day_night(int(message.get("tick", 0)))
+			PerfZones.end("main.apply_day_night", daynight_started)
 		"world_delta":
 			# world_delta (ticket #7) is a real diff, not a restated world --
 			# it carries no "regions"/full "settlements" list to regenerate
 			# terrain from, and applying it as a full replace would wipe
 			# every entity every tick. Terrain only reshapes around settlements
 			# a delta adds or removes.
+			var terrain_started := PerfZones.begin()
 			_terrain.apply_delta(payload)
+			PerfZones.end("terrain.apply_delta", terrain_started)
+			var delta_started := PerfZones.begin()
 			_world_view.apply_delta(payload, Callable(_terrain, "get_height_at_world"))
+			PerfZones.end("world_view.apply_delta", delta_started)
+			var dressing_started := PerfZones.begin()
 			_dressing.apply_delta(payload)
+			PerfZones.end("dressing.apply_delta", dressing_started)
 			_world_view.set_tick(int(message.get("tick", 0)))
+			var daynight_started := PerfZones.begin()
 			_apply_day_night(int(message.get("tick", 0)))
+			PerfZones.end("main.apply_day_night", daynight_started)
 		"simulation_status":
 			_world_view.set_tick(int(message.get("tick", 0)))
+			var daynight_started := PerfZones.begin()
 			_apply_day_night(int(message.get("tick", 0)))
+			PerfZones.end("main.apply_day_night", daynight_started)
 			_world_view.set_simulation_playback(bool(payload.get("paused", true)), int(payload.get("speed", 1)))
 			# A long jump can found new settlements well outside the first view,
 			# so when one finishes, back the camera off to show them all.
 			var is_jumping: bool = payload.get("targetYear") != null
 			if _was_jumping and not is_jumping:
+				var framing_started := PerfZones.begin()
 				_frame_all_settlements()
+				PerfZones.end("main.frame_all_settlements", framing_started)
 			_was_jumping = is_jumping
 		"error":
 			push_warning("UniverseCore error: %s" % payload.get("message", "unknown"))

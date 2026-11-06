@@ -86,11 +86,15 @@ func _process(delta: float) -> void:
 	while _socket.get_available_packet_count() > 0:
 		var packet: PackedByteArray = _socket.get_packet()
 		var text := packet.get_string_from_utf8()
+		var decode_started := PerfZones.begin()
 		var message := UniverseProtocol.decode_message(text)
+		PerfZones.end("client.decode_message", decode_started)
 		if message.is_empty():
 			continue
 
 		var message_type := UniverseProtocol.message_type(message)
+		PerfZones.set_server_tick(int(message.get("tick", 0)))
+		PerfZones.message_received(message_type, packet.size())
 		if message_type == "initial_snapshot":
 			_awaiting_initial_snapshot = false
 
@@ -104,6 +108,7 @@ func send_command(command: Dictionary) -> bool:
 	if _socket.get_ready_state() != WebSocketPeer.STATE_OPEN:
 		push_warning("UniverseClient: dropped command while not connected: %s" % JSON.stringify(command))
 		return false
+	PerfZones.command_sent(str(command.get("type", "")))
 	_socket.send_text(UniverseProtocol.encode(command))
 	return true
 
