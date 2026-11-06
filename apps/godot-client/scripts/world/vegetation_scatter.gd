@@ -24,6 +24,7 @@ const VillageDressing := preload("res://scripts/world/village_dressing.gd")
 
 const CHUNK_SIZE := 128.0
 const CHUNKS_PER_FRAME := 1
+const MAX_SIGNATURE_CHECKS_PER_SYNC := 6
 const WORLD_COLLISION_LAYER := 2
 const NATURE_SCALE := 3.2
 
@@ -57,6 +58,11 @@ var _terrain: Node3D
 var _dressing: Node3D
 var _chunks: Dictionary = {}
 var _dirty: Dictionary = {}
+## Chunks whose village dressing changed; see mark_exclusions_dirty.
+var _soft_dirty: Dictionary = {}
+## chunk key -> hash of the exclusions it was built with.
+var _chunk_signatures: Dictionary = {}
+var _pacer: StreamPacer
 var _patch := FastNoiseLite.new()
 
 func _init() -> void:
@@ -73,6 +79,18 @@ func mark_dirty(area: Rect2) -> void:
 		if _chunk_rect(key).intersects(area):
 			_dirty[key] = true
 
+## The village dressing re-laid an area. Unlike mark_dirty (terrain or
+## settlements changed, so a chunk must rebuild), a chunk here rebuilds only if
+## the exclusions it sees actually differ from the ones it was built with.
+func mark_exclusions_dirty(area: Rect2) -> void:
+	for key in _chunks.keys():
+		if _chunk_rect(key).intersects(area):
+			_soft_dirty[key] = true
+
+## Shares the streaming time budget with the terrain and the dressing.
+func set_pacer(pacer: StreamPacer) -> void:
+	_pacer = pacer
+
 func mark_all_dirty(_area: Rect2 = Rect2()) -> void:
 	_patch.seed = _terrain.world_seed() + 7
 	for key in _chunks.keys():
@@ -84,7 +102,9 @@ func chunk_count() -> int:
 func _process(_delta: float) -> void:
 	if _terrain == null:
 		return
+	var sync_started := PerfZones.begin()
 	sync_chunks(CHUNKS_PER_FRAME)
+	PerfZones.end("vegetation.sync_chunks", sync_started)
 
 ## Creates chunks over generated terrain, frees chunks whose terrain is gone
 ## and rebuilds up to `budget` dirty chunks (-1 = all).
@@ -97,19 +117,45 @@ func sync_chunks(budget: int = -1) -> void:
 			_chunks[key].free()
 			_chunks.erase(key)
 			_dirty.erase(key)
+			_soft_dirty.erase(key)
+			_chunk_signatures.erase(key)
 	var pending: Array = []
 	for key in wanted.keys():
-		if not _chunks.has(key) or _dirty.has(key):
+		if not _chunks.has(key) or _dirty.has(key) or _soft_dirty.has(key):
 			pending.append(key)
 	var built := 0
+	var checked := 0
 	for key in pending:
 		if budget >= 0 and built >= budget:
 			break
+		if _pacer != null and not _pacer.can_run():
+			break
+		# Only the village dressing changed here: skip the rebuild when what it
+		# contributes to this chunk (the exclusions) is exactly what it was.
+		if _soft_dirty.has(key) and not _dirty.has(key) and _chunks.has(key):
+			if checked >= MAX_SIGNATURE_CHECKS_PER_SYNC:
+				continue
+			checked += 1
+			if _exclusion_signature(key) == _chunk_signatures.get(key, -1):
+				_soft_dirty.erase(key)
+				continue
+		var chunk_started := Time.get_ticks_usec()
 		_rebuild_chunk(key)
+		var chunk_cost := Time.get_ticks_usec() - chunk_started
+		PerfZones.end("vegetation.rebuild_chunk", chunk_started)
+		if _pacer != null:
+			_pacer.charge(chunk_cost)
 		built += 1
+
+func _exclusion_signature(key: Vector2i) -> int:
+	if _dressing == null:
+		return 0
+	return hash(_dressing.exclusions_in(_chunk_rect(key)))
 
 func _rebuild_chunk(key: Vector2i) -> void:
 	_dirty.erase(key)
+	_soft_dirty.erase(key)
+	_chunk_signatures.erase(key)
 	if _chunks.has(key):
 		_chunks[key].free()
 	var node := Node3D.new()
@@ -122,6 +168,7 @@ func _rebuild_chunk(key: Vector2i) -> void:
 	if nearby.is_empty():
 		return
 	var exclusions: Dictionary = _dressing.exclusions_in(rect) if _dressing != null else {"cores": [], "buildings": [], "segments": [], "fields": []}
+	_chunk_signatures[key] = hash(exclusions) if _dressing != null else 0
 	var rng := RandomNumberGenerator.new()
 	rng.seed = hash([key.x, key.y, _terrain.world_seed(), 4817])
 	var placed := {}

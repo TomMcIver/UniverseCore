@@ -70,6 +70,9 @@ var _buildings: Dictionary = {}
 var _people: Dictionary = {}
 ## region id -> per-region derived layout (fields, segments, cores)
 var _layouts: Dictionary = {}
+## Bumped whenever a region is re-laid, so callers that cache anything derived
+## from the layout (a villager's field slot) know to drop it.
+var _layout_version := 0
 ## region id -> path graph for routing, built on first use and dropped when the
 ## region is rebuilt.
 var _route_graphs: Dictionary = {}
@@ -77,6 +80,7 @@ var _signatures: Dictionary = {}
 var _region_nodes: Dictionary = {}
 var _dirty: Dictionary = {}
 var _since_rebuild := REBUILD_INTERVAL
+var _pacer: StreamPacer
 var _decal_material := StandardMaterial3D.new()
 
 func _init() -> void:
@@ -138,10 +142,24 @@ func _process(delta: float) -> void:
 	_since_rebuild += delta
 	if _dirty.is_empty() or _since_rebuild < REBUILD_INTERVAL:
 		return
+	if _pacer != null and not _pacer.can_run():
+		return
 	_since_rebuild = 0.0
 	var region_id: int = _dirty.keys()[0]
 	_dirty.erase(region_id)
+	var rebuild_started := Time.get_ticks_usec()
 	rebuild_region(region_id)
+	var rebuild_cost := Time.get_ticks_usec() - rebuild_started
+	PerfZones.end("dressing.rebuild_region", rebuild_started)
+	if _pacer != null:
+		_pacer.charge(rebuild_cost)
+
+## Shares the streaming time budget with the terrain and the vegetation.
+func set_pacer(pacer: StreamPacer) -> void:
+	_pacer = pacer
+
+func layout_version() -> int:
+	return _layout_version
 
 ## Field plots of a region: [{"centre", "axis", "length", "width",
 ## "settlement_id", "household_id", "cultivators"}].
@@ -326,6 +344,7 @@ static func is_blocked(exclusions: Dictionary, point: Vector2, pad: float, core_
 func rebuild_region(region_id: int) -> void:
 	var layout := _plan_region(region_id)
 	_layouts[region_id] = layout
+	_layout_version += 1
 	_route_graphs.erase(region_id)
 	_signatures[region_id] = _cultivator_signature(region_id)
 	if _region_nodes.has(region_id):

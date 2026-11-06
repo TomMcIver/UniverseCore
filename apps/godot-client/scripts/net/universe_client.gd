@@ -57,7 +57,9 @@ func _process(delta: float) -> void:
 	# connect_to_url() again on top of the stalled attempt. FakeSocket's
 	# poll() is a no-op stub, so unit tests (which set ready_state directly)
 	# never exercised this path -- only a real WebSocketPeer did.
+	var poll_started := PerfZones.begin()
 	_socket.poll()
+	PerfZones.end("client.poll", poll_started)
 	var state: int = _socket.get_ready_state()
 
 	if state == WebSocketPeer.STATE_CLOSED:
@@ -84,8 +86,10 @@ func _process(delta: float) -> void:
 		send_command(UniverseProtocol.command_request_snapshot())
 
 	while _socket.get_available_packet_count() > 0:
+		var packet_started := PerfZones.begin()
 		var packet: PackedByteArray = _socket.get_packet()
 		var text := packet.get_string_from_utf8()
+		PerfZones.end("client.get_packet", packet_started)
 		var decode_started := PerfZones.begin()
 		var message := UniverseProtocol.decode_message(text)
 		PerfZones.end("client.decode_message", decode_started)

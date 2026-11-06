@@ -75,6 +75,7 @@ var _focus := Vector2.ZERO
 var _last_refocus := Vector2(INF, INF)
 var _material := StandardMaterial3D.new()
 var _skirt: MeshInstance3D
+var _pacer: StreamPacer
 
 func _init() -> void:
 	_material.vertex_color_use_as_albedo = true
@@ -96,7 +97,9 @@ func _ready() -> void:
 	add_child(_skirt)
 
 func _process(_delta: float) -> void:
+	var tiles_started := PerfZones.begin()
 	build_pending_tiles(TILES_PER_FRAME)
+	PerfZones.end("terrain.build_pending_tiles", tiles_started)
 
 ## Full world description from an initial_snapshot. Rebuilds only when the
 ## world seed or the settlement set actually changed (reconnects resend it).
@@ -141,12 +144,23 @@ func set_focus(point: Vector2) -> void:
 		_skirt.position = Vector3(point.x, -SKIRT_DROP, point.y)
 	_refresh_wanted_tiles(false)
 
+## Shares the streaming time budget with the vegetation and the dressing.
+func set_pacer(pacer: StreamPacer) -> void:
+	_pacer = pacer
+
 func build_pending_tiles(max_tiles: int = -1) -> void:
 	var built := 0
 	while not _queue.is_empty() and (max_tiles < 0 or built < max_tiles):
+		if _pacer != null and not _pacer.can_run():
+			return
 		var key: Vector2i = _queue.pop_front()
 		if not _tiles.has(key):
+			var tile_started := Time.get_ticks_usec()
 			_build_tile(key)
+			var tile_cost := Time.get_ticks_usec() - tile_started
+			PerfZones.end("terrain.build_tile", tile_started)
+			if _pacer != null:
+				_pacer.charge(tile_cost)
 			built += 1
 
 func tile_count() -> int:
@@ -264,9 +278,21 @@ func _build_tile(key: Vector2i) -> void:
 	var ext := n + 2
 	var grid := PackedFloat32Array()
 	grid.resize(ext * ext)
+	# The nearest settlement of every grid point is needed for its height and,
+	# for the points that become vertices, again for its colour: find it once.
+	var nearest_distance := PackedFloat64Array()
+	nearest_distance.resize(ext * ext)
+	var nearest_region := PackedInt32Array()
+	nearest_region.resize(ext * ext)
 	for gz in ext:
 		for gx in ext:
-			grid[gz * ext + gx] = height_at(origin.x + float(gx - 1) * CELL_SIZE, origin.y + float(gz - 1) * CELL_SIZE, nearby)
+			var gx_world := origin.x + float(gx - 1) * CELL_SIZE
+			var gz_world := origin.y + float(gz - 1) * CELL_SIZE
+			var closest := _nearest(Vector2(gx_world, gz_world), nearby)
+			var cell := gz * ext + gx
+			nearest_distance[cell] = float(closest["distance"])
+			nearest_region[cell] = int(closest["region_id"])
+			grid[cell] = _height_from(gx_world, gz_world, nearest_distance[cell], nearest_region[cell])
 
 	var heights := PackedFloat32Array()
 	heights.resize(n * n)
@@ -282,8 +308,8 @@ func _build_tile(key: Vector2i) -> void:
 			var slope_z := grid[z * ext + x + 1] - grid[(z + 2) * ext + x + 1]
 			normals.append(Vector3(slope_x, 2.0 * CELL_SIZE, slope_z).normalized())
 			var world := origin + Vector2(float(x), float(z)) * CELL_SIZE
-			var nearest := _nearest(world, nearby)
-			colors.append(_color_from(world.x, world.y, h, float(nearest["distance"]), int(nearest["region_id"])))
+			var cell := (z + 1) * ext + x + 1
+			colors.append(_color_from(world.x, world.y, h, nearest_distance[cell], nearest_region[cell]))
 
 	var indices := PackedInt32Array()
 	for z in TILE_CELLS:

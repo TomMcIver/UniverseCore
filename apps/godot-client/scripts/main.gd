@@ -34,6 +34,7 @@ var _navmesh_manager: Node3D
 var _navmeshes_baked := false
 var _camera: Camera3D
 var _was_jumping := false
+var _stream_pacer := StreamPacer.new()
 ## World units added around the outermost settlement when framing them all.
 const FRAME_MARGIN := 40.0
 
@@ -63,8 +64,13 @@ func _ready() -> void:
 	_vegetation.setup(_terrain, _dressing)
 	add_child(_vegetation)
 
+	# One shared time budget for the streaming jobs (see StreamPacer).
+	_terrain.set_pacer(_stream_pacer)
+	_dressing.set_pacer(_stream_pacer)
+	_vegetation.set_pacer(_stream_pacer)
+
 	_terrain.terrain_changed.connect(_on_terrain_changed)
-	_dressing.exclusions_changed.connect(_vegetation.mark_dirty)
+	_dressing.exclusions_changed.connect(_vegetation.mark_exclusions_dirty)
 	_apply_day_night(0)
 
 	_client = UniverseClientScript.new()
@@ -316,10 +322,13 @@ func _setup_terrain() -> void:
 	_terrain.set_script(TerrainGeneratorScript)
 	add_child(_terrain)
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
+	_stream_pacer.begin_frame(delta)
+	var focus_started := PerfZones.begin()
 	var camera := get_viewport().get_camera_3d()
 	if camera != null:
 		_terrain.set_focus(_ground_focus(camera))
+	PerfZones.end("main.process_focus", focus_started)
 
 ## Where the camera's view centre meets the ground plane (or the point
 ## beneath the camera when it looks at the sky).

@@ -70,6 +70,18 @@ var _agent_routes: Dictionary
 ## Each agent's canonical activity name (id -> String), so the label can be
 ## re-derived as a merchant's trip phase changes between server messages.
 var _agent_activity: Dictionary
+## Where an agent stands at each place it can be sent (id -> {"home", "work",
+## "dest", "origin"} -> Vector2), filled lazily. These are pure functions of the
+## agent's facts (and, for a field, of the dressing layout), so they are
+## computed once rather than every frame. Dropped when the facts change.
+var _agent_slots: Dictionary
+## The animation each villager is already playing (id -> code), so the
+## per-frame call is a no-op while nothing changed.
+var _agent_anim_codes: Dictionary
+## The dressing layout version the cached field slots were computed against.
+var _slot_layout_version := -2
+var _advance_frame := 0
+var _route_plans_this_frame := 0
 
 ## Ticket #40/#56: movement must track canonical simulation time, not raw
 ## frame time -- pausing halts it, the speed multiplier scales it.
@@ -91,12 +103,16 @@ func _init() -> void:
 	_agent_animators = {}
 	_agent_routes = {}
 	_agent_activity = {}
+	_agent_slots = {}
+	_agent_anim_codes = {}
 
 func set_navmesh_manager(_manager: Node3D) -> void:
 	pass  # Villagers no longer path via the navmesh; kept only so main.gd's existing wiring is harmless.
 
 func set_village_dressing(dressing: Node3D) -> void:
 	_village_dressing = dressing
+	_agent_slots.clear()
+	_slot_layout_version = -2
 
 func set_simulation_playback(paused: bool, speed: int) -> void:
 	_paused = paused
@@ -214,6 +230,8 @@ func _clear_all() -> void:
 	_agent_animators.clear()
 	_agent_routes.clear()
 	_agent_activity.clear()
+	_agent_slots.clear()
+	_agent_anim_codes.clear()
 
 ## An existing agent is updated in place, not destroyed and respawned -- a
 ## destroy+respawn on every delta tick (which upserts nearly every alive
@@ -236,6 +254,8 @@ func _remove_agent(id: int) -> void:
 	_agent_animators.erase(id)
 	_agent_routes.erase(id)
 	_agent_activity.erase(id)
+	_agent_slots.erase(id)
+	_agent_anim_codes.erase(id)
 
 ## Same churn fix as buildings (E1): settlements arrive as "updated" in
 ## every delta, so only respawn when the firepit would look different.
@@ -366,7 +386,12 @@ func _spawn_agent(agent: Dictionary) -> void:
 	_attach_highlight_if_marked(id)
 
 func _update_agent(id: int, agent: Dictionary) -> void:
-	_agent_facts[id] = _agent_facts_from(agent)
+	# The server lists nearly every agent as updated in every delta, but their
+	# facts rarely change. Only a real change drops the cached slots.
+	var facts := _agent_facts_from(agent)
+	if _agent_facts.get(id) != facts:
+		_agent_facts[id] = facts
+		_agent_slots.erase(id)
 	_agent_activity[id] = str(agent.get("currentActivity", "Idle"))
 	if _agent_labels.has(id):
 		_agent_labels[id].text = _label_text_for(id, _agent_activity[id])
@@ -485,6 +510,14 @@ func _crowd_offset_for_person(id: int) -> Vector2:
 ## Deterministic per id, never re-rolled and never dodging (decision M3).
 ## A goal that moves by less than this does not replan the route.
 const ROUTE_GOAL_TOLERANCE := 0.5
+## At most this many agents (re)plan a route in one frame. A day boundary sends
+## most of a village off at once; planning them all in one frame is a visible
+## hitch, so the rest keep their previous route and replan on a following frame.
+const MAX_ROUTE_PLANS_PER_FRAME := 24
+## Closer to the goal than this (squared, world units) counts as standing on it.
+const STATIONARY_EPSILON_SQUARED := 1.0e-6
+## A standing agent re-seats on the terrain this often (in frames).
+const HOLD_REGROUND_FRAMES := 12
 const GATHER_SLOTS := 300
 const GATHER_SPACING := 0.6
 const GOLDEN_ANGLE := 2.39996323
@@ -522,23 +555,59 @@ func _work_point_for(id: int, facts: Dictionary) -> Vector2:
 ## the only per-frame walk over other data, bounded by one settlement's field
 ## count).
 func _resolve_agent_position(id: int) -> Vector3:
+	_sync_slot_cache()
+	var flat := _resolve_agent_goal(id)
+	if not _agent_facts.has(id):
+		return Vector3.ZERO
+	return Vector3(flat.x, _height_sampler.call(flat.x, flat.y) if _height_sampler.is_valid() else 0.0, flat.y)
+
+## The flat (x, z) goal of `_resolve_agent_position`, without sampling terrain.
+## The slots an agent can stand at (home, work spot, either end of a trade trip)
+## do not depend on the clock, so each is computed once and cached; only the
+## choice between them is made per frame, from the estimated tick.
+func _resolve_agent_goal(id: int) -> Vector2:
 	var facts: Dictionary = _agent_facts.get(id, {})
 	if facts.is_empty():
-		return Vector3.ZERO
-	var flat: Vector2 = facts["home"] + _crowd_offset_for_person(id)
-	var phase := trip_phase(id)
-	if phase != "none":
-		# On a trade trip (#78): the road, never the home slot or a work spot.
-		var trip: Dictionary = facts["trip"]
-		var stop: Vector2 = trip["destination"] if phase == "outbound" else trip["origin"]
-		flat = stop + _crowd_offset_for_person(id)
-	elif facts["target_kind"] != "Home":
-		var away_ticks: int = facts["depart_tick"]
-		var back_ticks: int = facts["return_depart_tick"]
-		if _estimated_tick >= float(away_ticks) and _estimated_tick < float(back_ticks):
-			var offset := _crowd_offset_for_person(id * 7919 + 1) if facts["target_kind"] == "Field" else _gathering_offset_for_person(id)
-			flat = _work_point_for(id, facts) + offset
-	return Vector3(flat.x, _height_sampler.call(flat.x, flat.y) if _height_sampler.is_valid() else 0.0, flat.y)
+		return Vector2.ZERO
+	var slots: Dictionary = _agent_slots.get(id, {})
+	if slots.is_empty():
+		_agent_slots[id] = slots
+	if facts["trip"] != null:
+		var phase := trip_phase(id)
+		if phase != "none":
+			# On a trade trip (#78): the road, never the home slot or a work spot.
+			var key := "dest" if phase == "outbound" else "origin"
+			if not slots.has(key):
+				var trip: Dictionary = facts["trip"]
+				slots[key] = (trip["destination"] if phase == "outbound" else trip["origin"]) + _crowd_offset_for_person(id)
+			return slots[key]
+	if facts["target_kind"] != "Home" and _estimated_tick >= float(facts["depart_tick"]) and _estimated_tick < float(facts["return_depart_tick"]):
+		if slots.has("work"):
+			return slots["work"]
+		var is_field: bool = facts["target_kind"] == "Field"
+		var offset := _crowd_offset_for_person(id * 7919 + 1) if is_field else _gathering_offset_for_person(id)
+		var work: Vector2 = _work_point_for(id, facts) + offset
+		# A field slot follows the dressing layout, so it is only cached when the
+		# layout can say it changed (see _sync_slot_cache).
+		if not is_field or _slot_layout_version != -1:
+			slots["work"] = work
+		return work
+	if not slots.has("home"):
+		slots["home"] = facts["home"] + _crowd_offset_for_person(id)
+	return slots["home"]
+
+## Drops every cached field slot when the village dressing re-laid its fields,
+## so a walked-to field can never disagree with a drawn one. A dressing that
+## cannot report a layout version (-1) is never cached for fields.
+func _sync_slot_cache() -> void:
+	var version := -1
+	if _village_dressing != null and _village_dressing.has_method("layout_version"):
+		version = int(_village_dressing.layout_version())
+	if version == _slot_layout_version:
+		return
+	_slot_layout_version = version
+	for slots: Dictionary in _agent_slots.values():
+		slots.erase("work")
 
 ## Moves every agent toward its goal at a natural walking pace in real time:
 ## WALK_SPEED_UNITS_PER_SECOND at 1x, scaled by the playback speed so faster
@@ -548,29 +617,51 @@ func _resolve_agent_position(id: int) -> Vector3:
 ## above WALKING_VISIBLE_MAX_SPEED walking is not drawn and agents snap to their
 ## goal (decision M4).
 func _advance_agents(delta: float) -> void:
+	_sync_slot_cache()
+	_advance_frame += 1
+	_route_plans_this_frame = 0
 	var snap := _playback_speed > WALKING_VISIBLE_MAX_SPEED
 	var step := WALK_SPEED_UNITS_PER_SECOND * float(_playback_speed) * delta
+	var has_sampler := _height_sampler.is_valid()
 	for id in _agent_nodes.keys():
 		var node: Node3D = _agent_nodes[id]
-		var goal := _resolve_agent_position(id)
+		var goal_flat := _resolve_agent_goal(id)
 		if _agent_facts.get(id, {}).get("trip") != null and _agent_labels.has(id):
 			_agent_labels[id].text = _label_text_for(id, _agent_activity.get(id, "Idle"))
 		var current := Vector2(node.position.x, node.position.z)
-		var goal_flat := Vector2(goal.x, goal.z)
+		if current.distance_squared_to(goal_flat) < STATIONARY_EPSILON_SQUARED:
+			_hold_agent(id, node, has_sampler)
+			continue
 		var next := goal_flat
 		var heading := goal_flat - current
 		if snap:
 			_agent_routes.erase(id)
 		else:
 			var route := _route_for(id, current, goal_flat)
+			if route.is_empty():
+				continue  # Over this frame's planning cap; it sets off on a following frame.
 			next = _follow_route(route, current, step)
 			heading = (route["points"][mini(route["next"], route["points"].size() - 1)] as Vector2) - current
-		var height: float = _height_sampler.call(next.x, next.y) if _height_sampler.is_valid() else 0.0
+		var height: float = _height_sampler.call(next.x, next.y) if has_sampler else 0.0
 		node.position = Vector3(next.x, height, next.y)
 		var is_walking := next != current and heading.length() > 0.05
 		if is_walking:
 			node.rotation.y = atan2(heading.x, heading.y)
 		_set_agent_animation(id, WALK_ANIMATION if is_walking else IDLE_ANIMATION)
+
+## An agent already standing on its goal: it stands still and idles. Skipping
+## the full walk leaves its transform untouched (moving an Area3D every frame
+## costs even when nothing changed), but it still re-seats on the terrain every
+## HOLD_REGROUND_FRAMES frames, staggered by id, so ground that was streamed in
+## or reshaped after it arrived is followed within a fraction of a second.
+func _hold_agent(id: int, node: Node3D, has_sampler: bool) -> void:
+	if _playback_speed > WALKING_VISIBLE_MAX_SPEED:
+		_agent_routes.erase(id)
+	_set_agent_animation(id, IDLE_ANIMATION)
+	if has_sampler and (_advance_frame + id) % HOLD_REGROUND_FRAMES == 0:
+		var height: float = _height_sampler.call(node.position.x, node.position.z)
+		if not is_equal_approx(height, node.position.y):
+			node.position.y = height
 
 ## How many villagers are mid-walk, and how many of those follow a route with
 ## waypoints between start and goal rather than a straight line.
@@ -589,6 +680,9 @@ func walking_route_counts() -> Dictionary:
 func _route_for(id: int, from: Vector2, goal: Vector2) -> Dictionary:
 	var route: Dictionary = _agent_routes.get(id, {})
 	if route.is_empty() or (route["goal"] as Vector2).distance_to(goal) > ROUTE_GOAL_TOLERANCE:
+		if _route_plans_this_frame >= MAX_ROUTE_PLANS_PER_FRAME:
+			return route
+		_route_plans_this_frame += 1
 		# Someone already standing on their goal has nowhere to route to.
 		var points := PackedVector2Array([from, goal]) if from.distance_to(goal) < ROUTE_GOAL_TOLERANCE else _route_to(id, from, goal)
 		route = {"goal": goal, "points": points, "next": 1}
@@ -645,7 +739,12 @@ func _set_agent_animation(id: int, animation: String) -> void:
 	var animator: AnimationPlayer = _agent_animators.get(id)
 	if animator == null or not animator.has_animation(animation):
 		return
-	animator.speed_scale = float(mini(_playback_speed, WALKING_VISIBLE_MAX_SPEED)) if animation == WALK_ANIMATION else 1.0
+	var walk_speed := mini(_playback_speed, WALKING_VISIBLE_MAX_SPEED)
+	var code := walk_speed if animation == WALK_ANIMATION else -1
+	if _agent_anim_codes.get(id, -2) == code:
+		return
+	_agent_anim_codes[id] = code
+	animator.speed_scale = float(walk_speed) if animation == WALK_ANIMATION else 1.0
 	if animator.current_animation != animation:
 		# glTF clips import as one-shots; a villager walks or stands for as long
 		# as it takes, so both clips must loop.

@@ -100,6 +100,11 @@ func _ready() -> void:
 		_capture(capture_dir)
 
 func _process(_delta: float) -> void:
+	var ground_started := PerfZones.begin()
+	_process_ground()
+	PerfZones.end("ground_view.process", ground_started)
+
+func _process_ground() -> void:
 	_sync_villager_blockers()
 	if mode == Mode.GROUND:
 		_pivot.global_position = _avatar.global_position + Vector3.UP * PIVOT_HEIGHT
