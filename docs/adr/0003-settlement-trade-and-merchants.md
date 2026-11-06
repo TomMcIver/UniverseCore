@@ -126,7 +126,7 @@ Readings: the threshold, profit share and staleness do nothing here; the merchan
 
 Added with the harness, none of which changes an existing world: `SimulationConfig::trade_enabled` (default true, not saved, for the no-trade comparison) and the compile-time overrides in `trade_tuning.hpp` (defaults equal the previous constants).
 
-### Recommended follow-up (not done here)
+### Recommended follow-up (steps 1 and 2 done under #86, see the last section)
 
 Make trade actually move goods and coin, then recalibrate with this harness:
 
@@ -134,3 +134,50 @@ Make trade actually move goods and coin, then recalibrate with this harness:
 2. **Give settlements founded by fission coin.** A fission should hand the new settlement its share of the founder's commons coin (a conserved transfer) so it can buy. This changes world outcomes, so it needs a fresh look at `scenarios/demo.json`, `tests/demo_scenario_tests.cpp` and `universe_demo_seed_search`.
 3. **Let coin flow both ways.** A one-way flow from buyers to sellers ends when buyers run out; sellers should spend, or trips should carry goods in both directions.
 4. After 1-3, rerun the 64-seed pair and the sweep. The margin threshold only becomes selective once prices stop sitting at the ceiling and floor, which may also need a wider cover target.
+
+## Fix: trips that sell (#86, schema v30)
+
+The recommended follow-up above, steps 1 and 2, built and re-measured. Step 3 was tried and removed (see "Tried and dropped"). Same harness, 64 seeds, 20 years, 200 people, paired with and without trade.
+
+### What changed
+
+- **A merchant remembers the buyer's means (step 1).** Each remembered-price row now also holds the coin the settlement's commons held when the merchant saw it (`MerchantPriceMemory::settlement_coin`, -1 for unknown). `evaluate_trip` caps the cargo at what that coin buys at the remembered price, so a destination known to be out of coin yields no trip and a trip for a few coin of dust is never offered. Coin is observed whenever prices are: on training (the home settlement and its neighbours), on arrival after the sale (so the merchant sees what is left), and on return home. A failed sale therefore no longer looks like a fresh high price: it records a buyer with no coin, and the one-day loop ends the first time it fails.
+- **Fission hands the daughter coin (step 2).** A settlement founded by fission takes a share of its source's commons coin, the source's coin times the households that move over the households it had, rounded down. The transfer only moves coin, so the total is still created once, at world creation. It is the one place a founding touches coin.
+- **Snapshot v30.** One trailing section: a count equal to the number of merchant memory rows, then the remembered coin of each row in order. Older files load with every balance unknown, which a merchant treats as "the buyer can pay" until its next visit (so an old save behaves as before for at most one trip per remembered destination). No new constant was added; the 50-unit load, quarter-of-stock cap, 20 percent share and thresholds are unchanged.
+
+### Result (64 seeds, 20 years)
+
+| Measure | Single start before | Single start after | Default layout before | Default layout after |
+|---|---|---|---|---|
+| Trips departed | 82,872 | 1,548 | 192,532 | 426 |
+| Trips that made a profit | 0 | 1,367 | 154 | 339 |
+| Trips that sold nothing | 82,845 (100%) | 8 | 192,247 (99.89%) | 4 |
+| Revenue from sales (coin) | 0 | 1,301,168 | 113,580 | 210,377 |
+| Coin outlay of all trips | 20,997,388 | 773,429 | 47,429,015 | 94,721 |
+| Seeds that sent a trip | 21 / 64 | 48 / 64 | 48 / 64 | 48 / 64 |
+| Mean price gap, trade / no-trade (permille) | 2,516 / 2,566 | 2,522 / 2,566 | 2,728 / 2,774 | 2,747 / 2,774 |
+| Mean food-only price gap, trade / no-trade | not measured | 1,369 / 1,362 | not measured | 1,899 / 1,905 |
+| Final population, trade / no-trade (sum) | 14,535 / 14,535 | 14,535 / 14,535 | 15,482 / 15,438 | 15,481 / 15,438 |
+| Person-days under food stress, trade / no-trade (sum) | 1,627,764 / 1,623,052 | 1,622,697 / 1,623,052 | 1,349,303 / 1,365,048 | 1,349,646 / 1,365,048 |
+| Active settlements with no coin at the end | 184 | 61 | 28 | 29 |
+| Worst population ratio, trade / no-trade | 1.000 | 1.000 | 1.000 | 0.996 |
+
+Invariants held on all 128 runs, daily: total coin (settlements, households, coin on trips) unchanged, no negative balance, one trip per merchant, prices in range, a trip never carries more than the buyer is remembered able to pay. The committed demo world (seed 39, single settlement) now sends 9 trips in 20 years and 8 of the 9 profit; `tests/demo_scenario_tests.cpp` asserts at least one departure and one sale and still passes with the same seed, so `scenarios/demo.json` is unchanged.
+
+### Honest reading
+
+- **The loop is fixed.** Trips that sold nothing fell from 99.9 percent to under 1 percent, and the harness's 192,000 futile round trips are now a few hundred real ones.
+- **Trade is still small.** 2,125 units moved in 20 years on the default layout, 10,758 on the single start, over 64 seeds each. It changes population by +0.3 percent on the default layout and not at all on the single start.
+- **Prices barely converge.** The all-goods gap falls 1.7 percent (single) and 1.0 percent (default) against no trade. The food gap, the only good this world moves in any quantity, is flat (1,369 against 1,362, 1,899 against 1,905). Most of the spread is structural: wood, stone, timber and tools sit at the 4x ceiling in every settlement that holds none, and no trade can close a gap for a good nobody makes.
+- **The binding constraint is now the fixed money supply.** A buyer's coin is a few thousand; a merchant sells until it is spent and the merchant (correctly) stops. That coin goes to the seller's commons and stays there, because nothing yet makes a seller spend. Trade is limited by where the coin is, which is what ADR 0003 accepted when it fixed the supply.
+- **Coin still concentrates.** The richest settlement holds 87 percent of the coin on the single start and 30 percent on the default layout (mean over seeds), and 61 active single-start settlements end with no coin (of 184 before). Fission coin spreads coin out; sales into a few buyers and back to a few sellers concentrate it again.
+
+### Tried and dropped: goods home (step 3)
+
+A merchant that has sold bought goods at the destination with the proceeds (the best margin against its remembered home prices, paid after holding back the household's share) and carried them home, so the coin it spent returned to the buyer. It was written, conserved and tested, and was removed because it almost never fires: in the sampled seeds a merchant carried goods home on one trip in 20 years of 12 default seeds and none in 12 single-start seeds. These worlds produce food and almost nothing else (wood, stone, timber and tools are at zero stock in most settlements), so a buyer has nothing a seller wants. Two-way flow needs a second good that settlements actually make and want, which belongs to a resource-system change, not to trade. The same reason limits "a buyer who was broke is retried after an expiry": expiring the remembered balance after 60 days was tried and made things worse (2,889 trips on the single start with 91 percent selling nothing, and 4 percent more person-days under stress), so a remembered balance stays until the merchant next sees the settlement.
+
+### Left for later
+
+- A reason for sellers to spend coin (a sink: construction paid in coin, tool purchase, tax) so it returns to buyers.
+- More goods that settlements make and want, so a merchant has something to carry back.
+- Trade is still processed once a day on the food tick (#75).

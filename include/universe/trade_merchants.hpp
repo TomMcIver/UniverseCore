@@ -41,13 +41,22 @@ inline constexpr std::uint64_t kMaxMerchantsPerSettlement = UNIVERSE_TRADE_MAX_M
 // saw there at the next. First value, calibrated by #76.
 inline constexpr std::int64_t kMerchantMemoryStaleDays = UNIVERSE_TRADE_STALE_DAYS;
 
-// What a merchant last saw of one settlement's price for one resource.
+// A remembered settlement coin balance of "unknown" (a snapshot from before v30,
+// which stored none): the merchant assumes the buyer can pay.
+inline constexpr std::int64_t kCoinUnknown = -1;
+
+
+// What a merchant last saw of one settlement's price for one resource, and of how
+// much coin that settlement's commons held when it was seen (#86). The coin is
+// what the merchant knows of the buyer's means: a price at which nobody can pay
+// is not a price worth carrying goods to.
 struct MerchantPriceMemory {
     std::uint64_t merchant_id{};
     std::uint64_t settlement_id{};
     ResourceType resource{ResourceType::Food};
     std::int64_t price_millicoin{};
     SimulationTime seen_at{};
+    std::int64_t settlement_coin{kCoinUnknown};
 
     [[nodiscard]] bool operator==(const MerchantPriceMemory& other) const = default;
 };
@@ -55,6 +64,7 @@ struct MerchantPriceMemory {
 // Whether a price seen at `seen_at` is still current at `now`. A price dated in
 // the future is never current.
 [[nodiscard]] bool remembered_price_is_current(SimulationTime seen_at, SimulationTime now) noexcept;
+
 
 struct PriceMargin {
     ResourceType resource{ResourceType::Food};

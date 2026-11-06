@@ -10,6 +10,7 @@
 #pragma once
 
 #include "universe/resources.hpp"
+#include "universe/trade_merchants.hpp"
 #include "universe/time.hpp"
 #include "universe/trade_tuning.hpp"
 
@@ -109,15 +110,18 @@ struct TripOffer {
 };
 
 // The cargo is the least of the carrying capacity, the share of stock the
-// commons may send and what its coin can pay for. Empty when nothing can be
-// carried or the expected profit is below kMinimumTripProfitCoin: an unprofitable
-// trip is never offered.
+// commons may send and what its coin can pay for. It is also capped at what the
+// coin the merchant remembers the destination holding can buy (#86): a destination
+// known to be out of coin yields no trip, and an unknown balance (kCoinUnknown)
+// caps nothing. Empty when nothing can be carried or the expected profit is below
+// kMinimumTripProfitCoin: an unprofitable trip is never offered.
 [[nodiscard]] std::optional<TripOffer> evaluate_trip(
     std::int64_t origin_price_millicoin,
     std::int64_t remembered_destination_price_millicoin,
     std::int64_t origin_stock,
     std::int64_t origin_coin,
-    const TradeCapability& capability) noexcept;
+    const TradeCapability& capability,
+    std::int64_t remembered_destination_coin = kCoinUnknown) noexcept;
 
 // Where a returning merchant's coin goes. The two parts always sum to the coin
 // carried: nothing is created or lost to rounding.

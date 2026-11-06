@@ -5924,12 +5924,25 @@ void Simulation::process_settlement_founding(const std::uint64_t demographic_yea
         }
         // The split is the response to strain, so the source starts counting again.
         source->days_under_food_strain = 0U;
+        // The daughter takes a share of the commons coin in proportion to the
+        // households it takes (#86), so it can buy as well as sell. The coin only
+        // moves: what the daughter gets, the source loses.
+        std::int64_t coin_for_daughter = 0;
+        {
+            const auto household_total = static_cast<std::int64_t>(plan->households.size());
+            std::int64_t scaled = 0;
+            coin_for_daughter = checked_mul_i64(source->coin, static_cast<std::int64_t>(move_count), scaled)
+                ? scaled / household_total
+                : (source->coin / household_total) * static_cast<std::int64_t>(move_count);
+            source->coin -= coin_for_daughter;
+        }
 
         state_.settlements.push_back(Settlement{
             .id = new_settlement_id,
             .region_id = region_id,
             .active = true,
             .access_share_points = assigned_share,
+            .coin = coin_for_daughter,
         });
         assign_position_for_new_settlement(new_settlement_id, region_id);
         state_.settlement_aggregates.push_back(SettlementAggregateState{
@@ -6733,7 +6746,8 @@ void Simulation::process_merchant_recruitment(const std::uint64_t demographic_ye
         std::vector<SettlementId> known{settlement_id};
         known.insert(known.end(), neighbour_ids.begin(), neighbour_ids.end());
         for (const auto known_id : known) {
-            remember_prices(chosen->id, known_id, prices.at(known_id));
+            const auto* known_settlement = find_settlement(known_id);
+            remember_prices(chosen->id, known_id, prices.at(known_id), known_settlement == nullptr ? kCoinUnknown : known_settlement->coin);
         }
     }
 
@@ -6750,7 +6764,8 @@ bool Simulation::merchant_observes_settlement_prices(const PersonId merchant_id,
     if (!current.has_value()) {
         return false;
     }
-    remember_prices(merchant_id, settlement_id, *current);
+    const auto* observed = find_settlement(settlement_id);
+    remember_prices(merchant_id, settlement_id, *current, observed == nullptr ? kCoinUnknown : observed->coin);
     prune_merchant_memory();
     return true;
 }
